@@ -1,0 +1,33 @@
+@import "tailwindcss";
+
+/* dark 变体绑定 html.dark class（与 vueuse useDark 一致） */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* 设计令牌：自建 CSS 变量（运行时由 stores/app.ts 写 --yz-primary；暗色整套覆盖）。
+   不依赖 UI 库 CSS 变量——Naive UI 主题走 JS themeOverrides，不暴露 CSS 变量 */
+:root {
+  --yz-primary: #10b981;
+  --yz-bg-page: #f2f3f5;
+  --yz-bg-card: #ffffff;
+  --yz-text: #1f2329;
+  --yz-text-secondary: #86909c;
+  --yz-border: #e5e6eb;
+}
+html.dark {
+  --yz-bg-page: #101014;
+  --yz-bg-card: #18181c;
+  --yz-text: #e5e6eb;
+  --yz-text-secondary: #9aa0a6;
+  --yz-border: #2a2b30;
+}
+
+/* Tailwind 工具类引用令牌：改主题色 / 切暗色时 bg-*/text-*/border-* 自动跟随 */
+@theme {
+  --color-primary: var(--yz-primary);
+  --color-bg-page: var(--yz-bg-page);
+  --color-bg-card: var(--yz-bg-card);
+  --color-text: var(--yz-text);
+  --color-text-secondary: var(--yz-text-secondary);
+  --color-border: var(--yz-border);
+  --radius-card: 12px;
+}

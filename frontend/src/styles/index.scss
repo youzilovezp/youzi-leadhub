@@ -1,0 +1,32 @@
+/* 全局样式（Tailwind 入口在 main.ts 直连导入，勿在此 @import——SCSS 内联会使其失效） */
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue',
+    Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  color: var(--yz-text);
+  background: var(--yz-bg-page);
+  transition: background-color 0.2s;
+}
+
+a {
+  color: var(--yz-primary);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+/* 页面统一容器：add_module.py 生成的业务页面依赖此类 */
+.page {
+  background: var(--yz-bg-card);
+  border-radius: var(--radius-card);
+  padding: 16px;
+  border: 1px solid var(--yz-border);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.04);
+}

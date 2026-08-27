@@ -1,0 +1,72 @@
+# 一键启动 Leadhub 所有依赖（含 backend）
+# 用法（admin 模式 .env 在 backend/，必须显式传 --env-file，否则自定义端口不生效）：
+#   docker compose --env-file ./backend/.env up -d
+# 配套 UI：adminer（端口 8080，看数据库；也可只起单个服务：up -d adminer）
+
+services:
+  backend:
+    build:
+      # server 模式 backend 文件直接放项目根;admin 模式在 backend/ 子目录
+      context: ./backend
+      dockerfile: docker/Dockerfile
+    container_name: youzi-leadhub-backend
+    env_file: ./backend/.env
+    environment:
+      # 在容器内，DB / Redis 用 compose service name
+      POSTGRES_HOST: youzi-leadhub-postgres
+
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    restart: unless-stopped
+    healthcheck:
+      # /readyz 含 DB ping，503 表示未就绪。slim 镜像无 wget，用 python urllib 替代。
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/readyz', timeout=3).status == 200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  postgres:
+    image: postgres:16.4-alpine
+    container_name: youzi-leadhub-postgres
+    # admin 模式 .env 在 backend/，server 模式在根目录；env_file 让容器直接拿到 .env 里的所有 KEY=VAL
+    env_file: ./backend/.env
+    # POSTGRES_PASSWORD 由 env_file 提供——直接复用即可，不要在 environment 再写 ${POSTGRES_PASSWORD}，
+    # 否则 docker compose 会做 compose-time 插值（读 shell env 而不是 env_file），结果是空字符串。
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-youzi-leadhub}
+      POSTGRES_DB: ${POSTGRES_DB:-youzi-leadhub}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-youzi-leadhub}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  adminer:
+    # 数据库管理 UI（非技术用户必备）：http://localhost:8080
+    # 登录：Server=youzi-leadhub-postgres / Username=见 .env / Password=见 .env / Database=见 .env
+    image: adminer:4.8.1
+    container_name: youzi-leadhub-adminer
+    ports:
+      - "8080:8080"
+    environment:
+      ADMINER_DEFAULT_SERVER: youzi-leadhub-postgres
+      # 复用本机 PG 时：adminer 页面 Server 填 host.docker.internal（容器访问宿主机）
+      ADMINER_DESIGN: pepa-linha-dark
+    # 不 depends_on postgres——复用本机 PG 时 up -d adminer 不能强拉容器（5432 端口冲突）
+    # adminer 是独立 UI，运行时自己填连接信息，无需等 postgres 就绪
+
+
+
+volumes:
+  postgres_data:
+    name: youzi-leadhub_postgres_data
+

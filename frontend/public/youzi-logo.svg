@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="240" height="240" role="img" aria-label="youzi logo">
+  <defs>
+    <clipPath id="body"><circle cx="120" cy="146" r="80"/></clipPath>
+    <clipPath id="mouth">
+      <path d="M103,165 Q120,171 137,165 C135,186 126,193 120,193 C114,193 105,186 103,165 Z"/>
+    </clipPath>
+  </defs>
+
+  <!-- 果身：赛璐璐上色（平涂 + 硬边阴影） -->
+  <g clip-path="url(#body)">
+    <circle cx="120" cy="146" r="80" fill="#FFC93C"/>
+    <circle cx="172" cy="202" r="86" fill="#FB8C00"/>
+    <circle cx="74" cy="90" r="62" fill="#FFE59A"/>
+    <!-- 油胞点点 -->
+    <g fill="#F0932B">
+      <circle cx="64" cy="132" r="4"/>
+      <circle cx="178" cy="126" r="3.5"/>
+      <circle cx="192" cy="164" r="4"/>
+      <circle cx="54" cy="170" r="3.5"/>
+      <circle cx="98" cy="210" r="3.5"/>
+      <circle cx="146" cy="212" r="4"/>
+    </g>
+  </g>
+
+  <!-- 粗描边（漫画风） -->
+  <circle cx="120" cy="146" r="80" fill="none" stroke="#4E2E0E" stroke-width="8"/>
+
+  <!-- 果蒂（双层描边） -->
+  <path d="M120,62 C118,53 120,46 126,40" fill="none" stroke="#4E2E0E" stroke-width="13" stroke-linecap="round"/>
+  <path d="M120,62 C118,53 120,46 126,40" fill="none" stroke="#8D6E63" stroke-width="6.5" stroke-linecap="round"/>
+
+  <!-- 叶子 -->
+  <path d="M124,44 C116,16 90,4 62,10 C64,35 93,49 124,44 Z" fill="#A5CE4B" stroke="#4E2E0E" stroke-width="6" stroke-linejoin="round"/>
+  <path d="M114,38 C104,27 92,19 78,15" fill="none" stroke="#6B8E23" stroke-width="3.5" stroke-linecap="round"/>
+
+  <!-- 漫画星星 -->
+  <path d="M186,58 L190,67 L199,71 L190,75 L186,84 L182,75 L173,71 L182,67 Z" fill="#FFCA28" stroke="#4E2E0E" stroke-width="3" stroke-linejoin="round"/>
+  <path d="M52,78 L55,84 L61,87 L55,90 L52,96 L49,90 L43,87 L49,84 Z" fill="#FFCA28" stroke="#4E2E0E" stroke-width="2.5" stroke-linejoin="round"/>
+
+  <!-- 表情：大亮眼睛 + 张嘴笑 + 暖色腮红 -->
+  <circle cx="94" cy="150" r="10.5" fill="#42281A"/>
+  <circle cx="146" cy="150" r="10.5" fill="#42281A"/>
+  <circle cx="91" cy="146.5" r="3.6" fill="#fff"/>
+  <circle cx="143" cy="146.5" r="3.6" fill="#fff"/>
+  <circle cx="97.5" cy="153.5" r="1.9" fill="#fff"/>
+  <circle cx="149.5" cy="153.5" r="1.9" fill="#fff"/>
+
+  <path d="M103,165 Q120,171 137,165 C135,186 126,193 120,193 C114,193 105,186 103,165 Z" fill="#5D2A1B" stroke="#4E2E0E" stroke-width="4" stroke-linejoin="round"/>
+  <g clip-path="url(#mouth)">
+    <ellipse cx="120" cy="190" rx="12" ry="7" fill="#FF6F61"/>
+  </g>
+
+  <ellipse cx="68" cy="170" rx="12" ry="7.5" fill="#FF7043" opacity=".75"/>
+  <ellipse cx="172" cy="170" rx="12" ry="7.5" fill="#FF7043" opacity=".75"/>
+</svg>

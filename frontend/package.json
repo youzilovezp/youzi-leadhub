@@ -1,0 +1,51 @@
+{
+  "name": "youzi-leadhub-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "lint": "eslint . --fix",
+    "format": "prettier --write 'src/**/*.{ts,vue,scss}'",
+    "type-check": "vue-tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@tailwindcss/vite": "4.3.3",
+    "@vueuse/core": "14.4.0",
+    "axios": "^1.6.7",
+    "echarts": "6.1.0",
+    "pinia": "^2.1.7",
+    "tailwindcss": "4.3.3",
+    "vue": "^3.4.21",
+    "vue-echarts": "8.1.0",
+    "vue-router": "~4.3.0",
+    "naive-ui": "^2.43.0",
+    "@vicons/ionicons5": "^0.13.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.20",
+    "@vitejs/plugin-vue": "^5.0.4",
+    "@vue/eslint-config-typescript": "^14.6.0",
+    "@vue/test-utils": "^2.4.5",
+    "@vue/tsconfig": "^0.5.1",
+    "eslint": "^9.35.0",
+    "eslint-plugin-vue": "^10.10.0",
+    "globals": "^15.15.0",
+    "happy-dom": "^14.12.0",
+    "prettier": "^3.2.5",
+    "sass": "^1.71.1",
+    "typescript": "~5.4.0",
+    "unplugin-vue-components": "^0.26.0",
+    "vite": "^5.1.0",
+    "vitest": "^1.5.0",
+    "vue-tsc": "^2.0.4"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "description": "Leadhub 前端"
+}
