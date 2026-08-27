@@ -121,6 +121,23 @@ class JobPostingCollector(Collector):
 
         await crawler.run(urls)
 
+        # 抓取结果断言：crawlee 请求全挂时 run() 正常返回（重试耗尽只记统计），
+        # 不拦就「completed 0 产出」假成功。零成功请求 → 任务 failed 让用户重跑。
+        stats = crawler.statistics.state
+        if stats.requests_finished == 0:
+            raise BusinessError(
+                code=50001,
+                message=(
+                    f"全部 {len(urls)} 个页面抓取失败（站点限流/网络异常），"
+                    f"共重试 {stats.requests_failed} 次——稍后重跑或降低 max_pages"
+                ),
+            )
+        if stats.requests_failed:
+            await ctx.log(
+                "warn",
+                f"部分页面失败：成功 {stats.requests_finished} / 失败 {stats.requests_failed}",
+            )
+
 
 def _job_to_draft(
     job: dict[str, Any], geo_country: str | None, page_url: str
