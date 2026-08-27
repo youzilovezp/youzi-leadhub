@@ -133,6 +133,11 @@ def test_detect_email_rejects_asset_filenames():
     assert detect_email('<img src="ff-shopify-logo_250x@2x.png">') is None
 
 
+def test_detect_email_rejects_instrumentation_domains():
+    # Wix 站点正文里的 Sentry 埋点邮箱，不是联系方式
+    assert detect_email('var s="605a7baede844d278b89dc95ae0a9123@sentry-next.wixpress.com"') is None
+
+
 def test_detect_whatsapp_negative():
     assert detect_whatsapp(["<html>nothing</html>"]) == (False, None)
 

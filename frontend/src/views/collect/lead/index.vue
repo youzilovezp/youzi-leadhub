@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { h, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, h, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { NButton, NTag, type DataTableColumns, type FormInst, type FormRules } from 'naive-ui'
 import * as collectApi from '@/api/collect'
-import type { Lead } from '@/api/collect'
+import type { Lead, GeoOptions } from '@/api/collect'
 import { formatTime } from '@/utils/format'
 import { message, confirm } from '@/utils/feedback'
 
@@ -12,6 +12,12 @@ const loading = ref(false)
 const tableData = ref<Lead[]>([])
 const total = ref(0)
 const checkedKeys = ref<number[]>([])
+const geo = ref<GeoOptions>({ countries: [], cities_by_country: {} })
+const industryOptions = ref<{ label: string; value: string }[]>([])
+
+async function fetchIndustryOptions() {
+  industryOptions.value = await collectApi.getIndustryOptions()
+}
 
 const query = reactive({
   page: 1,
@@ -19,7 +25,7 @@ const query = reactive({
   keyword: '',
   country: '',
   industry: '',
-  source: '' as '' | 'google_maps' | 'job_posting' | 'website_enrich' | 'manual',
+  source: '' as string,
   min_score: null as number | null,
   // naive-ui select 的 boolean 值类型不兼容，用字符串承载
   whatsapp: '' as '' | 'hit' | 'miss',
@@ -30,10 +36,17 @@ function whatsappFilter(): boolean | undefined {
 }
 
 const sourceOptions = [
+  { label: 'OpenStreetMap', value: 'osm_overpass' },
   { label: 'Google Maps', value: 'google_maps' },
   { label: '招聘监控', value: 'job_posting' },
+  { label: '富化检测', value: 'website_enrich' },
   { label: '手工录入', value: 'manual' },
 ]
+
+/** 手工录入：国家选中的城市建议（可搜索可手输） */
+const cityOptions = computed(() =>
+  (geo.value.cities_by_country[form.country] || []).map((c) => ({ label: c, value: c }))
+)
 
 const stats = ref({ total_leads: 0, whatsapp_leads: 0, high_intent_leads: 0, active_tasks: 0 })
 
@@ -90,6 +103,7 @@ async function handleSubmit() {
   message.success('已录入（命中去重键会合并到已有线索）')
   dialogVisible.value = false
   fetchData()
+  fetchIndustryOptions()
 }
 
 async function handleDelete(row: Lead) {
@@ -98,6 +112,7 @@ async function handleDelete(row: Lead) {
   await collectApi.deleteLead(row.id)
   message.success('已删除')
   fetchData()
+  fetchIndustryOptions()
 }
 
 // ---------- 批量检测 WhatsApp（隐式任务） ----------
@@ -202,10 +217,12 @@ function resetQuery() {
   fetchData()
 }
 
-onMounted(() => {
+onMounted(async () => {
   fetchData()
   fetchStats()
   statsTimer = setInterval(fetchStats, 15000)
+  geo.value = await collectApi.getGeoOptions()
+  fetchIndustryOptions()
 })
 onUnmounted(() => {
   if (statsTimer) clearInterval(statsTimer)
@@ -233,8 +250,23 @@ onUnmounted(() => {
     <n-card size="small" class="mb-4">
       <div class="flex flex-wrap items-center gap-3">
         <n-input v-model:value="query.keyword" placeholder="名称/邮箱/域名/电话/城市" clearable style="width: 220px" @keyup.enter="() => { query.page = 1; fetchData() }" />
-        <n-input v-model:value="query.country" placeholder="国家 (MY)" clearable style="width: 110px" />
-        <n-input v-model:value="query.industry" placeholder="行业" clearable style="width: 130px" />
+        <n-select
+          v-model:value="query.country"
+          :options="(geo.countries as any)"
+          placeholder="国家"
+          clearable
+          filterable
+          tag
+          style="width: 170px"
+        />
+        <n-select
+          v-model:value="query.industry"
+          :options="(industryOptions as any)"
+          placeholder="行业"
+          clearable
+          filterable
+          style="width: 150px"
+        />
         <n-select v-model:value="query.source" :options="sourceOptions" placeholder="来源" clearable style="width: 130px" />
         <n-input-number v-model:value="query.min_score" placeholder="最低分" clearable style="width: 110px" :min="0" />
         <n-select
@@ -259,6 +291,7 @@ onUnmounted(() => {
 
     <n-data-table
       v-model:checked-row-keys="checkedKeys"
+      remote
       :columns="columns"
       :data="tableData"
       :loading="loading"
@@ -285,10 +318,24 @@ onUnmounted(() => {
           <n-input v-model:value="form.name" placeholder="必填" />
         </n-form-item>
         <n-form-item label="国家">
-          <n-input v-model:value="form.country" placeholder="ISO2，如 MY" />
+          <n-select
+            v-model:value="form.country"
+            :options="(geo.countries as any)"
+            placeholder="选择或输入 2 位国家码"
+            clearable
+            filterable
+            tag
+          />
         </n-form-item>
         <n-form-item label="城市">
-          <n-input v-model:value="form.city" />
+          <n-select
+            v-model:value="form.city"
+            :options="(cityOptions as any)"
+            :placeholder="form.country ? '选择建议城市或输入自定义' : '先选国家出建议，也可直接输入'"
+            clearable
+            filterable
+            tag
+          />
         </n-form-item>
         <n-form-item label="行业">
           <n-input v-model:value="form.industry" />
