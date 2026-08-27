@@ -47,6 +47,12 @@ export default defineConfig(async ({ mode }) => {
         '@': fileURLToPath(new URL('./src', import.meta.url)),
       },
     },
+    css: {
+      preprocessorOptions: {
+        // modern-compiler：Dart Sass 2.0 将移除 legacy JS API（消除 Deprecation Warning）
+        scss: { api: 'modern-compiler' },
+      },
+    },
     server: {
       host: '0.0.0.0',
       // 已在配置阶段探测出空闲端口——strictPort 防止再静默漂移
