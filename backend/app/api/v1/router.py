@@ -1,0 +1,11 @@
+"""API v1 路由聚合。"""
+
+from fastapi import APIRouter
+
+from app.api.v1.endpoints import auth, collect, roles, users
+
+api_router = APIRouter()
+api_router.include_router(auth.router, prefix="/auth", tags=["认证"])
+api_router.include_router(users.router, prefix="/users", tags=["用户管理"])
+api_router.include_router(roles.router, prefix="/roles", tags=["角色管理"])
+api_router.include_router(collect.router, prefix="/collect", tags=["线索采集"])

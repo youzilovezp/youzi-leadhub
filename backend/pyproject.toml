@@ -1,0 +1,71 @@
+[project]
+name = "youzi-leadhub-backend"
+version = "0.1.0"
+description = "Leadhub 后端 API 服务"
+requires-python = ">=3.11"
+authors = [{ name = "Leadhub Team" }]
+readme = "后端说明.md"
+dependencies = [
+    # Web 框架
+    "fastapi>=0.110.0,<1.0",     # 锁 <1.0：防 future major break
+    # 锁定到 0.30.x：0.31+ 在 lifespan asynccontextmanager 下 yield 后
+    # "Application startup complete" 不打印，导致 uvicorn 一直返回 502。
+    "uvicorn[standard]>=0.27.0,<0.31.0",
+
+    # 数据库（默认 PostgreSQL；DB_TYPE=sqlite 时用 aiosqlite）
+    "sqlalchemy[asyncio]>=2.0.25,<2.1",  # 锁 <2.1
+    "alembic>=1.13.1,<2.0",      # 锁 <2.0
+    "asyncpg>=0.29.0",         # PostgreSQL 异步驱动（默认）
+    "psycopg2-binary>=2.9.9",  # PostgreSQL 同步驱动（alembic 用）
+    "aiosqlite>=0.20.0",       # SQLite 异步驱动（DB_TYPE=sqlite 时用）
+    # 配置 / 安全
+    "pydantic[email]>=2.6.0,<3.0",   # 锁 <3.0   # [email] 提供 EmailStr 校验
+    "pydantic-settings>=2.2.0,<3.0",  # 锁 <3.0
+    "pyjwt>=2.8.0",            # 推荐：pyjwt 比 python-jose 维护更活跃（CVE 风险更低）
+    "bcrypt>=4.0",            # 密码哈希（直接用 bcrypt，不再走 passlib）
+    "python-multipart>=0.0.9",
+
+    # 工具
+    "loguru>=0.7.2",          # 结构化日志（进 ELK / Loki）
+    "python-dotenv>=1.0.0",
+    "httpx[socks]>=0.27.0",  # [socks]：采集场景用户常挂 SOCKS 代理（ALL_PROXY），缺 socksio 会直接崩
+    "gunicorn>=21.2.0",     # 生产 WSGI 服务器（Dockerfile 用）
+
+    # 线索采集
+    "crawlee[beautifulsoup]>=1.9,<2",  # 爬虫引擎（Apify 开源，asyncio 原生；beautifulsoup extra 含 bs4+lxml）
+    "phonenumbers>=8.13,<9",           # 电话 E.164 归一化（libphonenumber 官方移植）
+    "tldextract>=5.1,<6",              # registrable domain 解析（公共后缀表，去重键的正确性依赖）
+    "APScheduler>=3.10,<4",            # 定时调度（3.x AsyncIOScheduler；4.x API 不兼容，锁死）
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.5",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.3.0,<0.9",  # 锁 <0.9：更高版本 isort(I001) 规则漂移会改写已生成代码
+    "mypy>=1.8.0",
+]
+# 反爬站点（jobstreet 等 Cloudflare 站）需要的 Playwright 支持
+collect = ["crawlee[beautifulsoup,playwright]>=1.9,<2"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "A", "C4", "DTZ", "PIE"]
+# E501 行长交给格式化器；N802/N806 豁免 pydantic Settings / 常量的大写惯例
+ignore = ["E501", "N802", "N806", "UP017"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+# 相对 pyproject.toml：admin 模式 cwd=backend/、app/ 也在 backend/;server 模式 cwd=根、app/ 也在根
+packages = ["app"]
