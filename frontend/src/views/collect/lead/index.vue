@@ -3,7 +3,7 @@ import { computed, h, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { NButton, NTag, type DataTableColumns, type FormInst, type FormRules } from 'naive-ui'
 import * as collectApi from '@/api/collect'
-import type { Lead, GeoOptions } from '@/api/collect'
+import type { Lead, GeoOptions, IndustryOption } from '@/api/collect'
 import { formatTime } from '@/utils/format'
 import { message, confirm } from '@/utils/feedback'
 
@@ -13,7 +13,16 @@ const tableData = ref<Lead[]>([])
 const total = ref(0)
 const checkedKeys = ref<number[]>([])
 const geo = ref<GeoOptions>({ countries: [], cities_by_country: {} })
-const industryOptions = ref<{ label: string; value: string }[]>([])
+const industryOptions = ref<IndustryOption[]>([])
+/** 筛选下拉选项：中文名（数量）；表格行业列也用这份数据显示中文 */
+const industrySelectOptions = computed(() =>
+  industryOptions.value.map((i) => ({ label: `${i.label}（${i.count}）`, value: i.value }))
+)
+
+function industryLabel(value: string | null): string {
+  if (!value) return '—'
+  return industryOptions.value.find((i) => i.value === value)?.label ?? value
+}
 
 async function fetchIndustryOptions() {
   industryOptions.value = await collectApi.getIndustryOptions()
@@ -154,7 +163,7 @@ const columns: DataTableColumns<Lead> = [
       ]),
   },
   { title: '国家/城市', key: 'country', width: 120, render: (row) => [row.country, row.city].filter(Boolean).join(' · ') },
-  { title: '行业', key: 'industry', width: 110, ellipsis: { tooltip: true } },
+  { title: '行业', key: 'industry', width: 110, ellipsis: { tooltip: true }, render: (row) => industryLabel(row.industry) },
   {
     title: '评分',
     key: 'score',
@@ -261,11 +270,11 @@ onUnmounted(() => {
         />
         <n-select
           v-model:value="query.industry"
-          :options="(industryOptions as any)"
+          :options="(industrySelectOptions as any)"
           placeholder="行业"
           clearable
           filterable
-          style="width: 150px"
+          style="width: 160px"
         />
         <n-select v-model:value="query.source" :options="sourceOptions" placeholder="来源" clearable style="width: 130px" />
         <n-input-number v-model:value="query.min_score" placeholder="最低分" clearable style="width: 110px" :min="0" />

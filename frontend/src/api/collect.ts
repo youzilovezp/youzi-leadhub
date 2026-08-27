@@ -160,9 +160,15 @@ export function getGeoOptions() {
   return request.get<GeoOptions, GeoOptions>('/collect/geo-options')
 }
 
-/** 线索行业筛选选项（库存 distinct，保证选项里有的就能查到） */
+/** 线索行业筛选选项（库存 distinct + 中文名 + 数量；value 保持原 token 保证筛选精确） */
+export interface IndustryOption {
+  label: string
+  value: string
+  count: number
+}
+
 export function getIndustryOptions() {
-  return request.get<ParamOption[], ParamOption[]>('/collect/industries')
+  return request.get<IndustryOption[], IndustryOption[]>('/collect/industries')
 }
 
 export function listCollectors() {
