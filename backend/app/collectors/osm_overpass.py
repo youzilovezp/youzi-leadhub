@@ -343,7 +343,7 @@ def _parse_bool(raw: Any) -> bool:
 
 class OsmOverpassCollector(Collector):
     name = "osm_overpass"
-    title = "OpenStreetMap 商家（免费）"
+    title = "开源地图商家（免费）"
     param_schema = [
         {
             "key": "country",
