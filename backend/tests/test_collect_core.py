@@ -231,3 +231,80 @@ async def test_upsert_skips_empty_name(db_session):
 
     with pytest.raises(ValueError):
         await upsert_lead(db_session, LeadDraft(source="manual", name="  "))
+
+
+# ---------- 修复回归（2026-08-27 复盘） ----------
+
+
+def test_parse_lead_ids():
+    """P1 回归：手动任务表单传字符串 "12,34"，不得按字符拆分/抛 ArgumentError。"""
+    from app.collectors.website_enrich import _parse_lead_ids
+
+    assert _parse_lead_ids("12, 34") == [12, 34]
+    assert _parse_lead_ids([5, 6]) == [5, 6]
+    assert _parse_lead_ids("") == []
+    assert _parse_lead_ids(None) == []
+    assert _parse_lead_ids("abc,,7") == [7]
+
+
+async def test_upsert_concurrent_same_company(db_session):
+    """P1 回归：两个并发 upsert 同一 dedupe_key，一个新建一个合并，不抛 IntegrityError。"""
+    import asyncio
+
+    from app.db.init_db import init_db
+    from app.db.session import async_session
+
+    await init_db()
+    draft = LeadDraft(source="google_maps", name="Race Co", website="https://race-co.example")
+
+    async def one():
+        async with async_session() as s:
+            lead, created = await upsert_lead(s, draft)
+            await s.commit()
+            return lead.id, created
+
+    results = await asyncio.gather(one(), one())
+    ids = {r[0] for r in results}
+    assert len(ids) == 1  # 同一行
+    assert sorted(r[1] for r in results) == [False, True]  # 一建一并
+
+
+async def test_scheduler_sync_skips_bad_cron(db_session):
+    """P0 回归：默认时区构造不崩 + 非法 cron 只告警不炸 sync。"""
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+    from app.db.init_db import init_db
+    from app.models.collect_task import CollectTask
+    from app.services import scheduler
+
+    await init_db()
+    s = AsyncIOScheduler()  # 修复后的构造方式：默认本地时区（IANA），不再抛 ZoneInfoNotFoundError
+    scheduler._scheduler = s
+    try:
+        db_session.add(CollectTask(name="t", collector="google_maps", cron_expr="not a cron"))
+        await db_session.commit()
+        await scheduler.sync()  # 不抛异常
+        assert s.get_jobs() == []
+    finally:
+        scheduler._scheduler = None
+
+
+def test_job_posting_company_level_mapping():
+    """岗位帖 → 公司级线索：社媒 URL 入 social、官网入 website、岗位 URL 入 job_urls。"""
+    from app.collectors.job_posting import _job_to_draft
+
+    job = {
+        "id": 1, "slug": "cs-whatsapp", "companyName": "Acme",
+        "company": {"code": "acme"},
+        "companyInfo": {"url": "https://facebook.com/acme"},
+        "googleLocation": {"addressComponents": {"city": "Manila"}},
+    }
+    d = _job_to_draft(job, "PH", "https://kalibrr.com/job-board?search=whatsapp")
+    assert d.name == "Acme" and d.country == "PH" and d.city == "Manila"
+    assert d.whatsapp_job is True and d.website is None
+    assert d.social == {"facebook": "https://facebook.com/acme"}
+    assert d.job_urls == ["https://kalibrr.com/c/acme/jobs/1/cs-whatsapp"]
+
+    d2 = _job_to_draft({**job, "companyInfo": {"url": "https://acme.ph"}}, "PH", "u")
+    assert d2.website == "https://acme.ph" and d2.social == {}
+    assert _job_to_draft({"companyName": None}, "PH", "u") is None  # 无名丢弃
