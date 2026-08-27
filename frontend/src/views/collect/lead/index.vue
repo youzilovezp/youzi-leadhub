@@ -39,16 +39,18 @@ const query = reactive({
   page: 1,
   page_size: 20,
   keyword: '',
-  country: '',
-  industry: '',
-  source: '' as string,
+  // n-select 初值必须 null：naive-ui 只在 null/undefined 时显示 placeholder，
+  // 空串 '' 会被当成已选值（空白显示）
+  country: null as string | null,
+  industry: null as string | null,
+  source: null as string | null,
   min_score: null as number | null,
   // naive-ui select 的 boolean 值类型不兼容，用字符串承载
-  whatsapp: '' as '' | 'hit' | 'miss',
+  whatsapp: null as 'hit' | 'miss' | null,
 })
 
 function whatsappFilter(): boolean | undefined {
-  return query.whatsapp === '' ? undefined : query.whatsapp === 'hit'
+  return !query.whatsapp ? undefined : query.whatsapp === 'hit'
 }
 
 const sourceOptions = [
@@ -63,6 +65,18 @@ const sourceOptions = [
 function sourceLabel(token: string): string {
   return sourceOptions.find((s) => s.value === token)?.label ?? token
 }
+
+/** 来源标签配色：不同来源一眼可辨 */
+const SOURCE_TAG_TYPES: Record<string, 'success' | 'warning' | 'info' | 'default'> = {
+  osm_overpass: 'success',
+  google_maps: 'warning',
+  job_posting: 'info',
+  website_enrich: 'default',
+  manual: 'default',
+}
+
+const MUTED = 'var(--yz-text-secondary,#666)'
+const PLACEHOLDER_GRAY = '#c2c5cc'
 
 /** 手工录入：国家选中的城市建议（可搜索可手输） */
 const cityOptions = computed(() =>
@@ -165,7 +179,7 @@ const columns: DataTableColumns<Lead> = [
     ellipsis: { tooltip: true },
     render: (row) =>
       h('span', null, [
-        row.name,
+        h('span', { style: 'font-weight:500' }, row.name),
         row.whatsapp_hit
           ? h(NTag, { size: 'small', type: 'success', style: 'margin-left:6px' }, { default: () => 'WA' })
           : null,
@@ -174,8 +188,27 @@ const columns: DataTableColumns<Lead> = [
           : null,
       ]),
   },
-  { title: '国家/城市', key: 'country', width: 150, render: (row) => [countryLabel(row.country), row.city].filter(Boolean).join(' · ') || '—' },
-  { title: '行业', key: 'industry', width: 110, ellipsis: { tooltip: true }, render: (row) => industryLabel(row.industry) },
+  {
+    title: '国家/城市',
+    key: 'country',
+    width: 150,
+    render: (row) =>
+      h('div', { style: 'line-height:1.45' }, [
+        countryLabel(row.country)
+          ? h('div', null, countryLabel(row.country))
+          : h('div', { style: `color:${PLACEHOLDER_GRAY}` }, '—'),
+        row.city ? h('div', { style: `font-size:12px;color:${MUTED}` }, row.city) : null,
+      ]),
+  },
+  {
+    title: '行业',
+    key: 'industry',
+    width: 110,
+    render: (row) =>
+      row.industry
+        ? h(NTag, { size: 'small', bordered: false, type: 'info' }, { default: () => industryLabel(row.industry) })
+        : h('span', { style: `color:${PLACEHOLDER_GRAY}` }, '—'),
+  },
   {
     title: '评分',
     key: 'score',
@@ -187,9 +220,29 @@ const columns: DataTableColumns<Lead> = [
     title: '联系方式',
     key: 'contact',
     width: 180,
-    ellipsis: { tooltip: true },
-    render: (row) =>
-      [row.phone_e164 || row.phone_raw, row.email].filter(Boolean).join(' / ') || '—',
+    render: (row) => {
+      const phone = row.phone_e164 || row.phone_raw
+      if (!phone && !row.email) return h('span', { style: `color:${PLACEHOLDER_GRAY}` }, '—')
+      return h('div', { style: 'line-height:1.45;min-width:0' }, [
+        phone
+          ? h(
+              'div',
+              { style: 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis', title: phone },
+              phone
+            )
+          : null,
+        row.email
+          ? h(
+              'div',
+              {
+                style: `font-size:12px;color:${MUTED};white-space:nowrap;overflow:hidden;text-overflow:ellipsis`,
+                title: row.email,
+              },
+              row.email
+            )
+          : null,
+      ])
+    },
   },
   {
     title: '官网',
@@ -198,23 +251,40 @@ const columns: DataTableColumns<Lead> = [
     render: (row) =>
       row.website
         ? h('a', { href: row.website, target: '_blank', rel: 'noopener' }, row.domain || '链接')
-        : '—',
+        : h('span', { style: `color:${PLACEHOLDER_GRAY}` }, '—'),
   },
   {
     title: '来源',
     key: 'sources',
-    width: 150,
-    ellipsis: { tooltip: true },
+    width: 160,
     render: (row) => {
-      const names = (row.sources || []).map((s) => sourceLabel(s.source))
-      return names.length ? names.join('、') : '—'
+      const srcs = row.sources || []
+      if (!srcs.length) return h('span', { style: `color:${PLACEHOLDER_GRAY}` }, '—')
+      return h(
+        'div',
+        { style: 'display:flex;flex-wrap:wrap;gap:4px' },
+        srcs.map((s) =>
+          h(
+            NTag,
+            { size: 'small', bordered: false, type: SOURCE_TAG_TYPES[s.source] || 'default' },
+            { default: () => sourceLabel(s.source) }
+          )
+        )
+      )
     },
   },
-  { title: '采集时间', key: 'created_at', width: 160, render: (row) => formatTime(row.created_at) },
+  {
+    title: '采集时间',
+    key: 'created_at',
+    width: 160,
+    render: (row) =>
+      h('span', { style: `font-size:12px;color:${MUTED}` }, formatTime(row.created_at)),
+  },
   {
     title: '操作',
     key: 'actions',
     width: 80,
+    fixed: 'right', // 列多时固定右侧，横向滚动也不丢操作按钮
     render(row) {
       return h(
         NButton,
@@ -237,7 +307,7 @@ function handlePageSizeChange(s: number) {
 }
 
 function resetQuery() {
-  Object.assign(query, { page: 1, keyword: '', country: '', industry: '', source: '', min_score: null, whatsapp: '' })
+  Object.assign(query, { page: 1, keyword: '', country: null, industry: null, source: null, min_score: null, whatsapp: null })
   fetchData()
 }
 
@@ -316,6 +386,7 @@ onUnmounted(() => {
     <n-data-table
       v-model:checked-row-keys="checkedKeys"
       remote
+      :scroll-x="1330"
       :columns="columns"
       :data="tableData"
       :loading="loading"

@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { h, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { NButton, NTag, type DataTableColumns } from 'naive-ui'
+import { NButton, NIcon, NProgress, NTag, NTooltip, type DataTableColumns } from 'naive-ui'
+import { HelpCircleOutline } from '@vicons/ionicons5'
 import * as collectApi from '@/api/collect'
 import type { CollectTask, CollectorInfo, CollectorParam, GeoOptions } from '@/api/collect'
 import { formatTime } from '@/utils/format'
@@ -23,8 +24,9 @@ function cityOptionsFor(p: CollectorParam) {
 const query = reactive({
   page: 1,
   page_size: 20,
-  collector: '' as string,
-  status: '' as string,
+  // n-select 初值必须 null：naive-ui 只在 null/undefined 时显示 placeholder
+  collector: null as string | null,
+  status: null as string | null,
 })
 
 const statusOptions = [
@@ -172,6 +174,28 @@ const statusTag: Record<string, { type: 'default' | 'info' | 'success' | 'error'
   cancelled: { type: 'default', label: '已取消' },
 }
 
+/** 表头带悬浮说明（❓图标 hover 出解释） */
+function headerWithTip(title: string, tip: string) {
+  return () =>
+    h('span', null, [
+      title,
+      h(
+        NTooltip,
+        {},
+        {
+          trigger: () =>
+            h(NIcon, { size: 13, style: 'margin-left:3px;color:#999;cursor:help;vertical-align:-2px' }, { default: () => h(HelpCircleOutline) }),
+          default: () => tip,
+        }
+      ),
+    ])
+}
+
+/** 线索数字：>0 按语义着色，0 弱化 */
+function leadNum(n: number, color: string) {
+  return h('span', { style: n > 0 ? `color:${color};font-weight:600` : 'color:#c2c5cc' }, String(n))
+}
+
 const columns: DataTableColumns<CollectTask> = [
   { title: 'ID', key: 'id', width: 64 },
   {
@@ -181,7 +205,7 @@ const columns: DataTableColumns<CollectTask> = [
     ellipsis: { tooltip: true },
     render: (row) =>
       h('span', null, [
-        row.name,
+        h('span', { style: 'font-weight:500' }, row.name),
         row.is_implicit ? h(NTag, { size: 'tiny', style: 'margin-left:6px' }, { default: () => '手动' }) : null,
       ]),
   },
@@ -189,7 +213,10 @@ const columns: DataTableColumns<CollectTask> = [
     title: '采集器',
     key: 'collector',
     width: 170,
-    render: (row) => collectors.value.find((c) => c.name === row.collector)?.title ?? row.collector,
+    render: (row) => {
+      const title = collectors.value.find((c) => c.name === row.collector)?.title
+      return h(NTag, { size: 'small', bordered: false, type: 'info' }, { default: () => title ?? row.collector })
+    },
   },
   {
     title: '定时',
@@ -209,21 +236,52 @@ const columns: DataTableColumns<CollectTask> = [
   {
     title: '进度',
     key: 'progress',
-    width: 120,
+    width: 150,
     render: (row) => {
-      if (row.status === 'running' && row.progress_total > 0) {
-        return h(NTag, { size: 'small', type: 'info' }, { default: () => `${row.progress_done}/${row.progress_total}` })
+      const { progress_done: done, progress_total: total } = row
+      if (!total) return h('span', { style: 'color:#c2c5cc' }, '—')
+      const pct = Math.min(100, Math.round((done / total) * 100))
+      const progressStatusMap: Record<string, 'info' | 'success' | 'error' | 'warning' | 'default'> = {
+        running: 'info',
+        completed: 'success',
+        failed: 'error',
+        cancelled: 'warning',
       }
-      return `${row.progress_done}/${row.progress_total}`
+      const status = progressStatusMap[row.status] || 'default'
+      return h('div', { style: 'padding-right:12px' }, [
+        h(NProgress, { type: 'line', percentage: pct, height: 6, showIndicator: false, status }),
+        h('span', { style: 'font-size:12px;color:var(--yz-text-secondary,#666)' }, `${done}/${total}`),
+      ])
     },
   },
-  { title: '新增线索', key: 'leads_added', width: 90, render: (row) => row.leads_added },
-  { title: '合并线索', key: 'leads_merged', width: 90, render: (row) => row.leads_merged },
-  { title: '最近执行', key: 'last_run_at', width: 160, render: (row) => (row.last_run_at ? formatTime(row.last_run_at) : '—') },
+  {
+    title: headerWithTip('新增线索', '本次采到、库里之前没有的商家 → 新建 1 条线索'),
+    key: 'leads_added',
+    width: 100,
+    render: (row) => leadNum(row.leads_added, '#18a058'),
+  },
+  {
+    title: headerWithTip('合并线索', '采到但库里已有同一家（域名/电话/名称+城市 命中）→ 只补全字段，不新建。新增+合并 = 本次处理的商家总数'),
+    key: 'leads_merged',
+    width: 100,
+    render: (row) => leadNum(row.leads_merged, '#f0a020'),
+  },
+  {
+    title: '最近执行',
+    key: 'last_run_at',
+    width: 160,
+    render: (row) =>
+      h(
+        'span',
+        { style: `font-size:12px;color:var(--yz-text-secondary,#666)` },
+        row.last_run_at ? formatTime(row.last_run_at) : '—'
+      ),
+  },
   {
     title: '操作',
     key: 'actions',
     width: 220,
+    fixed: 'right', // 列多时固定右侧，横向滚动也不丢操作按钮
     render(row) {
       const buttons = [
         h(
@@ -291,6 +349,7 @@ onUnmounted(() => {
 
     <n-data-table
       remote
+      :scroll-x="1350"
       :columns="columns"
       :data="tableData"
       :loading="loading"

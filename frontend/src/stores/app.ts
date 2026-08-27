@@ -10,8 +10,8 @@ export interface ThemePreset {
 }
 
 export const THEME_PRESETS: ThemePreset[] = [
-  { name: '翡翠绿', color: '#10b981' },
   { name: '柚子橙', color: '#f59e0b' },
+  { name: '翡翠绿', color: '#10b981' },
   { name: '品牌蓝', color: '#2080f0' },
   { name: '紫罗兰', color: '#7c3aed' },
   { name: '赤霞红', color: '#ef4444' },
@@ -67,7 +67,7 @@ export const useAppStore = defineStore('app', () => {
   )
   const primaryColor = useStorage(
     'youzi-app-primary',
-    THEME_PRESETS[0]?.color ?? '#10b981',
+    THEME_PRESETS[0]?.color ?? '#f59e0b',
     undefined,
     { flush: 'sync' },
   )
