@@ -40,6 +40,11 @@ class TaskRunner:
                     status="failed",
                     error="进程重启，任务中断",
                     finished_at=datetime.now(timezone.utc),
+                    # 进度/计数是上一次执行中断时的半截残留，清零避免详情页误导
+                    progress_total=0,
+                    progress_done=0,
+                    leads_added=0,
+                    leads_merged=0,
                 )
             )
             await s.commit()
@@ -85,6 +90,14 @@ class TaskRunner:
             await s.commit()
             if result.scalar_one_or_none() is not None:
                 return True
+            # 运行中但 cancel event 还没注册（claim 与注册之间的窗口）：
+            # 预置已触发的 event，worker claim 时用 setdefault 不会覆盖它
+            status = (
+                await s.execute(select(CollectTask.status).where(CollectTask.id == task_id))
+            ).scalar_one_or_none()
+        if status == "running":
+            self._cancel_events.setdefault(task_id, asyncio.Event()).set()
+            return True
         event = self._cancel_events.get(task_id)
         if event is not None:
             event.set()
@@ -139,8 +152,8 @@ class TaskRunner:
             await self._finish(task_id, "failed", error=f"未知采集器：{task.collector}")
             return
 
-        cancel_event = asyncio.Event()
-        self._cancel_events[task_id] = cancel_event
+        # setdefault：cancel() 可能在注册前预置了已触发的 event，不能覆盖
+        cancel_event = self._cancel_events.setdefault(task_id, asyncio.Event())
         counters = {"added": 0, "merged": 0}
 
         async def emit(draft: LeadDraft) -> tuple[int, bool]:

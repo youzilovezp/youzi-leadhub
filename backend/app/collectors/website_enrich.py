@@ -180,7 +180,7 @@ class WebsiteEnrichCollector(Collector):
     ]
 
     async def run(self, ctx: TaskContext) -> None:
-        lead_ids = ctx.params.get("lead_ids") or []
+        lead_ids = _parse_lead_ids(ctx.params.get("lead_ids"))
         async with _session_factory()() as session:
             leads = await _load_scope(session, lead_ids)
         if not leads:
@@ -225,6 +225,23 @@ async def _load_scope(session: AsyncSession, lead_ids: list[Any]) -> list[tuple[
         )
     rows = (await session.execute(stmt)).all()
     return [(r[0], r[1]) for r in rows]
+
+
+def _parse_lead_ids(raw: Any) -> list[int]:
+    """lead_ids 参数归一化：勾选入口传 list[int]；手动任务表单传的是字符串
+    "12,34"——直接喂给 in_() 会被 SQLAlchemy 拒（ArgumentError），任务 failed。
+    非法项丢弃（宁漏勿错富化）。
+    """
+    if not raw:
+        return []
+    items = raw if isinstance(raw, list | tuple) else str(raw).split(",")
+    out: list[int] = []
+    for x in items:
+        try:
+            out.append(int(str(x).strip()))
+        except (TypeError, ValueError):
+            continue
+    return out
 
 
 def _session_factory():

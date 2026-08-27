@@ -7,8 +7,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from loguru import logger
@@ -28,7 +26,9 @@ async def start() -> None:
     if not settings.SCHEDULER_ENABLED:
         logger.info("⏭️  定时调度未开启（SCHEDULER_ENABLED=false）")
         return
-    scheduler = AsyncIOScheduler(timezone=str(datetime.now().astimezone().tzinfo))
+    # 不传 timezone：默认 tzlocal 本地时区。曾用 str(datetime.now().astimezone().tzinfo)，
+    # 得到 "CST" 这类非 IANA 名，APScheduler 解析抛 ZoneInfoNotFoundError 启动即崩。
+    scheduler = AsyncIOScheduler()
     scheduler.start()
     _scheduler = scheduler
     await sync()

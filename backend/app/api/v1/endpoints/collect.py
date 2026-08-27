@@ -84,6 +84,9 @@ async def create_lead(db: SessionDep, _user: SuperUser, payload: LeadCreate):
     )
     lead, _ = await upsert_lead(db, draft)
     await db.commit()
+    # 合并路径 UPDATE 后 updated_at（server onupdate）处于 expired 状态，
+    # 直接 model_validate 会触发懒加载 IO → MissingGreenlet 422。显式刷新。
+    await db.refresh(lead)
     return ResponseModel(data=LeadOut.model_validate(lead))
 
 
@@ -116,6 +119,7 @@ async def check_whatsapp(db: SessionDep, _user: SuperUser, payload: LeadCheckWha
     )
     await db.commit()
     await task_runner.enqueue(task.id)
+    await db.refresh(task)  # enqueue 在独立会话改了 status，刷新再返回
     return ResponseModel(data=TaskOut.model_validate(task))
 
 
@@ -172,6 +176,7 @@ async def create_task(db: SessionDep, _user: SuperUser, payload: TaskCreate):
         await collect_scheduler.sync()
     else:
         await task_runner.enqueue(task.id)
+        await db.refresh(task)  # enqueue 在独立会话改了 status，刷新再返回
     return ResponseModel(data=TaskOut.model_validate(task))
 
 

@@ -34,8 +34,8 @@ def _namecity_key(name: str | None, city: str | None) -> str | None:
 async def upsert_lead(db: AsyncSession, draft: LeadDraft) -> tuple[Lead, bool]:
     """归一化 → dedupe_key → 新建或合并。返回 (lead, 是否新建)。
 
-    无 name 且无域名/电话的空 draft 直接跳过（返回已有占位规则见调用方——
-    调用方必须保证 name 非空，这里对空名抛 ValueError）。
+    并发安全：两个 worker 同时新建同一 dedupe_key 时，后 insert 的一方命中唯一约束。
+    用 savepoint 包住 insert，IntegrityError 后重查存量并退化为合并（此时必命中）。
     """
     if not draft.name or not draft.name.strip():
         raise ValueError("lead name is required")
@@ -56,11 +56,37 @@ async def upsert_lead(db: AsyncSession, draft: LeadDraft) -> tuple[Lead, bool]:
         # 用 source+name 兜底（宁漏勿重——单独成条）
         dedupe_key = f"raw:{draft.name.strip().lower()}|{draft.source}"
 
-    # 跨来源合并：不能只比对 draft 自己的主键（d1 可能存的是 tel: 键，d2 带 domain 进来）。
-    # 三个身份列（domain / phone_e164 / namecity_key）任一命中 → 合并到最早那条。
-    from sqlalchemy import or_
-
     namecity_key = _namecity_key(draft.name, draft.city)
+    conds = _identity_conds(dedupe_key, domain, phone_e164, namecity_key)
+
+    existing = await _find_existing(db, conds)
+    now = datetime.now(timezone.utc)
+
+    if existing is None:
+        lead = _new_lead(draft, dedupe_key, namecity_key, domain, phone_e164, now)
+        from sqlalchemy.exc import IntegrityError
+
+        try:
+            async with db.begin_nested():  # savepoint：冲突只回滚这次 insert
+                db.add(lead)
+                await db.flush()
+        except IntegrityError:
+            existing = await _find_existing(db, conds)
+            if existing is None:  # 冲突来自别的唯一列等意外——不吞
+                raise
+        else:
+            return lead, True
+
+    await _merge_into(db, existing, draft, domain, phone_e164, namecity_key, now)
+    await db.flush()
+    return existing, False
+
+
+def _identity_conds(
+    dedupe_key: str, domain: str | None, phone_e164: str | None, namecity_key: str | None
+) -> list:
+    """跨来源合并：不能只比对 draft 自己的主键（d1 可能存的是 tel: 键，d2 带
+    domain 进来）。三个身份列（domain / phone_e164 / namecity_key）任一命中 → 合并。"""
     conds = [Lead.dedupe_key == dedupe_key]
     if domain:
         conds.append(Lead.domain == domain)
@@ -68,56 +94,69 @@ async def upsert_lead(db: AsyncSession, draft: LeadDraft) -> tuple[Lead, bool]:
         conds.append(Lead.phone_e164 == phone_e164)
     if namecity_key:
         conds.append(Lead.namecity_key == namecity_key)
+    return conds
 
-    existing = (
+
+async def _find_existing(db: AsyncSession, conds: list) -> Lead | None:
+    from sqlalchemy import or_
+
+    return (
         await db.execute(select(Lead).where(or_(*conds)).order_by(Lead.id).limit(1))
     ).scalar_one_or_none()
 
-    now = datetime.now(timezone.utc)
-    if existing is None:
-        score, signals = _score_fields(
-            whatsapp_hit=bool(draft.whatsapp_url),
-            whatsapp_job=draft.whatsapp_job,
-            website=draft.website,
-            email=draft.email,
-            country=draft.country,
-            phone_raw=draft.phone_raw,
-            phone_e164=phone_e164,
-            social=draft.social,
-        )
-        lead = Lead(
-            name=draft.name.strip(),
-            country=draft.country,
-            city=draft.city,
-            industry=draft.industry,
-            address=draft.address,
-            phone_raw=draft.phone_raw,
-            phone_e164=phone_e164,
-            website=draft.website,
-            domain=domain,
-            email=draft.email,
-            social=dict(draft.social or {}),
-            whatsapp_hit=bool(draft.whatsapp_url),
-            whatsapp_url=draft.whatsapp_url,
-            whatsapp_job=draft.whatsapp_job,
-            job_urls=list(draft.job_urls or []),
-            sources=[
-                {
-                    "source": draft.source,
-                    "first_seen": now.isoformat(),
-                    "last_seen": now.isoformat(),
-                }
-            ],
-            dedupe_key=dedupe_key,
-            namecity_key=namecity_key,
-            score=score,
-            score_signals=signals,
-        )
-        db.add(lead)
-        await db.flush()
-        return lead, True
 
-    # ---------- 合并：补空字段 + 并集/OR + 追加来源 ----------
+def _new_lead(
+    draft: LeadDraft,
+    dedupe_key: str,
+    namecity_key: str | None,
+    domain: str | None,
+    phone_e164: str | None,
+    now: datetime,
+) -> Lead:
+    score, signals = compute_score(
+        whatsapp_hit=bool(draft.whatsapp_url),
+        whatsapp_job=draft.whatsapp_job,
+        website=draft.website,
+        email=draft.email,
+        country=draft.country,
+        phone_raw=draft.phone_raw,
+        phone_e164=phone_e164,
+        social=draft.social,
+    )
+    return Lead(
+        name=draft.name.strip(),
+        country=draft.country,
+        city=draft.city,
+        industry=draft.industry,
+        address=draft.address,
+        phone_raw=draft.phone_raw,
+        phone_e164=phone_e164,
+        website=draft.website,
+        domain=domain,
+        email=draft.email,
+        social=dict(draft.social or {}),
+        whatsapp_hit=bool(draft.whatsapp_url),
+        whatsapp_url=draft.whatsapp_url,
+        whatsapp_job=draft.whatsapp_job,
+        job_urls=list(draft.job_urls or []),
+        sources=[{"source": draft.source, "first_seen": now.isoformat(), "last_seen": now.isoformat()}],
+        dedupe_key=dedupe_key,
+        namecity_key=namecity_key,
+        score=score,
+        score_signals=signals,
+    )
+
+
+async def _merge_into(
+    db: AsyncSession,
+    existing: Lead,
+    draft: LeadDraft,
+    domain: str | None,
+    phone_e164: str | None,
+    namecity_key: str | None,
+    now: datetime,
+) -> None:
+    """合并语义：标量补空、布尔 OR、URL/social 并集、来源 (lead, source) 唯一、重算评分。"""
     for field, value in (
         ("country", draft.country),
         ("city", draft.city),
@@ -172,31 +211,6 @@ async def upsert_lead(db: AsyncSession, draft: LeadDraft) -> tuple[Lead, bool]:
             existing.dedupe_key = upgraded
 
     existing.score, existing.score_signals = _score_from_lead(existing)
-    await db.flush()
-    return existing, False
-
-
-def _score_fields(
-    *,
-    whatsapp_hit: bool,
-    whatsapp_job: bool,
-    website: str | None,
-    email: str | None,
-    country: str | None,
-    phone_raw: str | None,
-    phone_e164: str | None,
-    social: dict | None,
-) -> tuple[int, dict[str, int]]:
-    return compute_score(
-        whatsapp_hit=whatsapp_hit,
-        whatsapp_job=whatsapp_job,
-        website=website,
-        email=email,
-        country=country,
-        phone_raw=phone_raw,
-        phone_e164=phone_e164,
-        social=social,
-    )
 
 
 def _score_from_lead(lead: Lead) -> tuple[int, dict[str, int]]:
@@ -256,10 +270,13 @@ async def search_leads(
         conds.append(Lead.industry == industry)
     if min_score is not None:
         conds.append(Lead.score >= min_score)
-    if whatsapp_hit is True:
-        conds.append(Lead.whatsapp_hit.is_(True))
-    if has_website is True:
-        conds.append(Lead.website.is_not(None) & (Lead.website != ""))
+    if whatsapp_hit is not None:
+        conds.append(Lead.whatsapp_hit.is_(whatsapp_hit))
+    if has_website is not None:
+        if has_website:
+            conds.append(Lead.website.is_not(None) & (Lead.website != ""))
+        else:
+            conds.append((Lead.website.is_(None)) | (Lead.website == ""))
     if source:
         # sources 是 JSON 数组，用 LIKE 匹配。序列化格式有两种：
         # Python json.dumps 默认带空格（"source": "x"），PG jsonb / 部分驱动是紧凑格式
