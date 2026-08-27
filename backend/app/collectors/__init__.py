@@ -5,10 +5,17 @@ from __future__ import annotations
 from app.collectors.base import Collector, LeadDraft, TaskContext
 from app.collectors.google_maps import GoogleMapsCollector
 from app.collectors.job_posting import JobPostingCollector
+from app.collectors.osm_overpass import OsmOverpassCollector
 from app.collectors.website_enrich import WebsiteEnrichCollector
 
 _REGISTRY: dict[str, Collector] = {
-    c.name: c for c in (GoogleMapsCollector(), JobPostingCollector(), WebsiteEnrichCollector())
+    c.name: c
+    for c in (
+        OsmOverpassCollector(),
+        GoogleMapsCollector(),
+        JobPostingCollector(),
+        WebsiteEnrichCollector(),
+    )
 }
 
 

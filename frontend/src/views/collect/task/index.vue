@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { h, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { h, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { NButton, NTag, type DataTableColumns } from 'naive-ui'
 import * as collectApi from '@/api/collect'
-import type { CollectTask, CollectorInfo } from '@/api/collect'
+import type { CollectTask, CollectorInfo, CollectorParam, GeoOptions } from '@/api/collect'
 import { formatTime } from '@/utils/format'
 import { message, confirm } from '@/utils/feedback'
 
@@ -12,6 +12,13 @@ const loading = ref(false)
 const tableData = ref<CollectTask[]>([])
 const total = ref(0)
 const collectors = ref<CollectorInfo[]>([])
+const geo = ref<GeoOptions>({ countries: [], cities_by_country: {} })
+
+/** cities 参数的城市建议：按当前表单里选的国家取（depends_on 指向的字段值） */
+function cityOptionsFor(p: CollectorParam) {
+  const country = p.depends_on ? String(paramForm.value[p.depends_on] ?? '') : ''
+  return (geo.value.cities_by_country[country] || []).map((c) => ({ label: c, value: c }))
+}
 
 const query = reactive({
   page: 1,
@@ -60,26 +67,61 @@ const dialogVisible = ref(false)
 const form = reactive({
   collector: 'job_posting',
   name: '',
-  keywords: '',
-  max_pages: '3',
-  country: '',
-  cities: '',
   cron_expr: '',
 })
-/** 当前选中采集器的参数表单字段（除通用 keywords/max_pages 外按 param_schema 过滤） */
-const GENERIC_KEYS = ['keywords', 'max_pages']
+/** 参数表单值：控件类型决定值的形态（tags/multiselect→数组、switch→布尔、number→数字） */
+const paramForm = ref<Record<string, unknown>>({})
 
 function currentCollector(): CollectorInfo | undefined {
   return collectors.value.find((c) => c.name === form.collector)
 }
 
+/** 按 param_schema 初始化参数值（default 按 type 反序列化） */
+function initParamForm() {
+  const info = currentCollector()
+  const model: Record<string, unknown> = {}
+  if (info) {
+    for (const p of info.params) {
+      const d = (p.default ?? '').trim()
+      if (p.type === 'tags' || p.type === 'multiselect' || p.type === 'cities') {
+        model[p.key] = d ? d.split(',').map((s) => s.trim()).filter(Boolean) : []
+      } else if (p.type === 'switch') {
+        model[p.key] = d !== 'false'
+      } else if (p.type === 'number') {
+        model[p.key] = d ? Number(d) : null
+      } else {
+        model[p.key] = d
+      }
+    }
+  }
+  paramForm.value = model
+}
+
+/** 表单值 → 提交给后端的字符串（数组 join 逗号、布尔转 true/false、数字转字符串） */
+function serializeParam(v: unknown): string | undefined {
+  if (Array.isArray(v)) return v.length ? v.join(',') : undefined
+  if (typeof v === 'boolean') return v ? 'true' : 'false'
+  if (typeof v === 'number') return String(v)
+  const s = String(v ?? '').trim()
+  return s ? s : undefined
+}
+
+function requiredMissing(info: CollectorInfo): CollectorParam | undefined {
+  return info.params.find((p) => p.required && !serializeParam(paramForm.value[p.key]))
+}
+
 async function handleCreate() {
   const info = currentCollector()
   if (!info) return
+  const missing = requiredMissing(info)
+  if (missing) {
+    message.warning(`请填写「${missing.label}」`)
+    return
+  }
   const params: Record<string, string> = {}
   for (const p of info.params) {
-    const v = (form as Record<string, unknown>)[p.key]
-    if (v !== undefined && String(v).trim() !== '') params[p.key] = String(v).trim()
+    const v = serializeParam(paramForm.value[p.key])
+    if (v !== undefined) params[p.key] = v
   }
   const task = await collectApi.createTask({
     collector: form.collector,
@@ -93,12 +135,12 @@ async function handleCreate() {
 }
 
 function openCreate() {
-  Object.assign(form, {
-    collector: collectors.value[0]?.name || 'job_posting',
-    name: '', keywords: '', max_pages: '3', country: '', cities: '', cron_expr: '',
-  })
+  Object.assign(form, { collector: collectors.value[0]?.name || 'job_posting', name: '', cron_expr: '' })
+  initParamForm()
   dialogVisible.value = true
 }
+
+watch(() => form.collector, initParamForm)
 
 // ---------- 操作 ----------
 async function handleRun(row: CollectTask) {
@@ -211,8 +253,15 @@ function handlePageChange(p: number) {
   fetchData()
 }
 
+function handlePageSizeChange(s: number) {
+  query.page_size = s
+  query.page = 1
+  fetchData()
+}
+
 onMounted(async () => {
   collectors.value = await collectApi.listCollectors()
+  geo.value = await collectApi.getGeoOptions()
   await fetchData()
   schedulePolling()
 })
@@ -240,6 +289,7 @@ onUnmounted(() => {
     </n-card>
 
     <n-data-table
+      remote
       :columns="columns"
       :data="tableData"
       :loading="loading"
@@ -248,7 +298,10 @@ onUnmounted(() => {
         page: query.page,
         pageSize: query.page_size,
         itemCount: total,
+        showSizePicker: true,
+        pageSizes: [10, 20, 50, 100],
         onChange: handlePageChange,
+        onPageSizeChange: handlePageSizeChange,
       }"
     />
 
@@ -264,20 +317,60 @@ onUnmounted(() => {
           <n-input v-model:value="form.name" placeholder="留空用采集器名" />
         </n-form-item>
         <template v-if="currentCollector()">
-          <n-form-item
-            v-for="p in currentCollector()!.params.filter((x) => !GENERIC_KEYS.includes(x.key))"
-            :key="p.key"
-            :label="p.label"
-          >
-            <n-input v-model:value="(form as any)[p.key]" :placeholder="p.placeholder || (p.required ? '必填' : '选填')" />
+          <n-form-item v-for="p in currentCollector()!.params" :key="p.key" :label="p.label">
+            <!-- 国家：可搜索下拉，也允许手输列表外的 ISO2 -->
+            <n-select
+              v-if="p.type === 'select'"
+              v-model:value="(paramForm as any)[p.key]"
+              :options="(p.options as any)"
+              :placeholder="p.placeholder || '请选择'"
+              filterable
+              tag
+            />
+            <!-- 城市：与国家联动，选国家后出建议；可搜索可手输任意城市 -->
+            <n-select
+              v-else-if="p.type === 'cities'"
+              v-model:value="(paramForm as any)[p.key]"
+              :options="cityOptionsFor(p)"
+              multiple
+              filterable
+              tag
+              :max-tag-count="'responsive'"
+              :placeholder="p.placeholder || '先选国家'"
+            />
+            <!-- 关键词：标签输入，回车追加 -->
+            <n-dynamic-tags
+              v-else-if="p.type === 'tags'"
+              v-model:value="(paramForm as any)[p.key]"
+              :placeholder="p.placeholder || '输入后回车添加'"
+            />
+            <!-- 行业等多选：预设选项多选框 -->
+            <n-select
+              v-else-if="p.type === 'multiselect'"
+              v-model:value="(paramForm as any)[p.key]"
+              :options="(p.options as any)"
+              multiple
+              :max-tag-count="'responsive'"
+              :placeholder="p.placeholder || '请选择（可多选）'"
+            />
+            <!-- 布尔开关 -->
+            <div v-else-if="p.type === 'switch'" class="flex items-center gap-2">
+              <n-switch v-model:value="(paramForm as any)[p.key]" />
+              <span class="text-xs text-gray-400">{{ p.placeholder }}</span>
+            </div>
+            <!-- 数字 -->
+            <n-input-number
+              v-else-if="p.type === 'number'"
+              v-model:value="(paramForm as any)[p.key]"
+              :precision="0"
+              :min="1"
+              :placeholder="p.placeholder"
+              class="w-full"
+            />
+            <!-- 默认文本 -->
+            <n-input v-else v-model:value="(paramForm as any)[p.key]" :placeholder="p.placeholder || (p.required ? '必填' : '选填')" />
           </n-form-item>
         </template>
-        <n-form-item v-if="form.collector === 'job_posting'" label="关键词">
-          <n-input v-model:value="form.keywords" placeholder="whatsapp（默认），逗号分隔多个" />
-        </n-form-item>
-        <n-form-item v-if="form.collector === 'job_posting'" label="翻页数">
-          <n-input v-model:value="form.max_pages" placeholder="3" />
-        </n-form-item>
         <n-form-item label="定时 cron">
           <n-input v-model:value="form.cron_expr" placeholder="留空=手动执行；如 0 9 * * *" />
         </n-form-item>

@@ -132,6 +132,8 @@ def detect_whatsapp(html_list: list[str]) -> tuple[bool, str | None]:
 
 
 _ASSET_EXT = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".css", ".js", ".pdf", ".woff", ".woff2", ".ico")
+# 平台埋点/监控邮箱误报黑名单（实测 Wix 站点正文里带 Sentry 埋点邮箱）
+_EMAIL_DOMAIN_BLOCKLIST = ("wixpress.com", "sentry.io", "sentry-next.com", "googlegroups.com")
 
 
 def _is_email(addr: str) -> bool:
@@ -139,7 +141,9 @@ def _is_email(addr: str) -> bool:
         return False
     domain = addr.rsplit("@", 1)[1].lower()
     # 防图片/字体文件名误判（如 logo_250x@2x.png）
-    return not any(domain.endswith(ext) for ext in _ASSET_EXT)
+    if any(domain.endswith(ext) for ext in _ASSET_EXT):
+        return False
+    return not any(domain == d or domain.endswith("." + d) for d in _EMAIL_DOMAIN_BLOCKLIST)
 
 
 def detect_email(homepage_html: str | None) -> str | None:
@@ -172,9 +176,10 @@ class WebsiteEnrichCollector(Collector):
     param_schema = [
         {
             "key": "lead_ids",
-            "label": "指定线索 ID（逗号分隔，留空=全库 eligible）",
+            "label": "指定线索 ID",
             "required": False,
-            "placeholder": "",
+            "type": "tags",
+            "placeholder": "留空 = 全库待富化线索；输入 ID 回车",
             "default": "",
         },
     ]

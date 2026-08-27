@@ -131,6 +131,35 @@ async def get_collectors(_user: SuperUser):
     return ResponseModel(data=[CollectorInfo(**c) for c in list_collectors()])
 
 
+@router.get("/geo-options", response_model=ResponseModel[dict], summary="国家/城市选项（表单联动数据源）")
+async def get_geo_options(_user: SuperUser):
+    from app.collectors.base import CITY_OPTIONS_BY_COUNTRY, COUNTRY_OPTIONS
+
+    return ResponseModel(data={"countries": COUNTRY_OPTIONS, "cities_by_country": CITY_OPTIONS_BY_COUNTRY})
+
+
+@router.get("/industries", response_model=ResponseModel[list[dict]], summary="线索行业选项（库存 distinct，筛选数据源）")
+async def lead_industries(db: SessionDep, _user: SuperUser):
+    """行业筛选下拉的数据源：直接取库里实际存在的 industry 值（带数量）。
+
+    不用预设词表——google_maps 存关键词、OSM 存标签值、手工录入任意填，
+    distinct 才能保证「选项里有的就能查到」。
+    """
+    from sqlalchemy import func, select
+
+    from app.models.lead import Lead
+
+    rows = (
+        await db.execute(
+            select(Lead.industry, func.count())
+            .where(Lead.industry.is_not(None), Lead.industry != "")
+            .group_by(Lead.industry)
+            .order_by(func.count().desc())
+        )
+    ).all()
+    return ResponseModel(data=[{"label": f"{name}（{cnt}）", "value": name} for name, cnt in rows])
+
+
 @router.get("/tasks", response_model=ResponseModel[PageResponse[TaskOut]], summary="任务列表")
 async def list_tasks(
     db: SessionDep,

@@ -50,16 +50,18 @@ class JobPostingCollector(Collector):
     param_schema = [
         {
             "key": "keywords",
-            "label": "搜索关键词（逗号分隔）",
+            "label": "搜索关键词",
             "required": False,
-            "placeholder": "whatsapp, customer service whatsapp",
+            "type": "tags",
+            "placeholder": "输入关键词回车，如 whatsapp",
             "default": "whatsapp",
         },
         {
             "key": "max_pages",
-            "label": "每个关键词翻页数",
+            "label": "翻页数",
             "required": False,
-            "placeholder": "3",
+            "type": "number",
+            "placeholder": "1-10",
             "default": "3",
         },
     ]

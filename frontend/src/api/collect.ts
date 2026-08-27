@@ -94,12 +94,32 @@ export interface TaskLog {
   created_at: string
 }
 
+export interface ParamOption {
+  label: string
+  value: string
+}
+
+/** 控件类型：select=可搜下拉(国家) cities=城市联动输入(依赖 depends_on 指向的国家字段)
+ *  tags=标签输入(关键词) multiselect=多选(行业) switch=开关(布尔) number=数字输入
+ *  text=文本(默认，缺 type 兼容旧采集器) */
+export type ParamType = 'select' | 'cities' | 'tags' | 'multiselect' | 'switch' | 'number' | 'text'
+
 export interface CollectorParam {
   key: string
   label: string
   required: boolean
   placeholder: string
   default: string
+  type?: ParamType
+  options?: ParamOption[]
+  /** cities 联动：指向国家字段的 key */
+  depends_on?: string
+}
+
+/** 国家/城市选项（/collect/geo-options，表单联动数据源） */
+export interface GeoOptions {
+  countries: ParamOption[]
+  cities_by_country: Record<string, string[]>
 }
 
 export interface CollectorInfo {
@@ -135,6 +155,15 @@ export function checkWhatsApp(leadIds: number[]) {
 }
 
 // ---------- 任务 ----------
+
+export function getGeoOptions() {
+  return request.get<GeoOptions, GeoOptions>('/collect/geo-options')
+}
+
+/** 线索行业筛选选项（库存 distinct，保证选项里有的就能查到） */
+export function getIndustryOptions() {
+  return request.get<ParamOption[], ParamOption[]>('/collect/industries')
+}
 
 export function listCollectors() {
   return request.get<CollectorInfo[], CollectorInfo[]>('/collect/collectors')

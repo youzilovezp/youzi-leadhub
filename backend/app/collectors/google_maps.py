@@ -10,7 +10,13 @@ from typing import Any
 
 import httpx
 
-from app.collectors.base import Collector, TaskContext, require_params, split_csv
+from app.collectors.base import (
+    COUNTRY_OPTIONS,
+    Collector,
+    TaskContext,
+    require_params,
+    split_csv,
+)
 from app.core.config import settings
 from app.core.exceptions import BusinessError
 
@@ -29,23 +35,28 @@ class GoogleMapsCollector(Collector):
     param_schema = [
         {
             "key": "country",
-            "label": "国家代码 (ISO2)",
+            "label": "国家",
             "required": True,
-            "placeholder": "MY",
+            "type": "select",  # 可搜索 + 可手输任意 ISO2
+            "options": COUNTRY_OPTIONS,
+            "placeholder": "选择或输入 2 位国家码",
             "default": "",
         },
         {
             "key": "cities",
-            "label": "城市（逗号分隔）",
+            "label": "城市",
             "required": True,
-            "placeholder": "Kuala Lumpur, Penang",
+            "type": "cities",  # 与 country 联动：选国家后出城市建议，仍可手输任意城市
+            "depends_on": "country",
+            "placeholder": "先选国家；可输入建议城市或自定义",
             "default": "",
         },
         {
             "key": "keywords",
-            "label": "行业关键词（逗号分隔）",
+            "label": "行业关键词",
             "required": True,
-            "placeholder": "dental clinic, restaurant",
+            "type": "tags",
+            "placeholder": "输入关键词回车，如 dental clinic",
             "default": "",
         },
     ]
