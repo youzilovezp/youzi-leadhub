@@ -1,5 +1,6 @@
 # Leadhub 常用命令
 # 设计原则：默认 PostgreSQL；make start 优先复用本机已运行的中间件，缺的才用 Docker 起
+# 端口策略：前后端端口（.env 的 PORT / FRONTEND_PORT）被占时自动换下一个空闲端口，不报错退出
 
 # =============== admin mode ===============
 ENV_FILE := backend/.env
@@ -22,6 +23,9 @@ FRONTEND_PORT := $(if $(FRONTEND_PORT),$(FRONTEND_PORT),3000)
 # 端口探测（python3 socket，跨平台无依赖）：exit 0 = 有人监听（可复用）
 port_listening = python3 -c "import socket,sys; s=socket.socket(); s.settimeout(0.5); sys.exit(0 if s.connect_ex(('127.0.0.1', $(1))) == 0 else 1)"
 
+# 动态端口避让：从 $(1) 起找第一个空闲端口（被占时自动换，不报错退出）
+pick_free_port = $(shell python3 scripts/pick_free_port.py $(1))
+
 help:           ## 显示帮助
 	@echo "可用命令（默认 PostgreSQL；make start 复用本机已有中间件，缺的用 Docker 起）："
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -41,15 +45,27 @@ install:        ## 安装依赖（后端 venv + 前端 node_modules）
 	fi
 
 # 依赖 start：先确保中间件就绪（复用本机 / Docker 起），再启动后端
-backend-dev: start  ## 启动后端（自动准备中间件 + 建表 + 种子）
+backend-dev: start  ## 启动后端（自动准备中间件 + 建表 + 种子；端口被占自动换）
 	cd backend && (test -d .venv || uv venv .venv 2>/dev/null || python3 -m venv .venv) && \
 	(test -f .env || cp .env.example .env) && \
 	. .venv/bin/activate && \
 	(uv pip install -e ".[dev]" 2>/dev/null || pip install -e ".[dev]") && \
-	uvicorn app.main:app --reload --host 0.0.0.0 --port $(BACKEND_PORT)
+	BPORT=$(call pick_free_port,$(BACKEND_PORT)) && \
+	if [ "$$BPORT" != "$(BACKEND_PORT)" ]; then \
+		echo "⚠️  后端端口 $(BACKEND_PORT) 已被占用，本次改用 $${BPORT}"; \
+		echo "   （前端代理以 make dev 启动为准；单独启动前端需 VITE_PROXY_TARGET=http://localhost:$${BPORT}）"; \
+	fi && \
+	uvicorn app.main:app --reload --host 0.0.0.0 --port $$BPORT
 
-frontend-dev:   ## 启动前端
-	cd frontend && (pnpm dev --port $(FRONTEND_PORT) 2>/dev/null || npm run dev -- --port $(FRONTEND_PORT))
+frontend-dev:   ## 启动前端（端口被占自动换 3001/3002...，以终端输出的地址为准）
+	cd frontend && \
+	if command -v pnpm >/dev/null 2>&1; then \
+		PORT=$(FRONTEND_PORT) VITE_PROXY_TARGET=http://localhost:$(BACKEND_PORT) pnpm dev; \
+	elif command -v npm >/dev/null 2>&1; then \
+		PORT=$(FRONTEND_PORT) VITE_PROXY_TARGET=http://localhost:$(BACKEND_PORT) npm run dev; \
+	else \
+		echo "❌ 前端未启动：pnpm / npm 都不可用（装 Node.js：nodejs.org）"; exit 1; \
+	fi
 
 # 生成迁移文件：make db-migrate MSG="add order"
 db-migrate:     ## 生成新迁移（MSG="描述"）
@@ -86,13 +102,19 @@ test: install  ## 跑后端 + 前端测试（用独立临时测试库，不碰�
 	cd backend && $(if $(VENV_PY),.venv/bin/python,python3) -m pytest -q
 	cd frontend && (pnpm test 2>/dev/null || npm test)
 
-# 一条命令同时启动前后端（Ctrl+C 一起停）
-dev: install start  ## 一键启动：后端 + 前端（Ctrl+C 全部停止）
+# 一条命令同时启动前后端（Ctrl+C 一起停）；端口被占自动换，前后端端口联动（代理跟随实际后端端口）
+dev: install start  ## 一键启动：后端 + 前端（Ctrl+C 全部停止；端口被占自动避让）
 	@trap 'kill 0' INT TERM; \
-	( cd backend && . .venv/bin/activate 2>/dev/null; exec uvicorn app.main:app --reload --host 0.0.0.0 --port $(BACKEND_PORT) ) & \
+	BPORT=$(call pick_free_port,$(BACKEND_PORT)); \
+	if [ "$$BPORT" != "$(BACKEND_PORT)" ]; then \
+		echo "⚠️  后端端口 $(BACKEND_PORT) 已被占用，本次改用 $${BPORT}（前端代理已同步指向该端口）"; \
+	fi; \
+	( cd backend && . .venv/bin/activate 2>/dev/null; exec uvicorn app.main:app --reload --host 0.0.0.0 --port $$BPORT ) & \
 	( cd frontend && \
-	  if command -v pnpm >/dev/null 2>&1; then exec pnpm dev --port $(FRONTEND_PORT); \
-	  elif command -v npm >/dev/null 2>&1; then exec npm run dev -- --port $(FRONTEND_PORT); \
+	  if command -v pnpm >/dev/null 2>&1; then \
+	    PORT=$(FRONTEND_PORT) VITE_PROXY_TARGET=http://localhost:$$BPORT exec pnpm dev; \
+	  elif command -v npm >/dev/null 2>&1; then \
+	    PORT=$(FRONTEND_PORT) VITE_PROXY_TARGET=http://localhost:$$BPORT exec npm run dev; \
 	  else echo "❌ 前端未启动：pnpm / npm 都不可用（装 Node.js：nodejs.org）"; exit 1; fi ) & \
 	wait
 
