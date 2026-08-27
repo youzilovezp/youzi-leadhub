@@ -76,6 +76,13 @@ make use-sqlite / make use-pg          # 切数据库模式
 - 复用本机 PG 报"认证失败"→ 按日志指引：首选改 `.env` 的 `POSTGRES_PORT` 走 Docker 独立实例
 - 想零依赖：`make use-sqlite`
 
+## 端口策略（动态避让）
+
+- 后端 `PORT`（默认 8000）/ 前端 `FRONTEND_PORT`（默认 3000，读 `backend/.env`）被占时**自动换下一个空闲端口**（往后最多探测 50 个），不报错退出
+- 前端端口由 `frontend/vite.config.ts` 的 `pickFreePort` 探测（Makefile 只传 `PORT` 环境变量，**不要加 `--port`**——CLI 参数会覆盖动态探测）；后端由 `scripts/pick_free_port.py` 探测
+- `make dev` 下后端换了端口，前端代理（`VITE_PROXY_TARGET`）自动跟随实际端口；单独 `make backend-dev` 换端口时，前端需手动带 `VITE_PROXY_TARGET=http://localhost:<实际端口>`
+- 以前端终端实际输出的地址为准（换端口时会有 ⚠️ 提示）
+
 ## 出错排查顺序
 
 1. 看后端终端日志（数据库/Redis 问题都有中文诊断和解决命令）
