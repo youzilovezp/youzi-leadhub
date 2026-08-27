@@ -140,13 +140,15 @@ async def get_geo_options(_user: SuperUser):
 
 @router.get("/industries", response_model=ResponseModel[list[dict]], summary="线索行业选项（库存 distinct，筛选数据源）")
 async def lead_industries(db: SessionDep, _user: SuperUser):
-    """行业筛选下拉的数据源：直接取库里实际存在的 industry 值（带数量）。
+    """行业筛选下拉的数据源：直接取库里实际存在的 industry 值。
 
     不用预设词表——google_maps 存关键词、OSM 存标签值、手工录入任意填，
-    distinct 才能保证「选项里有的就能查到」。
+    distinct 才能保证「选项里有的就能查到」。label 是中文展示名
+    （OSM 词表映射，未收录原样显示），value 保持原 token 保证筛选精确。
     """
     from sqlalchemy import func, select
 
+    from app.collectors.osm_overpass import INDUSTRY_LABELS_ZH
     from app.models.lead import Lead
 
     rows = (
@@ -157,7 +159,12 @@ async def lead_industries(db: SessionDep, _user: SuperUser):
             .order_by(func.count().desc())
         )
     ).all()
-    return ResponseModel(data=[{"label": f"{name}（{cnt}）", "value": name} for name, cnt in rows])
+    return ResponseModel(
+        data=[
+            {"label": INDUSTRY_LABELS_ZH.get(name, name), "value": name, "count": cnt}
+            for name, cnt in rows
+        ]
+    )
 
 
 @router.get("/tasks", response_model=ResponseModel[PageResponse[TaskOut]], summary="任务列表")

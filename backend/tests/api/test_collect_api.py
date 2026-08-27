@@ -16,6 +16,25 @@ async def test_geo_options(client, admin_credentials):
     assert "Kuala Lumpur" in data["cities_by_country"]["MY"]
 
 
+async def test_industries_chinese_labels(client, admin_credentials):
+    """行业选项：value 保持原 token（筛选精确），label 出中文；未收录词表原样显示。"""
+    h = await _login(client, admin_credentials)
+    await client.post("/api/v1/collect/leads", headers=h, json={
+        "name": "Zh Label Co", "country": "MY", "website": "https://zhlabel.com", "industry": "dentist"})
+    await client.post("/api/v1/collect/leads", headers=h, json={
+        "name": "Zh Custom Co", "country": "MY", "website": "https://zhcustom.com", "industry": "custom_xyz"})
+    items = (await client.get("/api/v1/collect/industries", headers=h)).json()["data"]
+    by_value = {i["value"]: i for i in items}
+    assert by_value["dentist"]["label"] == "牙科诊所"
+    assert by_value["dentist"]["count"] >= 1
+    assert by_value["custom_xyz"]["label"] == "custom_xyz"  # 未收录原样，不瞎翻译
+    # 清理
+    for v in ("zhlabel.com", "zhcustom.com"):
+        r = await client.get("/api/v1/collect/leads", headers=h, params={"keyword": v})
+        for it in r.json()["data"]["items"]:
+            await client.delete(f"/api/v1/collect/leads/{it['id']}", headers=h)
+
+
 async def test_lead_create_merge_and_filters(client, admin_credentials):
     h = await _login(client, admin_credentials)
     # 录入同公司两次：第二次应合并（同 domain）
