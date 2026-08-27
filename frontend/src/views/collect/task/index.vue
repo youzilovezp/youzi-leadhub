@@ -185,7 +185,12 @@ const columns: DataTableColumns<CollectTask> = [
         row.is_implicit ? h(NTag, { size: 'tiny', style: 'margin-left:6px' }, { default: () => '手动' }) : null,
       ]),
   },
-  { title: '采集器', key: 'collector', width: 130 },
+  {
+    title: '采集器',
+    key: 'collector',
+    width: 170,
+    render: (row) => collectors.value.find((c) => c.name === row.collector)?.title ?? row.collector,
+  },
   {
     title: '定时',
     key: 'cron_expr',
@@ -212,12 +217,8 @@ const columns: DataTableColumns<CollectTask> = [
       return `${row.progress_done}/${row.progress_total}`
     },
   },
-  {
-    title: '线索(新/合)',
-    key: 'leads',
-    width: 100,
-    render: (row) => `${row.leads_added}/${row.leads_merged}`,
-  },
+  { title: '新增线索', key: 'leads_added', width: 90, render: (row) => row.leads_added },
+  { title: '合并线索', key: 'leads_merged', width: 90, render: (row) => row.leads_merged },
   { title: '最近执行', key: 'last_run_at', width: 160, render: (row) => (row.last_run_at ? formatTime(row.last_run_at) : '—') },
   {
     title: '操作',

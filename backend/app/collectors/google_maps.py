@@ -31,7 +31,7 @@ _MAX_PAGES = 3
 
 class GoogleMapsCollector(Collector):
     name = "google_maps"
-    title = "Google Maps 商家"
+    title = "谷歌地图商家"
     param_schema = [
         {
             "key": "country",

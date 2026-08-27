@@ -24,6 +24,13 @@ function industryLabel(value: string | null): string {
   return industryOptions.value.find((i) => i.value === value)?.label ?? value
 }
 
+/** 国家码 → 「🇲🇾 马来西亚」（复用 geo-options 数据源；未知码原样显示） */
+function countryLabel(code: string | null): string {
+  if (!code) return ''
+  const hit = geo.value.countries.find((c) => c.value === code.toUpperCase())
+  return hit ? hit.label.replace(/\s*\([^)]*\)\s*$/, '') : code
+}
+
 async function fetchIndustryOptions() {
   industryOptions.value = await collectApi.getIndustryOptions()
 }
@@ -45,12 +52,17 @@ function whatsappFilter(): boolean | undefined {
 }
 
 const sourceOptions = [
-  { label: 'OpenStreetMap', value: 'osm_overpass' },
-  { label: 'Google Maps', value: 'google_maps' },
+  { label: '开源地图', value: 'osm_overpass' },
+  { label: '谷歌地图', value: 'google_maps' },
   { label: '招聘监控', value: 'job_posting' },
-  { label: '富化检测', value: 'website_enrich' },
+  { label: '网站富化', value: 'website_enrich' },
   { label: '手工录入', value: 'manual' },
 ]
+
+/** 来源 token → 中文名（表格列与筛选用同一词表，未收录原样显示） */
+function sourceLabel(token: string): string {
+  return sourceOptions.find((s) => s.value === token)?.label ?? token
+}
 
 /** 手工录入：国家选中的城市建议（可搜索可手输） */
 const cityOptions = computed(() =>
@@ -162,7 +174,7 @@ const columns: DataTableColumns<Lead> = [
           : null,
       ]),
   },
-  { title: '国家/城市', key: 'country', width: 120, render: (row) => [row.country, row.city].filter(Boolean).join(' · ') },
+  { title: '国家/城市', key: 'country', width: 150, render: (row) => [countryLabel(row.country), row.city].filter(Boolean).join(' · ') || '—' },
   { title: '行业', key: 'industry', width: 110, ellipsis: { tooltip: true }, render: (row) => industryLabel(row.industry) },
   {
     title: '评分',
@@ -191,9 +203,12 @@ const columns: DataTableColumns<Lead> = [
   {
     title: '来源',
     key: 'sources',
-    width: 130,
+    width: 150,
     ellipsis: { tooltip: true },
-    render: (row) => (row.sources || []).map((s) => s.source).join(','),
+    render: (row) => {
+      const names = (row.sources || []).map((s) => sourceLabel(s.source))
+      return names.length ? names.join('、') : '—'
+    },
   },
   { title: '采集时间', key: 'created_at', width: 160, render: (row) => formatTime(row.created_at) },
   {
@@ -258,7 +273,7 @@ onUnmounted(() => {
     <!-- 筛选 -->
     <n-card size="small" class="mb-4">
       <div class="flex flex-wrap items-center gap-3">
-        <n-input v-model:value="query.keyword" placeholder="名称/邮箱/域名/电话/城市" clearable style="width: 220px" @keyup.enter="() => { query.page = 1; fetchData() }" />
+        <n-input v-model:value="query.keyword" placeholder="关键词：名称/邮箱/域名/电话/城市" clearable style="width: 230px" @keyup.enter="() => { query.page = 1; fetchData() }" />
         <n-select
           v-model:value="query.country"
           :options="(geo.countries as any)"
@@ -276,8 +291,8 @@ onUnmounted(() => {
           filterable
           style="width: 160px"
         />
-        <n-select v-model:value="query.source" :options="sourceOptions" placeholder="来源" clearable style="width: 130px" />
-        <n-input-number v-model:value="query.min_score" placeholder="最低分" clearable style="width: 110px" :min="0" />
+        <n-select v-model:value="query.source" :options="sourceOptions" placeholder="来源" clearable style="width: 125px" />
+        <n-input-number v-model:value="query.min_score" placeholder="最低分" clearable style="width: 105px" :min="0" />
         <n-select
           v-model:value="query.whatsapp"
           :options="[
