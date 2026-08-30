@@ -26,6 +26,10 @@ async def start() -> None:
     if not settings.SCHEDULER_ENABLED:
         logger.info("⏭️  定时调度未开启（SCHEDULER_ENABLED=false）")
         return
+    if settings.WORKERS > 1:
+        # 防御性兜底：多进程同时开 cron 会重复入队/互相覆盖内存取消事件
+        logger.warning("⏭️  WORKERS>1，定时调度未启动（单进程设计，防重复触发）")
+        return
     # 不传 timezone：默认 tzlocal 本地时区。曾用 str(datetime.now().astimezone().tzinfo)，
     # 得到 "CST" 这类非 IANA 名，APScheduler 解析抛 ZoneInfoNotFoundError 启动即崩。
     scheduler = AsyncIOScheduler()

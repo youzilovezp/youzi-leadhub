@@ -186,40 +186,40 @@ async def _alembic_cmd(*args: str, success_msg: str) -> None:
 # ---------- 种子数据 ----------
 DEMO_USERS = [
     # (username, nickname, email, role_code, password_plain)
-    ("manager", "张经理", "manager@example.com", "manager", "Demo@123"),
-    ("alice", "李爱丽丝", "alice@example.com", "employee", "Demo@123"),
-    ("bob", "王伯伯", "bob@example.com", "employee", "Demo@123"),
+    ("manager", "张经理", "manager@example.com", "sales_manager", "Demo@123"),
+    ("alice", "李爱丽丝", "alice@example.com", "sales", "Demo@123"),
+    ("bob", "王伯伯", "bob@example.com", "sales", "Demo@123"),
 ]
 
 
 async def create_initial_data() -> None:
-    """插入种子数据：3 个角色 + 1 管理员 + 3 demo 用户。
+    """插入种子数据：PRD 五角色（含权限码）+ 1 管理员 + 3 demo 用户。
 
-    生产环境（APP_ENV=prod）**只创建 admin + 3 个角色**，不创建 demo 用户。
+    生产环境（APP_ENV=prod）**只创建 admin + 5 个角色**，不创建 demo 用户。
     这样可以避免 Demo@123 这种公开凭据进入生产 DB。
 
     - admin / 默认 admin（--admin-pass 可指定）
     - manager / alice / bob 仅 dev 环境创建（dev 默认密码 Demo@123）
+    - 角色权限码与迁移 d2b1e98f091f 共用 ROLE_SEEDS 口径：新库走
+      create_all+stamp（迁移种子不执行），必须在这里把 RBAC 种齐
     """
+    from app.models.role import ROLE_SEEDS
+
     async with async_session() as session:
         # ---------- 角色 ----------
         # 不指定 id，让 sequence 自增——避免与已有数据 PK 冲突
-        seed_roles = [
-            Role(name="超级管理员", code="admin", remark="系统内置"),
-            Role(name="部门经理", code="manager", remark="demo 数据"),
-            Role(name="普通员工", code="employee", remark="demo 数据"),
-        ]
-        # 用 code 查角色（不是 id），避免与已有数据 PK 冲突
         code_to_id: dict[str, int] = {}
-        for role in seed_roles:
-            stmt = select(Role).where(Role.code == role.code)
+        for code, name, perms in ROLE_SEEDS:
+            stmt = select(Role).where(Role.code == code)
             existing = (await session.execute(stmt)).scalar_one_or_none()
             if existing is None:
-                session.add(role)
+                existing = Role(name=name, code=code, permissions=perms, remark="系统内置")
+                session.add(existing)
                 await session.flush()  # flush 让新角色拿到 id
-                code_to_id[role.code] = role.id
-            else:
-                code_to_id[role.code] = existing.id
+            elif not existing.permissions:
+                # 旧库角色无权限码（ROLE_SEEDS 出现之前建的）→ 补齐
+                existing.permissions = perms
+            code_to_id[code] = existing.id
         await session.commit()
 
         # ---------- 管理员 ----------

@@ -1,7 +1,8 @@
 """销售域接口：商机（轻量 CRM）+ 话术审核队列 + 高价值预警 + AI 能力 + 漏斗/排行/数据源。
 
-权限（§42）：商机与话术 = 登录用户（销售工作台，lead:write）；
-预警/AI/漏斗/排行 = 登录用户可看（团队口径数据由查询范围控制）。
+权限（§42/§43）：
+- 商机/话术/AI/预警：登录用户 + 数据权限（own/team 级只能操作可见线索）
+- 漏斗/排行/数据源：stats:read 权限码（主管/运营/数据管理员）
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import case, func, select
 
 from app.api.deps import CurrentUser, SessionDep
-from app.api.perms import require_permission
+from app.api.perms import lead_visible, require_permission, scope_filter_params
 from app.collectors import list_collectors
 from app.core.exceptions import BusinessError, NotFoundError
 from app.crud.lead_events import describe_dimensions
@@ -46,13 +47,30 @@ from app.services import llm
 router = APIRouter()
 
 RequireLeadRead = Depends(require_permission("lead:read"))
+RequireStatsRead = Depends(require_permission("stats:read"))
 
 
-async def _get_lead(db: SessionDep, lead_id: int) -> Lead:
+async def _get_lead(db: SessionDep, lead_id: int, user: User) -> Lead:
+    """取线索并做数据权限校验（own/team 级只能访问自己 + 共享池）。
+
+    越权与不存在同返 404——不向受限用户泄露线索存在性（与 collect 详情口径一致）。
+    """
     lead = await db.get(Lead, lead_id)
     if lead is None:
         raise NotFoundError("线索不存在")
+    scope_owner_ids, _ = await scope_filter_params(db, user)
+    if not lead_visible(lead.owner_id, scope_owner_ids):
+        raise NotFoundError("线索不存在")
     return lead
+
+
+def _lead_scope_cond(lead_model, scope_owner_ids: list[int] | None):
+    """列表类查询的线索归属过滤（None = 不过滤；否则限定 owner ∈ 范围 + 共享池）。"""
+    from sqlalchemy import or_
+
+    if scope_owner_ids is None:
+        return None
+    return or_(lead_model.owner_id.is_(None), lead_model.owner_id.in_(scope_owner_ids))
 
 
 # ---------- 商机（PRD §37） ----------
@@ -63,8 +81,8 @@ async def _get_lead(db: SessionDep, lead_id: int) -> Lead:
     response_model=ResponseModel[list[OpportunityOut]],
     summary="商机列表",
 )
-async def list_lead_opportunities(db: SessionDep, _user: CurrentUser, lead_id: int):
-    await _get_lead(db, lead_id)
+async def list_lead_opportunities(db: SessionDep, user: CurrentUser, lead_id: int):
+    await _get_lead(db, lead_id, user)
     opps = await list_opportunities(db, lead_id)
     name_map = await _user_name_map(db, {o.owner_id for o in opps})
     outs = []
@@ -83,7 +101,7 @@ async def list_lead_opportunities(db: SessionDep, _user: CurrentUser, lead_id: i
 async def create_lead_opportunity(
     db: SessionDep, user: CurrentUser, lead_id: int, payload: OpportunityCreate
 ):
-    lead = await _get_lead(db, lead_id)
+    lead = await _get_lead(db, lead_id, user)
     opp = await create_opportunity(db, lead, payload, owner_id=lead.owner_id or user.id)
     await db.commit()
     await db.refresh(opp)
@@ -99,12 +117,12 @@ async def create_lead_opportunity(
 )
 async def update_lead_opportunity(
     db: SessionDep,
-    _user: CurrentUser,
+    user: CurrentUser,
     lead_id: int,
     opp_id: int,
     payload: OpportunityUpdate,
 ):
-    lead = await _get_lead(db, lead_id)
+    lead = await _get_lead(db, lead_id, user)
     opp = await get_opportunity(db, lead_id, opp_id)
     if opp is None:
         raise NotFoundError("商机不存在")
@@ -120,9 +138,9 @@ async def update_lead_opportunity(
     summary="删除商机",
 )
 async def delete_lead_opportunity(
-    db: SessionDep, _user: CurrentUser, lead_id: int, opp_id: int
+    db: SessionDep, user: CurrentUser, lead_id: int, opp_id: int
 ):
-    lead = await _get_lead(db, lead_id)
+    lead = await _get_lead(db, lead_id, user)
     opp = await get_opportunity(db, lead_id, opp_id)
     if opp is None:
         raise NotFoundError("商机不存在")
@@ -154,7 +172,7 @@ async def _user_name_map(db: SessionDep, ids: set[int | None]) -> dict[int | Non
 )
 async def list_messages(
     db: SessionDep,
-    _user: CurrentUser,
+    user: CurrentUser,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
     status: str | None = None,
@@ -165,11 +183,19 @@ async def list_messages(
         conds.append(SalesMessage.status == status)
     if lead_id:
         conds.append(SalesMessage.lead_id == lead_id)
-    stmt = select(SalesMessage)
-    count_stmt = select(func.count()).select_from(SalesMessage)
-    for c in conds:
-        stmt = stmt.where(c)
-        count_stmt = count_stmt.where(c)
+    # 数据权限（§43）：own/team 级只能看可见线索的话术（join Lead 限定归属）
+    scope_owner_ids, _ = await scope_filter_params(db, user)
+    scope_cond = _lead_scope_cond(Lead, scope_owner_ids)
+
+    def _apply(st):
+        for c in conds:
+            st = st.where(c)
+        if scope_cond is not None:
+            st = st.join(Lead, Lead.id == SalesMessage.lead_id).where(scope_cond)
+        return st
+
+    stmt = _apply(select(SalesMessage))
+    count_stmt = _apply(select(func.count()).select_from(SalesMessage))
     total = (await db.execute(count_stmt)).scalar_one()
     items = list(
         (
@@ -206,7 +232,7 @@ async def list_messages(
 async def generate_message(db: SessionDep, user: CurrentUser, lead_id: int):
     from app.crud.opportunity import create_message
 
-    lead = await _get_lead(db, lead_id)
+    lead = await _get_lead(db, lead_id, user)
     result = await llm.sales_script(lead)
     msg = await create_message(
         db, lead, result["script"], generated_by=result["generated_by"], created_by=user.id
@@ -229,11 +255,16 @@ async def review_message_endpoint(
     msg = await get_message(db, message_id)
     if msg is None:
         raise NotFoundError("话术不存在")
+    if msg.lead_id:
+        # 数据权限：只能审核可见线索的话术
+        await _get_lead(db, msg.lead_id, user)
     msg = await review_message(db, msg, payload.action, reviewer_id=user.id)
     await db.commit()
     await db.refresh(msg)
     out = MessageOut.model_validate(msg)
-    out.lead_name = (await db.get(Lead, msg.lead_id)).name if msg.lead_id else None
+    if msg.lead_id:
+        lead_row = await db.get(Lead, msg.lead_id)
+        out.lead_name = lead_row.name if lead_row else None
     return ResponseModel(data=out)
 
 
@@ -247,18 +278,22 @@ async def review_message_endpoint(
 )
 async def list_alerts(
     db: SessionDep,
-    _user: CurrentUser,
+    user: CurrentUser,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
 ):
+    scope_owner_ids, _ = await scope_filter_params(db, user)
+    scope_cond = _lead_scope_cond(Lead, scope_owner_ids)
     stmt = select(LeadEvent, Lead.name, Lead.grade).join(Lead, LeadEvent.lead_id == Lead.id).where(
         LeadEvent.is_alert
     )
-    total = (
-        await db.execute(
-            select(func.count()).select_from(LeadEvent).where(LeadEvent.is_alert)
-        )
-    ).scalar_one()
+    count_stmt = select(func.count()).select_from(LeadEvent).join(
+        Lead, LeadEvent.lead_id == Lead.id
+    ).where(LeadEvent.is_alert)
+    if scope_cond is not None:
+        stmt = stmt.where(scope_cond)
+        count_stmt = count_stmt.where(scope_cond)
+    total = (await db.execute(count_stmt)).scalar_one()
     rows = (
         await db.execute(
             stmt.order_by(LeadEvent.id.desc()).offset((page - 1) * page_size).limit(page_size)
@@ -285,8 +320,8 @@ async def list_alerts(
     response_model=ResponseModel[AiAnalysisOut],
     summary="AI 分析客户（企业概况/机会/痛点/推荐/切入点；LLM 未配置降级规则模板）",
 )
-async def ai_analysis_endpoint(db: SessionDep, _user: CurrentUser, lead_id: int):
-    lead = await _get_lead(db, lead_id)
+async def ai_analysis_endpoint(db: SessionDep, user: CurrentUser, lead_id: int):
+    lead = await _get_lead(db, lead_id, user)
     from app.crud.contact import list_contacts
 
     contacts = await list_contacts(db, lead_id)
@@ -300,8 +335,8 @@ async def ai_analysis_endpoint(db: SessionDep, _user: CurrentUser, lead_id: int)
     response_model=ResponseModel[ScriptOut],
     summary="生成销售话术（不落库，预览用；入队列走 messages/generate）",
 )
-async def sales_script_endpoint(db: SessionDep, _user: CurrentUser, lead_id: int):
-    lead = await _get_lead(db, lead_id)
+async def sales_script_endpoint(db: SessionDep, user: CurrentUser, lead_id: int):
+    lead = await _get_lead(db, lead_id, user)
     return ResponseModel(data=ScriptOut(**(await llm.sales_script(lead))))
 
 
@@ -330,7 +365,7 @@ async def search_nl(
 
 
 @router.get("/funnel", response_model=ResponseModel[dict], summary="销售漏斗（各阶段线索数 + 商机金额口径）")
-async def funnel_endpoint(db: SessionDep, _user: CurrentUser):
+async def funnel_endpoint(db: SessionDep, _user: User = RequireStatsRead):
     return ResponseModel(data=await funnel_stats(db))
 
 
@@ -339,7 +374,7 @@ async def funnel_endpoint(db: SessionDep, _user: CurrentUser):
     response_model=ResponseModel[list[dict]],
     summary="销售排行榜（Lead 数 / 商机数 / 成交数 / 成交金额，PRD §40）",
 )
-async def leaderboard_endpoint(db: SessionDep, _user: CurrentUser):
+async def leaderboard_endpoint(db: SessionDep, _user: User = RequireStatsRead):
     # 商机口径排行（opportunities 有 owner 与金额）
     rows = (
         await db.execute(
@@ -389,7 +424,7 @@ async def leaderboard_endpoint(db: SessionDep, _user: CurrentUser):
     response_model=ResponseModel[list[dict]],
     summary="数据源管理（per-collector 状态/任务数/成功率/数据量/最后运行，从任务表聚合）",
 )
-async def data_sources_endpoint(db: SessionDep, _user: CurrentUser):
+async def data_sources_endpoint(db: SessionDep, _user: User = RequireStatsRead):
     rows = (
         await db.execute(
             select(

@@ -43,12 +43,24 @@ async def lifespan(app: FastAPI):
         _check_prod_secrets()
     await init_db()
 
-    # 线索采集：后台任务执行器 + 定时调度（多 worker 部署只在单进程开 SCHEDULER_ENABLED）
+    # 线索采集：后台任务执行器 + 定时调度。
+    # ⚠️ 任务系统是单进程设计（取消事件/进度在进程内存，DB 队列无行锁）：
+    # WORKERS>1 时多进程会互相把对方 running 的任务判 failed、取消跨进程失效。
+    # 因此 WORKERS>1 时禁用任务执行——任务保持 queued，直到单进程实例接管。
+    from loguru import logger
+
     from app.services import scheduler as collect_scheduler
     from app.services.task_runner import task_runner
 
-    await task_runner.start()
-    await collect_scheduler.start()
+    if settings.WORKERS > 1:
+        logger.warning(
+            f"⚠️ WORKERS={settings.WORKERS} > 1：任务执行器与定时调度已禁用"
+            "（DB 队列单进程设计）。采集任务将保持 queued 状态。"
+            "需要执行任务的实例请设 WORKERS=1。"
+        )
+    else:
+        await task_runner.start()
+        await collect_scheduler.start()
 
     yield
 
