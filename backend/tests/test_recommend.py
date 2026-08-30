@@ -99,3 +99,48 @@ def test_sales_suggestion_grade_copy():
     assert "在招 WhatsApp" in sales_suggestion(
         grade="C", whatsapp_url=None, whatsapp_job=True, saas_signals={}
     )
+
+
+def test_rule_ads_agency_line():
+    """广告代理线（双业务线）：在投 Meta 广告即推荐，与 WA 使用无关。"""
+    recs = recommend_products(
+        whatsapp_hit=False,
+        whatsapp_url=None,
+        whatsapp_job=False,
+        scenes=[],
+        saas_signals={},
+        sources=[{"source": "meta_ads"}],
+    )
+    assert [r["key"] for r in recs] == ["ads_agency"]
+    # 无 WA 且无广告 → 空推荐
+    recs = recommend_products(
+        whatsapp_hit=False,
+        whatsapp_url=None,
+        whatsapp_job=False,
+        scenes=[],
+        saas_signals={},
+        sources=[{"source": "web_search"}],
+    )
+    assert recs == []
+
+
+def test_rule_overseas_saas_line():
+    """出海 SaaS 线：SaaS 需求信号成规模（≥2 类）即推荐 SaaS 方案。"""
+    recs = recommend_products(
+        whatsapp_hit=False,
+        whatsapp_url=None,
+        whatsapp_job=False,
+        scenes=[],
+        saas_signals={"crm": 1, "helpdesk": 1},
+    )
+    keys = [r["key"] for r in recs]
+    assert "overseas_saas" in keys
+    # 单一弱信号不推 SaaS 方案（避免噪推）
+    recs = recommend_products(
+        whatsapp_hit=False,
+        whatsapp_url=None,
+        whatsapp_job=False,
+        scenes=[],
+        saas_signals={"crm": 1},
+    )
+    assert "overseas_saas" not in [r["key"] for r in recs]

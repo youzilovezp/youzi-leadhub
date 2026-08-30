@@ -18,7 +18,7 @@ def test_detect_whatsapp_numbers_dedup():
 
 
 def test_detect_need_types_all_five():
-    """五类需求（§4.4）：消息/API升级/客服/营销/私域的判断信号组合。"""
+    """六类需求（§4.4 A-E + F 广告线）：消息/API升级/客服/营销/私域/广告的信号组合。"""
     needs = detect_need_types(
         whatsapp_hit=True,
         whatsapp_url="https://wa.me/60",
@@ -29,21 +29,22 @@ def test_detect_need_types_all_five():
         sources=[{"source": "meta_ads"}],
     )
     types = {n["type"] for n in needs}
-    assert types == {"messaging", "api_upgrade", "customer_service", "marketing", "private_domain"}
+    assert types == {
+        "messaging", "api_upgrade", "customer_service", "marketing", "private_domain", "ads",
+    }
     # 每类都带中文标签与卖点
     assert all(n["label"] and n["selling"] for n in needs)
 
 
 def test_detect_need_types_empty_without_whatsapp():
-    assert (
-        detect_need_types(
-            whatsapp_hit=False,
-            whatsapp_url=None,
-            scenes=["marketing", "transactional"],
-            sources=[{"source": "meta_ads"}],
-        )
-        == []
+    """无 WhatsApp 使用 → 五类 WA 线需求都不判；广告线（F）与 WA 无关，在投即成立。"""
+    needs = detect_need_types(
+        whatsapp_hit=False,
+        whatsapp_url=None,
+        scenes=["marketing", "transactional"],
+        sources=[{"source": "meta_ads"}],
     )
+    assert {n["type"] for n in needs} == {"ads"}
 
 
 def test_detect_need_types_api_upgrade_suppressed_by_saas():

@@ -10,17 +10,22 @@ from typing import Any
 
 from app.collectors.scenes import SAAS_LABELS_ZH
 
-# ---------- 产品目录 ----------
+# ---------- 产品目录（双业务线：WA 消息/SaaS + 广告代理） ----------
 
 PRODUCTS: dict[str, str] = {
+    # WhatsApp 消息线（BSP 主线）
     "wa_cs": "WhatsApp 客服 SaaS",
     "marketing_message": "WhatsApp 营销消息",
     "transactional_message": "WhatsApp 交易通知",
     "ai_cs": "WhatsApp AI 智能客服",
     "wa_api": "WhatsApp Business API",
+    # 出海 SaaS 线
+    "overseas_saas": "出海 SaaS 方案（CRM/客服/营销自动化）",
+    # 广告代理线（Meta/TikTok 一级代理）
+    "ads_agency": "Meta/TikTok 广告代理投放",
 }
 
-# ---------- 需求类型（补充需求 §4.4：A-E 五类，对应可售产品与卖点） ----------
+# ---------- 需求类型（§4.4 A-E + F 广告线，对应可售产品与卖点） ----------
 
 NEED_TYPES: dict[str, dict[str, str]] = {
     "messaging": {"label": "消息需求", "selling": "价格/送达率/稳定性"},
@@ -28,6 +33,8 @@ NEED_TYPES: dict[str, dict[str, str]] = {
     "customer_service": {"label": "客服需求", "selling": "多坐席客服 SaaS"},
     "marketing": {"label": "营销需求", "selling": "Marketing Message/自动化触达"},
     "private_domain": {"label": "私域需求", "selling": "私域运营方案（社群+营销活动）"},
+    # F 广告线（2026-08-31 双业务线）：与 WA 使用无关，在投广告即成立
+    "ads": {"label": "广告投放需求", "selling": "Meta/TikTok 一级代理开户/优化/返点"},
 }
 
 
@@ -49,6 +56,7 @@ def detect_need_types(
     C 客服需求：WhatsApp + 客服场景/在招客服/多分线
     D 营销需求：meta_ads 在投 + WhatsApp + 独立站
     E 私域需求：多 WhatsApp 号 + 营销场景（社群/活动运营形态）
+    F 广告投放：在投 Meta 广告（与 WA 使用无关——双业务线同客双报价）
     """
     scene_set = set(scenes or [])
     saas = set(saas_signals or {})
@@ -58,6 +66,8 @@ def detect_need_types(
     using_bsp = "wa_bsp" in saas  # 已在用 WhatsApp SaaS 竞品（§4.1 替换商机）
     out: list[dict[str, str]] = []
 
+    if ad_running:
+        out.append({"type": "ads", **NEED_TYPES["ads"]})
     if using_bsp:
         out.append({
             "type": "api_upgrade",
@@ -101,11 +111,17 @@ def recommend_products(
     saas_signals: dict[str, Any] | None,
     industry: str | None = None,
     dim_saas: int = 0,
+    sources: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """返回 [{key, name, reason, priority(1=最强)}]，按 priority 升序，可为空。"""
+    """返回 [{key, name, reason, priority(1=最强)}]，按 priority 升序，可为空。
+
+    双业务线（2026-08-31）：WA 消息线 + 出海 SaaS 线 + 广告代理线，
+    同一客户可同时命中多线（§十四.6 线索双需求归属）。
+    """
     scene_set = set(scenes or [])
     saas = set(saas_signals or {})
     wa = _uses_whatsapp(whatsapp_hit, whatsapp_url)
+    ad_running = any(r.get("source") == "meta_ads" for r in (sources or []))
     recs: list[dict[str, Any]] = []
 
     # 规则一：在用 WA +（客服场景 或 在招 WA 客服岗）→ 客服 SaaS
@@ -152,6 +168,29 @@ def recommend_products(
                 "name": PRODUCTS["ai_cs"],
                 "reason": "检测到 AI/智能客服相关信号，客服自动化升级意向明显",
                 "priority": 3,
+            }
+        )
+
+    # 规则五（出海 SaaS 线）：SaaS 需求信号成规模（≥2 类或维度分≥40）→ SaaS 方案
+    if len(saas) >= 2 or dim_saas >= 40:
+        recs.append(
+            {
+                "key": "overseas_saas",
+                "name": PRODUCTS["overseas_saas"],
+                "reason": "官网呈现 CRM/客服/营销自动化等多类工具需求信号，可推自研出海 SaaS 套件",
+                "priority": 3,
+            }
+        )
+
+    # 规则六（广告代理线）：在投 Meta 广告 → 一级代理投放服务
+    # （双业务线同客双报价：消息/SaaS 之外的第二条腿）
+    if ad_running:
+        recs.append(
+            {
+                "key": "ads_agency",
+                "name": PRODUCTS["ads_agency"],
+                "reason": "检测到在投 Meta 广告，可切入代理开户/优化/返点（与消息线同客双报价）",
+                "priority": 2,
             }
         )
 
