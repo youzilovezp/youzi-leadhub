@@ -96,22 +96,58 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div v-if="task" class="page">
-    <n-card size="small" class="mb-4">
+  <div
+    v-if="task"
+    class="page"
+  >
+    <n-card
+      size="small"
+      class="mb-4"
+    >
       <div class="flex items-center gap-3">
-        <n-button quaternary size="small" @click="router.push('/collect/task')">← 返回</n-button>
-        <h2 class="detail-title">任务 #{{ task.id }} {{ task.name }}</h2>
-        <n-tag :type="(statusTag[task.status]?.type as any) || 'default'" size="small">
+        <n-button
+          quaternary
+          size="small"
+          @click="router.push('/collect/task')"
+        >
+          ← 返回
+        </n-button>
+        <h2 class="detail-title">
+          任务 #{{ task.id }} {{ task.name }}
+        </h2>
+        <n-tag
+          :type="(statusTag[task.status]?.type as any) || 'default'"
+          size="small"
+        >
           {{ statusTag[task.status]?.label || task.status }}
         </n-tag>
         <div class="flex-1" />
-        <n-button v-if="active" type="warning" secondary size="small" @click="handleCancel">取消任务</n-button>
-        <n-button v-else type="primary" secondary size="small" @click="handleRun">再次执行</n-button>
+        <n-button
+          v-if="active"
+          type="warning"
+          secondary
+          size="small"
+          @click="handleCancel"
+        >
+          取消任务
+        </n-button>
+        <n-button
+          v-else
+          type="primary"
+          secondary
+          size="small"
+          @click="handleRun"
+        >
+          再次执行
+        </n-button>
       </div>
     </n-card>
 
     <div class="grid gap-4 detail-grid">
-      <n-card size="small" title="参数与进度">
+      <n-card
+        size="small"
+        title="参数与进度"
+      >
         <div class="kv">
           <span class="k">采集器</span><span>{{ task.collector }}</span>
           <span class="k">定时</span><span>{{ task.cron_expr || '手动' }}</span>
@@ -140,13 +176,33 @@ onUnmounted(() => {
         </div>
       </n-card>
 
-      <n-card size="small" title="执行日志">
+      <n-card
+        size="small"
+        title="执行日志"
+      >
         <template #header-extra>
-          <n-checkbox v-model:checked="logAutoScroll" size="small">自动滚动</n-checkbox>
+          <n-checkbox
+            v-model:checked="logAutoScroll"
+            size="small"
+          >
+            自动滚动
+          </n-checkbox>
         </template>
-        <div ref="logBox" class="log-box">
-          <div v-if="!logs.length && !logLoading" class="log-empty">暂无日志</div>
-          <div v-for="log in logs" :key="log.id" class="log-line">
+        <div
+          ref="logBox"
+          class="log-box"
+        >
+          <div
+            v-if="!logs.length && !logLoading"
+            class="log-empty"
+          >
+            暂无日志
+          </div>
+          <div
+            v-for="log in logs"
+            :key="log.id"
+            class="log-line"
+          >
             <span class="log-time">{{ formatTime(log.created_at) }}</span>
             <span :style="{ color: levelColor(log.level) }">[{{ log.level }}]</span>
             <span class="log-msg">{{ log.message }}</span>

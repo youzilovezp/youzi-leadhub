@@ -211,7 +211,12 @@ onMounted(() => {
   <div class="page">
     <!-- 搜索栏 -->
     <div class="mb-4 flex flex-wrap items-center gap-3">
-      <n-input v-model:value="query.username" clearable placeholder="用户名模糊搜索" style="width: 200px" />
+      <n-input
+        v-model:value="query.username"
+        clearable
+        placeholder="用户名模糊搜索"
+        style="width: 200px"
+      />
       <n-select
         v-model:value="query.is_active"
         clearable
@@ -222,7 +227,13 @@ onMounted(() => {
         ]"
         style="width: 120px"
       />
-      <n-button type="primary" secondary @click="() => { query.page = 1; fetchData() }">查询</n-button>
+      <n-button
+        type="primary"
+        secondary
+        @click="() => { query.page = 1; fetchData() }"
+      >
+        查询
+      </n-button>
       <n-button
         quaternary
         @click="() => { query.username = ''; query.is_active = undefined; fetchData() }"
@@ -230,7 +241,12 @@ onMounted(() => {
         重置
       </n-button>
       <div class="flex-1" />
-      <n-button type="primary" @click="openCreate">新增用户</n-button>
+      <n-button
+        type="primary"
+        @click="openCreate"
+      >
+        新增用户
+      </n-button>
     </div>
 
     <!-- 表格（服务端分页） -->
@@ -266,23 +282,44 @@ onMounted(() => {
         label-placement="left"
         label-width="72"
       >
-        <n-form-item label="用户名" path="username">
-          <n-input v-model:value="form.username" :disabled="dialogMode === 'edit'" />
+        <n-form-item
+          label="用户名"
+          path="username"
+        >
+          <n-input
+            v-model:value="form.username"
+            :disabled="dialogMode === 'edit'"
+          />
         </n-form-item>
-        <n-form-item v-if="dialogMode === 'create'" label="密码" path="password">
-          <n-input v-model:value="form.password" type="password" show-password-on="click" />
+        <n-form-item
+          v-if="dialogMode === 'create'"
+          label="密码"
+          path="password"
+        >
+          <n-input
+            v-model:value="form.password"
+            type="password"
+            show-password-on="click"
+          />
         </n-form-item>
         <n-form-item label="昵称">
           <n-input v-model:value="form.nickname" />
         </n-form-item>
-        <n-form-item label="邮箱" path="email">
+        <n-form-item
+          label="邮箱"
+          path="email"
+        >
           <n-input v-model:value="form.email" />
         </n-form-item>
         <n-form-item label="手机号">
           <n-input v-model:value="form.phone" />
         </n-form-item>
         <n-form-item label="角色">
-          <n-select v-model:value="form.role_id" placeholder="请选择" :options="roleOptions()" />
+          <n-select
+            v-model:value="form.role_id"
+            placeholder="请选择"
+            :options="roleOptions()"
+          />
         </n-form-item>
         <n-form-item label="状态">
           <n-switch v-model:value="form.is_active" />
@@ -290,8 +327,15 @@ onMounted(() => {
       </n-form>
       <template #footer>
         <div class="flex justify-end gap-3">
-          <n-button @click="dialogVisible = false">取消</n-button>
-          <n-button type="primary" @click="handleSubmit">提交</n-button>
+          <n-button @click="dialogVisible = false">
+            取消
+          </n-button>
+          <n-button
+            type="primary"
+            @click="handleSubmit"
+          >
+            提交
+          </n-button>
         </div>
       </template>
     </n-modal>

@@ -17,6 +17,10 @@ import {
   CompassOutline,
   ListOutline,
   DownloadOutline,
+  FlashOutline,
+  PulseOutline,
+  NotificationsOutline,
+  ChatbubbleEllipsesOutline,
 } from '@vicons/ionicons5'
 import { useUserStore } from '@/stores/user'
 import { useAppStore, THEME_PRESETS } from '@/stores/app'
@@ -41,6 +45,16 @@ const menus: MenuOption[] = [
     children: [
       { label: '线索列表', key: '/collect/lead', icon: renderIcon(ListOutline) },
       { label: '采集任务', key: '/collect/task', icon: renderIcon(DownloadOutline) },
+    ],
+  },
+  {
+    label: '销售工作台',
+    key: 'sales',
+    icon: renderIcon(FlashOutline),
+    children: [
+      { label: '销售驾驶舱', key: '/sales', icon: renderIcon(PulseOutline) },
+      { label: '高价值预警', key: '/sales/alerts', icon: renderIcon(NotificationsOutline) },
+      { label: '话术审核', key: '/sales/messages', icon: renderIcon(ChatbubbleEllipsesOutline) },
     ],
   },
   {
@@ -95,7 +109,10 @@ async function handleUserCommand(key: string) {
 </script>
 
 <template>
-  <n-layout class="layout-container" has-sider>
+  <n-layout
+    class="layout-container"
+    has-sider
+  >
     <!-- 侧边栏 -->
     <n-layout-sider
       bordered
@@ -108,8 +125,15 @@ async function handleUserCommand(key: string) {
       :native-scrollbar="false"
     >
       <div class="logo">
-        <img src="/youzi-logo.svg" alt="logo" class="logo-img" />
-        <span v-if="!appStore.sidebarCollapsed" class="logo-text">{{ APP_TITLE }}</span>
+        <img
+          src="/youzi-logo.svg"
+          alt="logo"
+          class="logo-img"
+        >
+        <span
+          v-if="!appStore.sidebarCollapsed"
+          class="logo-text"
+        >{{ APP_TITLE }}</span>
       </div>
       <n-menu
         :value="activeMenu"
@@ -125,14 +149,22 @@ async function handleUserCommand(key: string) {
       <!-- 顶栏：毛玻璃 -->
       <header class="layout-header">
         <div class="header-left">
-          <n-button quaternary circle @click="appStore.toggleSidebar">
+          <n-button
+            quaternary
+            circle
+            @click="appStore.toggleSidebar"
+          >
             <template #icon>
               <n-icon :component="MenuOutline" />
             </template>
           </n-button>
           <n-breadcrumb>
-            <n-breadcrumb-item @click="router.push('/dashboard')">首页</n-breadcrumb-item>
-            <n-breadcrumb-item v-if="route.meta.title">{{ route.meta.title }}</n-breadcrumb-item>
+            <n-breadcrumb-item @click="router.push('/dashboard')">
+              首页
+            </n-breadcrumb-item>
+            <n-breadcrumb-item v-if="route.meta.title">
+              {{ route.meta.title }}
+            </n-breadcrumb-item>
           </n-breadcrumb>
         </div>
         <div class="header-right">
@@ -149,16 +181,28 @@ async function handleUserCommand(key: string) {
           </n-button>
 
           <!-- 主题色 -->
-          <n-popover trigger="click" placement="bottom-end" :width="220">
+          <n-popover
+            trigger="click"
+            placement="bottom-end"
+            :width="220"
+          >
             <template #trigger>
-              <n-button quaternary circle title="主题色">
+              <n-button
+                quaternary
+                circle
+                title="主题色"
+              >
                 <template #icon>
                   <n-icon :component="ColorPaletteOutline" />
                 </template>
               </n-button>
             </template>
             <div class="swatch-grid">
-              <div v-for="p in THEME_PRESETS" :key="p.color" class="swatch-item">
+              <div
+                v-for="p in THEME_PRESETS"
+                :key="p.color"
+                class="swatch-item"
+              >
                 <button
                   type="button"
                   class="swatch"
@@ -173,9 +217,16 @@ async function handleUserCommand(key: string) {
           </n-popover>
 
           <!-- 用户 -->
-          <n-dropdown :options="userOptions" @select="handleUserCommand">
+          <n-dropdown
+            :options="userOptions"
+            @select="handleUserCommand"
+          >
             <span class="user-info">
-              <n-avatar round :size="30" :style="{ background: 'var(--yz-primary)' }">
+              <n-avatar
+                round
+                :size="30"
+                :style="{ background: 'var(--yz-primary)' }"
+              >
                 {{ userStore.userInfo?.nickname?.charAt(0) || 'U' }}
               </n-avatar>
               <span>{{ userStore.displayName }}</span>
@@ -186,7 +237,10 @@ async function handleUserCommand(key: string) {
       </header>
 
       <!-- 主内容 -->
-      <n-layout-content class="layout-main" :native-scrollbar="false">
+      <n-layout-content
+        class="layout-main"
+        :native-scrollbar="false"
+      >
         <router-view v-slot="{ Component }">
           <transition name="fade">
             <component :is="Component" />

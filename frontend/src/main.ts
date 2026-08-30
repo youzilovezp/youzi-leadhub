@@ -12,7 +12,7 @@ const app = createApp(App)
 
 // 全局错误兜底：未捕获的组件异常不打断应用
 app.config.errorHandler = (err, _instance, info) => {
-  // eslint-disable-next-line no-console
+   
   console.error(`[全局错误] ${info}:`, err)
 }
 

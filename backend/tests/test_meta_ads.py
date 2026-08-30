@@ -11,7 +11,7 @@ from app.collectors.meta_ad_library import (
     _is_company_category,
     _looks_cn,
 )
-from app.collectors.scoring import compute_score
+from app.collectors.scoring import score_lead_inputs
 from app.core.exceptions import BusinessError
 from app.crud.lead import upsert_lead
 
@@ -67,39 +67,33 @@ def test_is_company_category():
     assert _is_company_category(None) is True
 
 
-# ---------- 评分：FB 私域按钮是最强商机信号 ----------
+# ---------- 评分（V2 六维）：FB 私域 + 中国出海把出海度拉满 ----------
 
 
 def test_score_fb_whatsapp_signal():
-    score, hits = compute_score(
-        whatsapp_hit=True,
-        whatsapp_job=False,
-        website="https://acme.com",
-        email=None,
-        country="MY",
-        phone_raw="60123456789",
-        phone_e164="+60123456789",
-        social={"facebook": "https://facebook.com/acme"},
+    total, dims, grade = score_lead_inputs(
+        is_cn=True,
         fb_whatsapp=True,
+        country="MY",
+        website="https://acme.com",
+        whatsapp_hit=True,
+        whatsapp_url="https://wa.me/8613800138000",
+        social={"facebook": "https://facebook.com/acme"},
+        phone_raw="+8613800138000",
     )
-    # fb私域50 + plugin40 + website10 + region10 + phone5 + social5 = 120
-    assert score == 120
-    assert hits["fb_page_whatsapp"] == 50
+    # 出海100（CN45+FB私域30+目标区15+官网10） WA75（FB私域25+hit35+url15） 规模30
+    assert dims["overseas"] == 100
+    assert dims["whatsapp"] == 75
+    assert dims["scale"] == 30
+    # (100*25 + 75*30 + 30*10) / 100 = 50.5 → 50
+    assert total == 50 and grade == "B"
 
 
 def test_score_fb_whatsapp_absent_by_default():
-    """旧调用方不传 fb_whatsapp → 行为不变（默认 False）。"""
-    score, hits = compute_score(
-        whatsapp_hit=False,
-        whatsapp_job=False,
-        website=None,
-        email=None,
-        country=None,
-        phone_raw=None,
-        phone_e164=None,
-        social=None,
-    )
-    assert score == 0 and "fb_page_whatsapp" not in hits
+    """全空输入 → 0 分 C 级。"""
+    total, dims, grade = score_lead_inputs()
+    assert total == 0 and grade == "C"
+    assert dims == {k: 0 for k in ("overseas", "whatsapp", "saas", "scale", "marketing", "contact")}
 
 
 # ---------- 落库：is_cn / fb_whatsapp 布尔 OR 合并 ----------
@@ -126,8 +120,10 @@ async def test_upsert_meta_ads_draft(db_session):
     assert lead.is_cn and lead.fb_whatsapp
     assert lead.phone_e164 == "+8613800138000"  # wa 号码直接可拨
     assert lead.domain == "anker.com"
-    # fb私域50+plugin40+website10+region10+phone5+social5 = 120
-    assert lead.score == 120
+    # V2 六维：出海100 WA75 规模30 营销40 → (2500+2250+300+400)/100 = 54
+    assert lead.score == 54
+    assert lead.grade == "B"
+    assert lead.score_signals["overseas"] == 100
     assert lead.sources[0]["source"] == "meta_ads"
 
     # 再来一条无信号的同企业（同 domain 反查命中）→ 布尔保持 True，评分不回退
@@ -135,7 +131,7 @@ async def test_upsert_meta_ads_draft(db_session):
     lead2, created2 = await upsert_lead(db_session, d2)
     await db_session.commit()
     assert not created2 and lead2.id == lead.id
-    assert lead2.is_cn and lead2.fb_whatsapp and lead2.score == 120
+    assert lead2.is_cn and lead2.fb_whatsapp and lead2.score == 54
 
 
 # ---------- 失败路径：无 token 直接 failed（不产出空结果假成功） ----------

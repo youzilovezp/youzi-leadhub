@@ -1,33 +1,69 @@
-"""线索采集接口：线索列表/录入/删除/批量检测 WhatsApp + 跟进 + 任务管理。
+"""线索采集接口：线索列表/录入/删除/批量检测 WhatsApp + 跟进 + 任务管理
++ 企业画像详情 + 联系人 + 动态事件 + CSV 导出。
 
-权限：线索与跟进对所有登录用户开放（销售工作台）；
+权限：线索与跟进（含联系人）对所有登录用户开放（销售工作台）；
 任务管控（建/改/删/执行/取消）与删线索仅管理员。
 """
 
 from __future__ import annotations
 
+import csv
+import io
 from datetime import datetime, timezone
+from typing import Any
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy import select
 
 from app.api.deps import CurrentUser, SessionDep, SuperUser
+from app.api.perms import lead_visible, require_permission, scope_filter_params
 from app.collectors import list_collectors
+from app.collectors.recommend import detect_need_types, recommend_products, sales_suggestion
+from app.collectors.scenes import SAAS_LABELS_ZH, SCENE_LABELS_ZH
+from app.collectors.scoring import effective_dim_weights
 from app.core.exceptions import BusinessError, NotFoundError
-from app.crud.lead import search_leads, upsert_lead
+from app.crud.contact import (
+    create_contact,
+    delete_contact,
+    get_contact,
+    list_contacts,
+    update_contact,
+)
+from app.crud.lead import (
+    _lead_conditions,
+    assign_lead,
+    auto_assign_leads,
+    release_lead,
+    search_leads,
+    upsert_lead,
+)
+from app.crud.lead_events import describe_dimensions
+from app.crud.opportunity import list_opportunities
 from app.crud.task_crud import list_tasks as query_tasks
 from app.crud.task_crud import task_crud
 from app.models.collect_task import CollectTask, CollectTaskLog
-from app.models.lead import Lead, LeadFollowUp
+from app.models.lead import Lead, LeadContact, LeadEvent, LeadFollowUp
+from app.models.sales import Opportunity
 from app.models.user import User
 from app.schemas.collect import (
+    EXPORT_FIELD_KEYS,
+    EXPORT_FIELDS,
     FOLLOW_STATUS_OPTIONS,
+    AssignPayload,
+    AutoAssignPayload,
     CollectorInfo,
+    ContactCreate,
+    ContactOut,
+    ContactUpdate,
     FollowUpCreate,
     FollowUpOut,
     LeadCheckWhatsAppRequest,
     LeadCreate,
+    LeadDetailOut,
+    LeadEventOut,
     LeadOut,
+    OpportunityOut,
+    RecommendationOut,
     TaskCreate,
     TaskLogOut,
     TaskOut,
@@ -38,6 +74,9 @@ from app.services import scheduler as collect_scheduler
 from app.services.task_runner import task_runner
 
 router = APIRouter()
+
+# 权限依赖单例（B008：默认值中的函数调用需模块级变量）
+RequireAssignLead = Depends(require_permission("assign:lead"))
 
 
 async def _user_display_map(db: SessionDep, user_ids: set[int | None]) -> dict[int | None, str]:
@@ -54,16 +93,49 @@ async def _user_display_map(db: SessionDep, user_ids: set[int | None]) -> dict[i
 # ---------- 线索 ----------
 
 
+async def _fill_lead_list_fields(db: SessionDep, items: list[Lead], outs: list[LeadOut]) -> None:
+    """列表行批量注入 owner_name / contacts_count / recommended_products（防 N+1）。"""
+    from sqlalchemy import func
+
+    name_map = await _user_display_map(db, {i.owner_id for i in items})
+    counts: dict[int, int] = {}
+    if items:
+        rows = (
+            await db.execute(
+                select(LeadContact.lead_id, func.count())
+                .where(LeadContact.lead_id.in_([i.id for i in items]))
+                .group_by(LeadContact.lead_id)
+            )
+        ).all()
+        counts = {r[0]: r[1] for r in rows}
+    for i, o in zip(items, outs, strict=True):
+        o.owner_name = name_map.get(i.owner_id)
+        o.contacts_count = counts.get(i.id, 0)
+        o.recommended_products = [
+            r["name"]
+            for r in recommend_products(
+                whatsapp_hit=i.whatsapp_hit,
+                whatsapp_url=i.whatsapp_url,
+                whatsapp_job=i.whatsapp_job,
+                scenes=i.scenes,
+                saas_signals=i.saas_signals,
+                industry=i.industry,
+                dim_saas=describe_dimensions(i.score_signals).get("saas", 0),
+            )
+        ]
+
+
 @router.get("/leads", response_model=ResponseModel[PageResponse[LeadOut]], summary="线索列表")
 async def list_leads(
     db: SessionDep,
-    _user: CurrentUser,
+    user: CurrentUser,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=200),
     country: str | None = None,
     industry: str | None = None,
     source: str | None = None,
     min_score: int | None = Query(default=None, ge=0),
+    grade: str | None = Query(default=None, pattern="^[SABC]$"),
     whatsapp_hit: bool | None = None,
     has_website: bool | None = None,
     keyword: str | None = None,
@@ -72,6 +144,8 @@ async def list_leads(
     due_follow: bool | None = None,
     is_cn: bool | None = None,
 ):
+    # 数据权限（§43）：own/team 级强制限定可见 owner，接口层无旁路
+    scope_ids, include_unassigned = await scope_filter_params(db, user)
     items, total = await search_leads(
         db,
         page=page,
@@ -80,6 +154,7 @@ async def list_leads(
         industry=industry,
         source=source,
         min_score=min_score,
+        grade=grade,
         whatsapp_hit=whatsapp_hit,
         has_website=has_website,
         keyword=keyword,
@@ -87,13 +162,11 @@ async def list_leads(
         owner_id=owner_id,
         due_follow=due_follow,
         is_cn=is_cn,
+        scope_owner_ids=scope_ids,
+        scope_include_unassigned=include_unassigned,
     )
-    name_map = await _user_display_map(db, {i.owner_id for i in items})
-    outs = []
-    for i in items:
-        o = LeadOut.model_validate(i)
-        o.owner_name = name_map.get(i.owner_id)
-        outs.append(o)
+    outs = [LeadOut.model_validate(i) for i in items]
+    await _fill_lead_list_fields(db, items, outs)
     return ResponseModel(
         data=PageResponse[LeadOut](
             items=outs,
@@ -127,11 +200,458 @@ async def create_lead(db: SessionDep, _user: CurrentUser, payload: LeadCreate):
     return ResponseModel(data=LeadOut.model_validate(lead))
 
 
-@router.delete("/leads/{lead_id}", response_model=ResponseModel[None], summary="删除线索")
-async def delete_lead(db: SessionDep, _user: SuperUser, lead_id: int):
+@router.get("/leads/export", summary="导出线索 CSV（当前筛选口径，UTF-8 BOM 兼容 Excel）")
+async def export_leads(
+    db: SessionDep,
+    user: CurrentUser,
+    fields: str | None = Query(
+        default=None, description="逗号分隔的字段 key（见 EXPORT_FIELDS），缺省=全部"
+    ),
+    limit: int = Query(default=5000, ge=1, le=50000),
+    country: str | None = None,
+    industry: str | None = None,
+    source: str | None = None,
+    min_score: int | None = Query(default=None, ge=0),
+    grade: str | None = Query(default=None, pattern="^[SABC]$"),
+    whatsapp_hit: bool | None = None,
+    has_website: bool | None = None,
+    keyword: str | None = None,
+    follow_status: str | None = None,
+    owner_id: int | None = Query(default=None, ge=1),
+    due_follow: bool | None = None,
+    is_cn: bool | None = None,
+):
+    """注意：本路由必须声明在 GET /leads/{lead_id} 之前（否则 "export" 被当作 lead_id）。"""
+    if fields:
+        selected = [k.strip() for k in fields.split(",") if k.strip() in EXPORT_FIELD_KEYS]
+    else:
+        selected = [k for k, _ in EXPORT_FIELDS]
+    if not selected:
+        raise BusinessError(code=40001, message="未选择有效的导出字段")
+
+    conds = _lead_conditions(
+        country=country,
+        industry=industry,
+        source=source,
+        min_score=min_score,
+        grade=grade,
+        whatsapp_hit=whatsapp_hit,
+        has_website=has_website,
+        keyword=keyword,
+        follow_status=follow_status,
+        owner_id=owner_id,
+        due_follow=due_follow,
+        is_cn=is_cn,
+    )
+    # 数据权限与列表同口径（§43），导出无法绕过
+    scope_ids, include_unassigned = await scope_filter_params(db, user)
+    if scope_ids is not None:
+        from sqlalchemy import or_
+
+        visible = Lead.owner_id.in_(scope_ids)
+        if include_unassigned:
+            visible = or_(Lead.owner_id.is_(None), visible)
+        conds.append(visible)
+    stmt = select(Lead)
+    for cond in conds:
+        stmt = stmt.where(cond)
+    items = list(
+        (
+            await db.execute(
+                stmt.order_by(Lead.score.desc(), Lead.id.desc()).limit(limit)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    name_map = await _user_display_map(db, {i.owner_id for i in items})
+    # 联系人明细（批量）：lead_id → "姓名(职位)/邮箱" 串
+    contact_lines: dict[int, str] = {}
+    if items:
+        rows = (
+            await db.execute(
+                select(LeadContact).where(LeadContact.lead_id.in_([i.id for i in items]))
+            )
+        )
+        grouped: dict[int, list[str]] = {}
+        for c in rows.scalars():
+            label = c.name or c.email or "未命名"
+            if c.job_title:
+                label = f"{label}({c.job_title})"
+            if c.email and c.email != label:
+                label = f"{label}/{c.email}"
+            grouped.setdefault(c.lead_id, []).append(label)
+        contact_lines = {k: "; ".join(v) for k, v in grouped.items()}
+
+    def _cell(lead: Lead, key: str) -> str:
+        value: Any
+        if key.startswith("dim_"):
+            value = describe_dimensions(lead.score_signals).get(key[4:], "")
+        elif key == "contacts_count":
+            value = len(contact_lines.get(lead.id, "").split("; ")) if contact_lines.get(lead.id) else 0
+        elif key == "contacts_summary":
+            value = contact_lines.get(lead.id, "")
+        elif key == "recommended_products":
+            value = "; ".join(
+                r["name"]
+                for r in recommend_products(
+                    whatsapp_hit=lead.whatsapp_hit,
+                    whatsapp_url=lead.whatsapp_url,
+                    whatsapp_job=lead.whatsapp_job,
+                    scenes=lead.scenes,
+                    saas_signals=lead.saas_signals,
+                    industry=lead.industry,
+                    dim_saas=describe_dimensions(lead.score_signals).get("saas", 0),
+                )
+            )
+        elif key == "owner_name":
+            value = name_map.get(lead.owner_id, "")
+        elif key == "scenes":
+            value = "; ".join(SCENE_LABELS_ZH.get(s, s) for s in (lead.scenes or []))
+        elif key == "saas_signals":
+            value = "; ".join(
+                f"{SAAS_LABELS_ZH.get(k, k)}×{v}" for k, v in (lead.saas_signals or {}).items()
+            )
+        elif key == "sources":
+            value = "; ".join(r.get("source", "") for r in (lead.sources or []))
+        elif key == "social":
+            value = "; ".join(f"{k}:{v}" for k, v in (lead.social or {}).items())
+        elif key == "job_urls":
+            value = "; ".join(lead.job_urls or [])
+        elif key == "whatsapp_numbers":
+            value = "; ".join((lead.whatsapp_numbers or [])[:8])
+        elif key == "need_types":
+            value = "; ".join(
+                n["label"]
+                for n in detect_need_types(
+                    whatsapp_hit=lead.whatsapp_hit,
+                    whatsapp_url=lead.whatsapp_url,
+                    whatsapp_numbers=lead.whatsapp_numbers,
+                    whatsapp_job=lead.whatsapp_job,
+                    scenes=lead.scenes,
+                    saas_signals=lead.saas_signals,
+                    sources=lead.sources,
+                )
+            )
+        elif isinstance(getattr(lead, key, None), bool):
+            value = "是" if getattr(lead, key) else "否"
+        else:
+            value = getattr(lead, key, "")
+        if value is None:
+            return ""
+        return str(value)
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    selected_set = set(selected)
+    writer.writerow([label for k, label in EXPORT_FIELDS if k in selected_set])
+    for lead in items:
+        writer.writerow([_cell(lead, k) for k in selected])
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    return Response(
+        content=b"\xef\xbb\xbf" + buf.getvalue().encode("utf-8"),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="leads_{ts}.csv"'},
+    )
+
+
+@router.get(
+    "/leads/{lead_id}",
+    response_model=ResponseModel[LeadDetailOut],
+    summary="线索详情（企业画像：六维分/联系人/事件/推荐/销售建议）",
+)
+async def get_lead_detail(db: SessionDep, user: CurrentUser, lead_id: int):
     lead = await db.get(Lead, lead_id)
     if lead is None:
         raise NotFoundError("线索不存在")
+    # 数据权限（§43）：受限范围外 + 非共享池 → 视为不存在
+    scope_ids, _include = await scope_filter_params(db, user)
+    if not lead_visible(lead.owner_id, scope_ids):
+        raise NotFoundError("线索不存在")
+
+    contacts = await list_contacts(db, lead_id)
+    events = list(
+        (
+            await db.execute(
+                select(LeadEvent)
+                .where(LeadEvent.lead_id == lead_id)
+                .order_by(LeadEvent.id.desc())
+                .limit(50)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    follow_ups = list(
+        (
+            await db.execute(
+                select(LeadFollowUp)
+                .where(LeadFollowUp.lead_id == lead_id)
+                .order_by(LeadFollowUp.id.desc())
+                .limit(50)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    opportunities = await list_opportunities(db, lead_id)
+    opp_name_map = await _user_display_map(db, {o.owner_id for o in opportunities})
+
+    dims = describe_dimensions(lead.score_signals)
+    recs = recommend_products(
+        whatsapp_hit=lead.whatsapp_hit,
+        whatsapp_url=lead.whatsapp_url,
+        whatsapp_job=lead.whatsapp_job,
+        scenes=lead.scenes,
+        saas_signals=lead.saas_signals,
+        industry=lead.industry,
+        dim_saas=dims.get("saas", 0),
+    )
+    suggestion = sales_suggestion(
+        grade=lead.grade,
+        whatsapp_url=lead.whatsapp_url,
+        whatsapp_job=lead.whatsapp_job,
+        saas_signals=lead.saas_signals,
+        has_tier1_contact=any(c.seniority == "tier1" for c in contacts),
+        products=recs,
+    )
+
+    out = LeadDetailOut.model_validate(lead)
+    out.owner_name = (await _user_display_map(db, {lead.owner_id})).get(lead.owner_id)
+    out.contacts_count = len(contacts)
+    out.recommended_products = [r["name"] for r in recs]
+    out.dimensions = dims
+    out.dimension_weights = effective_dim_weights()
+    out.contacts = [ContactOut.model_validate(c) for c in contacts]
+    out.events = [LeadEventOut.model_validate(e) for e in events]
+    fu_name_map = await _user_display_map(db, {f.user_id for f in follow_ups})
+    out.follow_ups = []
+    for f in follow_ups:
+        fo = FollowUpOut.model_validate(f)
+        fo.user_name = fu_name_map.get(f.user_id)
+        out.follow_ups.append(fo)
+    out.recommendations = [RecommendationOut(**r) for r in recs]
+    out.sales_suggestion = suggestion
+    out.need_types = detect_need_types(
+        whatsapp_hit=lead.whatsapp_hit,
+        whatsapp_url=lead.whatsapp_url,
+        whatsapp_numbers=lead.whatsapp_numbers,
+        whatsapp_job=lead.whatsapp_job,
+        scenes=lead.scenes,
+        saas_signals=lead.saas_signals,
+        sources=lead.sources,
+    )
+    out.opportunities = []
+    for o in opportunities:
+        oo = OpportunityOut.model_validate(o)
+        oo.owner_name = opp_name_map.get(o.owner_id)
+        out.opportunities.append(oo)
+    return ResponseModel(data=out)
+
+
+@router.get(
+    "/leads/{lead_id}/events",
+    response_model=ResponseModel[PageResponse[LeadEventOut]],
+    summary="线索动态事件（时间线）",
+)
+async def list_lead_events(
+    db: SessionDep,
+    _user: CurrentUser,
+    lead_id: int,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+):
+    from sqlalchemy import func
+
+    if await db.get(Lead, lead_id) is None:
+        raise NotFoundError("线索不存在")
+    base = select(LeadEvent).where(LeadEvent.lead_id == lead_id)
+    total = (
+        await db.execute(select(func.count()).select_from(LeadEvent).where(LeadEvent.lead_id == lead_id))
+    ).scalar_one()
+    items = list(
+        (
+            await db.execute(
+                base.order_by(LeadEvent.id.desc())
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return ResponseModel(
+        data=PageResponse[LeadEventOut](
+            items=[LeadEventOut.model_validate(x) for x in items],
+            total=total,
+            page=page,
+            page_size=page_size,
+        )
+    )
+
+
+# ---------- 联系人（销售工作台） ----------
+
+
+@router.get(
+    "/leads/{lead_id}/contacts",
+    response_model=ResponseModel[list[ContactOut]],
+    summary="联系人列表",
+)
+async def list_lead_contacts(db: SessionDep, _user: CurrentUser, lead_id: int):
+    if await db.get(Lead, lead_id) is None:
+        raise NotFoundError("线索不存在")
+    return ResponseModel(data=[ContactOut.model_validate(c) for c in await list_contacts(db, lead_id)])
+
+
+@router.post(
+    "/leads/{lead_id}/contacts",
+    response_model=ResponseModel[ContactOut],
+    summary="新增联系人（seniority 按职位自动分层）",
+)
+async def create_lead_contact(
+    db: SessionDep, user: CurrentUser, lead_id: int, payload: ContactCreate
+):
+    lead = await db.get(Lead, lead_id)
+    if lead is None:
+        raise NotFoundError("线索不存在")
+    contact = await create_contact(db, lead, payload, created_by=user.id)
+    await db.commit()
+    await db.refresh(contact)
+    return ResponseModel(data=ContactOut.model_validate(contact))
+
+
+@router.put(
+    "/leads/{lead_id}/contacts/{contact_id}",
+    response_model=ResponseModel[ContactOut],
+    summary="编辑联系人",
+)
+async def update_lead_contact(
+    db: SessionDep, user: CurrentUser, lead_id: int, contact_id: int, payload: ContactUpdate
+):
+    lead = await db.get(Lead, lead_id)
+    if lead is None:
+        raise NotFoundError("线索不存在")
+    contact = await get_contact(db, lead_id, contact_id)
+    if contact is None:
+        raise NotFoundError("联系人不存在")
+    contact = await update_contact(db, lead, contact, payload, created_by=user.id)
+    await db.commit()
+    await db.refresh(contact)
+    return ResponseModel(data=ContactOut.model_validate(contact))
+
+
+@router.delete(
+    "/leads/{lead_id}/contacts/{contact_id}",
+    response_model=ResponseModel[None],
+    summary="删除联系人",
+)
+async def delete_lead_contact(
+    db: SessionDep, _user: CurrentUser, lead_id: int, contact_id: int
+):
+    lead = await db.get(Lead, lead_id)
+    if lead is None:
+        raise NotFoundError("线索不存在")
+    contact = await get_contact(db, lead_id, contact_id)
+    if contact is None:
+        raise NotFoundError("联系人不存在")
+    await delete_contact(db, lead, contact)
+    await db.commit()
+    return ResponseModel()
+
+
+# ---------- 分配（PRD §24/§44：主管分配/转移/释放 + 自动分配 + 撞单锁定） ----------
+
+
+@router.post(
+    "/leads/{lead_id}/assign",
+    response_model=ResponseModel[LeadOut],
+    summary="分配/转移跟进人（撞单锁定：分配后其他销售只读）",
+)
+async def assign_lead_endpoint(
+    db: SessionDep,
+    lead_id: int,
+    payload: AssignPayload,
+    user: User = RequireAssignLead,
+):
+    lead = await db.get(Lead, lead_id)
+    if lead is None:
+        raise NotFoundError("线索不存在")
+    try:
+        await assign_lead(db, lead, payload.owner_id, assigned_by=user.id)
+    except ValueError as exc:
+        raise BusinessError(code=40001, message=str(exc)) from exc
+    await db.commit()
+    await db.refresh(lead)
+    out = LeadOut.model_validate(lead)
+    out.owner_name = (await _user_display_map(db, {lead.owner_id})).get(lead.owner_id)
+    return ResponseModel(data=out)
+
+
+@router.post(
+    "/leads/{lead_id}/release",
+    response_model=ResponseModel[LeadOut],
+    summary="释放回共享池（主管可释放/重新分配）",
+)
+async def release_lead_endpoint(
+    db: SessionDep,
+    lead_id: int,
+    user: User = RequireAssignLead,
+):
+    lead = await db.get(Lead, lead_id)
+    if lead is None:
+        raise NotFoundError("线索不存在")
+    await release_lead(db, lead, released_by=user.id)
+    await db.commit()
+    await db.refresh(lead)
+    return ResponseModel(data=LeadOut.model_validate(lead))
+
+
+@router.post(
+    "/leads/auto-assign",
+    response_model=ResponseModel[dict],
+    summary="自动分配：共享池线索按当前负载轮转分给候选销售（§24）",
+)
+async def auto_assign_endpoint(
+    db: SessionDep,
+    payload: AutoAssignPayload,
+    _user: User = RequireAssignLead,
+):
+    assigned, counts = await auto_assign_leads(
+        db,
+        candidate_owner_ids=payload.owner_ids,
+        max_per_owner=payload.max_per_owner,
+        grade=payload.grade,
+        min_score=payload.min_score,
+        industry=payload.industry,
+        country=payload.country,
+        limit=payload.limit,
+    )
+    await db.commit()
+    name_map = await _user_display_map(db, set(payload.owner_ids))
+    return ResponseModel(
+        data={
+            "assigned_count": len(assigned),
+            "per_owner": [
+                {"owner_id": uid, "owner_name": name_map.get(uid), "count": cnt}
+                for uid, cnt in counts.items()
+            ],
+        }
+    )
+
+
+@router.delete("/leads/{lead_id}", response_model=ResponseModel[None], summary="删除线索")
+async def delete_lead(db: SessionDep, _user: SuperUser, lead_id: int):
+    from sqlalchemy import delete as sa_delete
+
+    lead = await db.get(Lead, lead_id)
+    if lead is None:
+        raise NotFoundError("线索不存在")
+    # SQLite 默认不开外键级联，子表显式删（PG 下双保险；同 delete_task 的日志处理）
+    await db.execute(sa_delete(LeadContact).where(LeadContact.lead_id == lead_id))
+    await db.execute(sa_delete(LeadEvent).where(LeadEvent.lead_id == lead_id))
+    await db.execute(sa_delete(LeadFollowUp).where(LeadFollowUp.lead_id == lead_id))
     await db.delete(lead)
     await db.commit()
     return ResponseModel()
@@ -447,6 +967,13 @@ async def collect_stats(db: SessionDep, _user: CurrentUser):
     high_intent = (
         await db.execute(select(func.count()).select_from(Lead).where(Lead.score >= 40))
     ).scalar_one()
+    # 等级分布：S/A/B/C（销售优先级口径）
+    grade_rows = (
+        await db.execute(select(Lead.grade, func.count()).group_by(Lead.grade))
+    ).all()
+    grade_counts = {g: 0 for g in ("S", "A", "B", "C")}
+    for g, cnt in grade_rows:
+        grade_counts[g] = cnt
     running = (
         await db.execute(
             select(func.count())
@@ -472,15 +999,38 @@ async def collect_stats(db: SessionDep, _user: CurrentUser):
     fb_wa_leads = (
         await db.execute(select(func.count()).select_from(Lead).where(Lead.fb_whatsapp))
     ).scalar_one()
+    # 月度口径（PRD §39）：本月新增线索 + 本月成交（商机 won_at 落在本月）
+    # 月初用 Python 算：date_trunc 是 PG 专属，SQLite 测试库没有
+    from datetime import datetime, timezone
+
+    month_start = datetime.now(timezone.utc).replace(
+        day=1, hour=0, minute=0, second=0, microsecond=0
+    )
+    month_new = (
+        await db.execute(
+            select(func.count()).select_from(Lead).where(Lead.created_at >= month_start)
+        )
+    ).scalar_one()
+    month_won_row = (
+        await db.execute(
+            select(func.count(), func.coalesce(func.sum(Opportunity.amount), 0)).where(
+                Opportunity.won_at.is_not(None), Opportunity.won_at >= month_start
+            )
+        )
+    ).one()
     return ResponseModel(
         data={
             "total_leads": total,
             "whatsapp_leads": whatsapp,
             "high_intent_leads": high_intent,
+            "grade_counts": grade_counts,
             "active_tasks": running,
             "pending_leads": pending_follow,
             "due_follow_leads": due_follow,
             "cn_leads": cn_leads,
             "fb_wa_leads": fb_wa_leads,
+            "month_new_leads": month_new,
+            "month_won_count": month_won_row[0],
+            "month_won_amount": month_won_row[1],
         }
     )

@@ -1,9 +1,12 @@
-"""website_enrich 采集器：对库里有网站的线索批量检测 WhatsApp / 邮箱 / 社媒。
+"""website_enrich 采集器：对库里有网站的线索批量检测 WhatsApp / 邮箱 / 社媒 / 场景 / SaaS 需求。
 
 不是独立采集源——直接改存量 Lead 行：
     - WhatsApp 插件/链接指纹：wa.me、api.whatsapp.com、ht-ctc / joinchat / getbutton /
       chaty / elfsight 等常见插件
     - 公开邮箱（mailto 优先）、社媒链接（FB/IG/LinkedIn/TG/TikTok）
+    - WhatsApp 场景（客服/营销/交易/SaaS）与 SaaS 需求信号（CRM/工单/Chatbot…）
+      的关键词识别（collectors/scenes.py）
+    - 抓到公开邮箱 → 自动生成「待补全」联系人（crud/contact.py）
     - 每站点最多 3 个请求（首页 + 2 个联系页）
     - 24h 跳过以成功为准：只在富化成功时写 enriched_at，失败/超时下次重跑
 
@@ -24,7 +27,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.collectors.base import Collector, TaskContext
 from app.collectors.normalize import extract_domain
-from app.collectors.scoring import compute_score
+from app.collectors.scenes import (
+    SAAS_LABELS_ZH,
+    SCENE_LABELS_ZH,
+    detect_saas_signals,
+    detect_scenes,
+)
 from app.core.config import settings
 
 _UA = (
@@ -131,6 +139,18 @@ def detect_whatsapp(html_list: list[str]) -> tuple[bool, str | None]:
     return False, None
 
 
+def detect_whatsapp_numbers(html_list: list[str]) -> list[str]:
+    """页面里出现的全部 WhatsApp 号码（去重保序）——「多分线 = 已规模化使用」证据（§4.1）。"""
+    joined = "\n".join(h for h in html_list if h)
+    numbers: list[str] = []
+    for pattern in _PHONE_PATTERNS:
+        for m in pattern.finditer(joined):
+            raw = (m.group(1) or "").lstrip("+")
+            if raw and raw not in numbers:
+                numbers.append(raw)
+    return numbers
+
+
 _ASSET_EXT = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".css", ".js", ".pdf", ".woff", ".woff2", ".ico")
 # 平台埋点/监控邮箱误报黑名单（实测 Wix 站点正文里带 Sentry 埋点邮箱）
 _EMAIL_DOMAIN_BLOCKLIST = ("wixpress.com", "sentry.io", "sentry-next.com", "googlegroups.com")
@@ -217,16 +237,28 @@ async def _load_scope(session: AsyncSession, lead_ids: list[Any]) -> list[tuple[
     """返回 [(lead_id, website)]。lead_ids 指定 → 只取有网站的；否则全库 eligible。"""
     from app.models.lead import Lead
 
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    now = datetime.now(timezone.utc)
     if lead_ids:
+        # 手动勾选不受刷新窗口限制
         stmt = select(Lead.id, Lead.website).where(
             Lead.id.in_(lead_ids), Lead.website.is_not(None), Lead.website != ""
         )
     else:
+        # 分级增量重爬（补充需求 §九）：高价值线索检查更勤——S 每天 / A 3 天 / B 7 天 / C 30 天；
+        # ENRICH_INTERVAL_HOURS 作为 C 级（兜底档）的可配置上限
+        from sqlalchemy import or_
+
+        def _stale(grade: str, days: int):
+            cutoff = now - timedelta(days=days)
+            return (Lead.grade == grade) & (
+                (Lead.enriched_at.is_(None)) | (Lead.enriched_at < cutoff)
+            )
+
+        c_days = max(1, settings.ENRICH_INTERVAL_HOURS // 24)
         stmt = select(Lead.id, Lead.website).where(
             Lead.website.is_not(None),
             Lead.website != "",
-            (Lead.enriched_at.is_(None)) | (Lead.enriched_at < cutoff),
+            or_(_stale("S", 1), _stale("A", 3), _stale("B", 7), _stale("C", c_days)),
         )
     rows = (await session.execute(stmt)).all()
     return [(r[0], r[1]) for r in rows]
@@ -282,36 +314,72 @@ async def _enrich_one(
             pages.append(html)
 
     whatsapp_hit, whatsapp_url = detect_whatsapp(pages)
+    wa_numbers = detect_whatsapp_numbers(pages)
     email = detect_email(homepage)
     social = detect_social(pages)
+    scenes = detect_scenes(pages)
+    saas_signals = detect_saas_signals(pages)
 
     async with _session_factory()() as session:
+        from app.crud.contact import auto_create_from_email
+        from app.crud.lead import touch_field_meta
+        from app.crud.lead_events import rescore_and_log, snapshot_lead
         from app.models.lead import Lead
 
         lead = await session.get(Lead, lead_id)
         if lead is None:
             return
+        before = snapshot_lead(lead)
+        now = datetime.now(timezone.utc)
         if whatsapp_hit:
             lead.whatsapp_hit = True
             if whatsapp_url:
                 lead.whatsapp_url = whatsapp_url
+            # WhatsApp 检测来源=官网，置信度高（§32）
+            touch_field_meta(lead, "whatsapp_url", "website_enrich", confidence=98, now=now)
+        if wa_numbers:
+            # 多号码证据链（§4.1）：Sales/Support 分线 = 规模化私域，只增不减
+            merged_numbers = list(lead.whatsapp_numbers or [])
+            for n in wa_numbers:
+                if n not in merged_numbers:
+                    merged_numbers.append(n)
+            lead.whatsapp_numbers = merged_numbers
+            touch_field_meta(
+                lead, "whatsapp_numbers", "website_enrich", confidence=95, now=now
+            )
         if email and not lead.email:
             lead.email = email
+            touch_field_meta(lead, "email", "website_enrich", confidence=90, now=now)
         if social:
             merged = dict(lead.social or {})
             merged.update(social)
             lead.social = merged
-        lead.enriched_at = datetime.now(timezone.utc)
-        lead.score, lead.score_signals = compute_score(
-            whatsapp_hit=lead.whatsapp_hit,
-            whatsapp_job=lead.whatsapp_job,
-            website=lead.website,
-            email=lead.email,
-            country=lead.country,
-            phone_raw=lead.phone_raw,
-            phone_e164=lead.phone_e164,
-            social=lead.social,
-        )
+            touch_field_meta(lead, "social", "website_enrich", confidence=95, now=now)
+        if scenes:
+            merged_scenes = list(lead.scenes or [])
+            for s in scenes:
+                if s not in merged_scenes:
+                    merged_scenes.append(s)
+            lead.scenes = merged_scenes  # 重新赋值触发 JSON 变更追踪
+            touch_field_meta(lead, "scenes", "website_enrich", confidence=80, now=now)
+        if saas_signals:
+            merged_saas = dict(lead.saas_signals or {})
+            for k, v in saas_signals.items():
+                merged_saas[k] = max(merged_saas.get(k, 0), v)
+            lead.saas_signals = merged_saas
+            touch_field_meta(lead, "saas_signals", "website_enrich", confidence=75, now=now)
+        if email:
+            # 抓到公开邮箱 → 自动生成「待补全」联系人（同邮箱已存在则跳过）
+            await auto_create_from_email(session, lead, email)
+        lead.enriched_at = now
+        # 统一重评钩子：六维重算（读 ORM 行属性，fb_whatsapp 不再漏传）+ 事件发射
+        await rescore_and_log(session, lead, before=before)
         await session.commit()
     if whatsapp_hit:
         await ctx.log("info", f"[lead {lead_id}] ✅ 检测到 WhatsApp：{website}")
+    if scenes:
+        labels = "、".join(SCENE_LABELS_ZH.get(s, s) for s in scenes)
+        await ctx.log("info", f"[lead {lead_id}] 场景命中：{labels}")
+    if saas_signals:
+        labels = "、".join(SAAS_LABELS_ZH.get(k, k) for k in saas_signals)
+        await ctx.log("info", f"[lead {lead_id}] SaaS 需求信号：{labels}")

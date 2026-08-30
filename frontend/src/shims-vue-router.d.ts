@@ -33,14 +33,14 @@ declare module 'vue-router' {
   // shim and accept the vue-tsc noise, or add specific interfaces below.
   // 注意：不要在这里 declare module 'vue-router' 后再 export type RouteMeta ——
   // 项目里 src/types/index.ts 已经 augment RouteMeta，重复会 TS2300。
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   export type RouteRecordRaw = any
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   export type RouteLocationRaw = any
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   export type RouteLocationNormalized = any
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   export type RouteLocationNormalizedLoaded = any
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   export type NavigationGuardNext = any
 }

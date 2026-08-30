@@ -69,16 +69,24 @@ async function onSubmit() {
       <div class="grid-overlay" />
 
       <div class="relative z-10 flex items-center gap-3 p-10">
-        <img src="/youzi-logo.svg" alt="logo" class="h-10 w-10" />
+        <img
+          src="/youzi-logo.svg"
+          alt="logo"
+          class="h-10 w-10"
+        >
         <span class="text-xl font-semibold text-white">{{ APP_TITLE }}</span>
       </div>
 
       <div class="relative z-10 px-10 pb-6">
         <h1 class="max-w-md text-4xl font-bold leading-tight text-white">
-          轻量、优雅的<br />管理系统起点
+          轻量、优雅的<br>管理系统起点
         </h1>
         <ul class="mt-6 space-y-3">
-          <li v-for="f in features" :key="f" class="flex items-center gap-3 text-white/85">
+          <li
+            v-for="f in features"
+            :key="f"
+            class="flex items-center gap-3 text-white/85"
+          >
             <span class="dot" />
             <span>{{ f }}</span>
           </li>
@@ -95,12 +103,23 @@ async function onSubmit() {
       <div class="w-full max-w-sm">
         <!-- 移动端 logo -->
         <div class="mb-8 flex flex-col items-center gap-2 lg:hidden">
-          <img src="/youzi-logo.svg" alt="logo" class="h-14 w-14" />
-          <h1 class="text-xl font-bold">{{ APP_TITLE }}</h1>
+          <img
+            src="/youzi-logo.svg"
+            alt="logo"
+            class="h-14 w-14"
+          >
+          <h1 class="text-xl font-bold">
+            {{ APP_TITLE }}
+          </h1>
         </div>
 
-        <h2 class="text-2xl font-bold">欢迎回来 👋</h2>
-        <p class="mt-2 text-sm" :style="{ color: 'var(--yz-text-secondary)' }">
+        <h2 class="text-2xl font-bold">
+          欢迎回来 👋
+        </h2>
+        <p
+          class="mt-2 text-sm"
+          :style="{ color: 'var(--yz-text-secondary)' }"
+        >
           登录你的账号继续
         </p>
 
@@ -120,7 +139,10 @@ async function onSubmit() {
               @keyup.enter="onSubmit"
             >
               <template #prefix>
-                <n-icon :component="PersonOutline" :style="{ color: 'var(--yz-text-secondary)' }" />
+                <n-icon
+                  :component="PersonOutline"
+                  :style="{ color: 'var(--yz-text-secondary)' }"
+                />
               </template>
             </n-input>
           </n-form-item>
@@ -135,7 +157,10 @@ async function onSubmit() {
               @keyup.enter="onSubmit"
             >
               <template #prefix>
-                <n-icon :component="LockClosedOutline" :style="{ color: 'var(--yz-text-secondary)' }" />
+                <n-icon
+                  :component="LockClosedOutline"
+                  :style="{ color: 'var(--yz-text-secondary)' }"
+                />
               </template>
             </n-input>
           </n-form-item>

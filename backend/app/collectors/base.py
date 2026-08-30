@@ -39,6 +39,11 @@ class LeadDraft:
     # ---------- 中国出海 ICP（meta_ads 链路） ----------
     is_cn: bool = False  # 中国出海企业特征（品牌/文案含中文等）
     fb_whatsapp: bool = False  # FB 主页带 wa.me 按钮（CTWA/私域运营证据）
+    # 出海画像（PRD §8）：投放/目标国家列表（country 存第一个，列表累计全量）
+    target_countries: list[str] = field(default_factory=list)
+    export_type: str | None = None  # 出海业务类型（跨境电商/品牌出海…）
+    # WhatsApp 号码证据（§4.1）：页面出现的全部号码（多分线 = 规模化私域）
+    whatsapp_numbers: list[str] = field(default_factory=list)
 
 
 @dataclass

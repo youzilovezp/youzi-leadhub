@@ -36,7 +36,7 @@ from app.collectors.base import (
     require_params,
     split_csv,
 )
-from app.collectors.website_enrich import detect_email, detect_whatsapp
+from app.collectors.website_enrich import detect_email, detect_whatsapp, detect_whatsapp_numbers
 from app.core.config import settings
 from app.core.exceptions import BusinessError
 
@@ -44,7 +44,8 @@ _GRAPH_VERSION = "v22.0"  # Meta 版本两年弃用窗口，过期改这里
 _ADS_URL = f"https://graph.facebook.com/{_GRAPH_VERSION}/ads_archive"
 _ADS_FIELDS = (
     "id,page_id,page_name,page_profile_uri,"
-    "ad_creative_bodies,ad_creative_link_captions,ad_delivery_start_time"
+    "ad_creative_bodies,ad_creative_link_captions,ad_delivery_start_time,"
+    "ad_reached_countries"  # 出海画像（§8）：累计每个广告主实际投放的国家
 )
 _PAGE_SIZE = 100  # API 上限
 _PROBE_DELAY = 1.5  # 主页探测节流（秒）：对 FB 礼貌一点，别触发风控
@@ -329,8 +330,14 @@ class MetaAdsCollector(Collector):
                             "page_profile_uri": ad.get("page_profile_uri") or "",
                             "bodies": [],
                             "ad_count": 0,
+                            "countries": [],
                         })
                         rec["ad_count"] += 1
+                        # 累计投放国（ad_reached_countries 是 ISO2 列表）
+                        for c in ad.get("ad_reached_countries") or []:
+                            cu = str(c).upper()
+                            if len(cu) == 2 and cu not in rec["countries"]:
+                                rec["countries"].append(cu)
                         body = (ad.get("ad_creative_bodies") or [""])[0] or ""
                         if body and len(rec["bodies"]) < 3 and body not in rec["bodies"]:
                             rec["bodies"].append(body)
@@ -368,6 +375,8 @@ class MetaAdsCollector(Collector):
                     name=name,
                     country=primary_country,
                     social={"facebook": profile_uri},
+                    # 出海画像：该广告主实际投放的国家全量（country 只是第一个投放国）
+                    target_countries=sorted(rec.get("countries") or []) or list(countries),
                 )
 
                 if probe and rec["page_profile_uri"]:
@@ -392,6 +401,8 @@ class MetaAdsCollector(Collector):
                         if wa_url:
                             draft.whatsapp_url = wa_url
                             draft.fb_whatsapp = True  # 主页挂 WA 按钮 = 私域运营证据
+                            # 号码证据链（§4.1）：主页出现的全部 WA 号码
+                            draft.whatsapp_numbers = detect_whatsapp_numbers([html])
                             phone = _extract_wa_phone(html)
                             if phone:
                                 # wa.me 号码是完整国际号（无 +）：补 + 强制按国际解析，
