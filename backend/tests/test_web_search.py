@@ -33,20 +33,36 @@ def test_bing_shape_items_supported():
     assert len(drafts) == 1 and drafts[0].name == "Bloom Cosmetics"
 
 
-def test_validate_requires_credentials(monkeypatch):
-    """无搜索凭据 → 创建任务时即报可行动的业务错误。"""
+def test_parse_ddg_html_unwraps_redirects():
+    """DDG HTML 结果解析：跳转链接解出真实 URL、标题剥内标签。"""
+    from app.collectors.web_search import parse_ddg_html
+
+    html = """
+    <a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Facme-trading.com%2Fabout&amp;rut=abc">
+      Acme <b>Trading</b> Co</a>
+    <a class="result__a" href="https://direct.com/page">Direct Site</a>
+    """
+    items = parse_ddg_html(html)
+    assert items == [
+        {"title": "Acme Trading Co", "url": "https://acme-trading.com/about"},
+        {"title": "Direct Site", "url": "https://direct.com/page"},
+    ]
+
+
+def test_validate_default_engine_needs_no_credentials(monkeypatch):
+    """默认引擎 duckduckgo 零凭据可用；选付费引擎缺凭据时报可行动错误。"""
     from app.collectors.web_search import WebSearchCollector
 
-    monkeypatch.setattr("app.core.config.settings.GOOGLE_CSE_KEY", "")
-    monkeypatch.setattr("app.core.config.settings.GOOGLE_CSE_CX", "")
-    monkeypatch.setattr("app.core.config.settings.BING_SEARCH_KEY", "")
+    monkeypatch.setattr("app.core.config.settings.SEARCH_ENGINE", "duckduckgo")
+    WebSearchCollector().validate_params({"keywords": "whatsapp supplier"})  # 不抛
 
     from app.core.exceptions import BusinessError
 
+    monkeypatch.setattr("app.core.config.settings.SEARCH_ENGINE", "google_cse")
+    monkeypatch.setattr("app.core.config.settings.GOOGLE_CSE_KEY", "")
     with pytest.raises(Exception) as ei:
-        WebSearchCollector().validate_params({"keywords": "whatsapp supplier"})
-    assert isinstance(ei.value, BusinessError)
-    assert "GOOGLE_CSE_KEY" in str(ei.value.message)
+        WebSearchCollector().validate_params({"keywords": "x"})
+    assert isinstance(ei.value, BusinessError) and "GOOGLE_CSE_KEY" in ei.value.message
 
 
 def test_detect_domain_tld_overseas():

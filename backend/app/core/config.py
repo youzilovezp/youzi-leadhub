@@ -147,14 +147,17 @@ class Settings(BaseSettings):
     AUTO_SEED_DATA: bool = False
 
     # ---------- 线索采集 ----------
-    GOOGLE_MAPS_API_KEY: str = ""   # google_maps 采集器必填，未配置任务直接 failed
     # Meta 广告资料库（Ad Library API）访问令牌，meta_ads 采集器必填。
     # 获取：https://www.facebook.com/ads/archive/api 创建应用申请 token（免费），
     # 需要的权限很窄（ads_archive 只读公开广告数据）。
     META_ADS_ACCESS_TOKEN: str = ""
-    # web_search 采集器（§6.2 P1 搜索数据源，官方 API 层）：二选一
-    GOOGLE_CSE_KEY: str = ""   # Google Custom Search JSON API key（免费 100 次/天）
-    GOOGLE_CSE_CX: str = ""    # Google CSE 的搜索引擎 ID（programmablesearchengine.google.com 创建）
+    # web_search 采集器（§6.2 P1 搜索数据源）。默认引擎 duckduckgo 零 key 零费用；
+    # 可选：searxng（自托管开源元搜索，SEARXNG_URL 指向实例的 JSON API）、
+    # google_cse / bing（付费加速通道，需凭据——纯免费部署保持不配即可）
+    SEARCH_ENGINE: Literal["duckduckgo", "searxng", "google_cse", "bing"] = "duckduckgo"
+    SEARXNG_URL: str = ""      # 如 http://localhost:8888（SearxNG 实例，format=json 已开）
+    GOOGLE_CSE_KEY: str = ""   # Google Custom Search JSON API key（免费 100 次/天，超出付费）
+    GOOGLE_CSE_CX: str = ""    # Google CSE 的搜索引擎 ID
     BING_SEARCH_KEY: str = ""  # Bing Web Search（Azure）key
     COLLECT_MAX_CONCURRENT: int = 2   # 同时运行的采集任务数（满则排队）
     COLLECT_TASK_TIMEOUT: int = 3600  # 单任务超时（秒）
