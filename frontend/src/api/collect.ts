@@ -329,6 +329,10 @@ export interface LeadDetail extends Lead {
   last_ad_at: string | null
   /** 信号级证据链（§4.1） */
   signals: SignalEvidence[]
+  /** 加分制明细（§五 MVP 口径）：{total, items}——items 只含命中项 [{key,label,points}] */
+  score_breakdown: { total: number; items: Array<{ key: string; label: string; points: number }> }
+  /** WhatsApp Business 账号（号码级验证命中） */
+  wa_business: boolean
   opportunities: Array<{
     id: number
     name: string
@@ -429,6 +433,23 @@ export function listLeads(query: LeadQuery) {
 
 export function createLead(payload: LeadCreatePayload) {
   return request.post<Lead, Lead>('/collect/leads', payload)
+}
+
+/** Seed Pool 批量导入结果（与后端 LeadImportResult 一致） */
+export interface LeadImportResult {
+  total: number
+  created: number
+  merged: number
+  skipped: number
+  errors: string[]
+}
+
+/** Seed Pool 批量导入企业种子（POST /collect/leads/import）：CSV 文本逐行走去重合并 */
+export function importLeads(csvText: string, isCn = true) {
+  return request.post<LeadImportResult, LeadImportResult>('/collect/leads/import', {
+    csv_text: csvText,
+    is_cn: isCn,
+  })
 }
 
 export function deleteLead(id: number) {
