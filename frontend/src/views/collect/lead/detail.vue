@@ -5,10 +5,8 @@ import { NButton, NTag } from 'naive-ui'
 import type { DataTableColumns, FormInst, FormRules } from 'naive-ui'
 import * as collectApi from '@/api/collect'
 import * as salesApi from '@/api/sales'
-import { opportunityStageTagType } from '@/api/sales'
 import type { Contact, ContactPayload, LeadDetail } from '@/api/collect'
 import type { AiAnalysis } from '@/api/sales'
-import type { Opportunity } from '@/api/sales'
 import {
   DIM_LABELS,
   EVENT_TYPE_LABELS,
@@ -207,93 +205,6 @@ const contactColumns: DataTableColumns<Contact> = [
   },
 ]
 
-// ---------- 商机（§37） ----------
-
-const oppModalShow = ref(false)
-const oppEditing = ref<Opportunity | null>(null)
-const oppForm = reactive({ name: '', amount: null as number | null, stage: 'opportunity', expected_close: null as number | null, note: '' })
-
-function openOppModal(opp?: Opportunity) {
-  oppEditing.value = opp ?? null
-  Object.assign(oppForm, {
-    name: opp?.name ?? '',
-    amount: opp?.amount ?? null,
-    stage: opp?.stage ?? 'opportunity',
-    expected_close: opp?.expected_close_at ? parseUtc(opp.expected_close_at).getTime() : null,
-    note: opp?.note ?? '',
-  })
-  oppModalShow.value = true
-}
-
-async function submitOpp() {
-  if (!oppForm.name.trim()) {
-    message.warning('请填写商机名称')
-    return
-  }
-  const payload = {
-    name: oppForm.name.trim(),
-    amount: oppForm.amount ?? 0,
-    stage: oppForm.stage,
-    expected_close_at: oppForm.expected_close ? new Date(oppForm.expected_close).toISOString() : undefined,
-    note: oppForm.note || undefined,
-  }
-  if (oppEditing.value) {
-    await salesApi.updateOpportunity(leadId, oppEditing.value.id, payload)
-    message.success('商机已更新')
-  } else {
-    await salesApi.createOpportunity(leadId, payload)
-    message.success('商机已创建，线索状态推进到有效商机')
-  }
-  oppModalShow.value = false
-  fetchDetail()
-}
-
-async function advanceStage(opp: Opportunity, stage: string) {
-  await salesApi.updateOpportunity(leadId, opp.id, { stage })
-  message.success(`已推进到「${salesApi.opportunityStageLabel(stage)}」`)
-  fetchDetail()
-}
-
-async function removeOpp(opp: Opportunity) {
-  if (!(await confirm({ title: '提示', content: `删除商机「${opp.name}」？`, positiveText: '删除' }))) return
-  await salesApi.deleteOpportunity(leadId, opp.id)
-  message.success('已删除')
-  fetchDetail()
-}
-
-const oppColumns: DataTableColumns<Opportunity> = [
-  { title: '商机', key: 'name', minWidth: 140 },
-  {
-    title: '阶段',
-    key: 'stage',
-    width: 100,
-    render: (r) => h(NTag, { size: 'small', type: opportunityStageTagType(r.stage) }, () => salesApi.opportunityStageLabel(r.stage)),
-  },
-  { title: '金额', key: 'amount', width: 100, render: (r) => (r.amount ? `¥${r.amount.toLocaleString()}` : '—') },
-  { title: '预计成交', key: 'expected_close_at', width: 120, render: (r) => (r.expected_close_at ? formatTime(r.expected_close_at) : '—') },
-  { title: '负责人', key: 'owner_name', width: 90, render: (r) => r.owner_name || '—' },
-  {
-    title: '操作',
-    key: 'actions',
-    width: 200,
-    render: (r) => {
-      const buttons = [
-        h(NButton, { size: 'tiny', quaternary: true, type: 'primary', onClick: () => openOppModal(r) }, () => '编辑'),
-      ]
-      const flow = { opportunity: 'quote', quote: 'negotiation', negotiation: 'won' } as Record<string, string>
-      const next = flow[r.stage]
-      if (next) {
-        buttons.push(
-          h(NButton, { size: 'tiny', secondary: true, type: 'success', onClick: () => advanceStage(r, next) },
-            () => `推进→${salesApi.opportunityStageLabel(next)}`),
-        )
-      }
-      buttons.push(h(NButton, { size: 'tiny', quaternary: true, type: 'error', onClick: () => removeOpp(r) }, () => '删除'))
-      return h('div', { class: 'flex gap-1' }, buttons)
-    },
-  },
-]
-
 // ---------- AI 能力（§25/§26） ----------
 
 const aiLoading = ref(false)
@@ -311,15 +222,13 @@ async function runAiAnalysis() {
   }
 }
 
-async function generateScriptToQueue() {
+async function generateScript() {
   scriptLoading.value = true
   try {
-    const msg = await salesApi.generateMessage(leadId)
-    // 话术就地在卡片内展示（PRD §七：不强制跳页），审核队列入口保留为小按钮
-    generatedScript.value = msg.content
-    message.success(
-      msg.generated_by === 'llm' ? 'AI 话术已生成并入审核队列' : '模板话术已生成并入审核队列（配置 LLM 后可用 AI）',
-    )
+    const { script } = await salesApi.generateSalesScript(leadId)
+    // 话术就地在卡片内展示（PRD §七：不强制跳页）
+    generatedScript.value = script
+    message.success('话术已生成')
   } finally {
     scriptLoading.value = false
   }
@@ -866,12 +775,12 @@ onMounted(fetchDetail)
                   size="small"
                   secondary
                   :loading="scriptLoading"
-                  @click="generateScriptToQueue"
+                  @click="generateScript"
                 >
-                  生成话术入审核队列
+                  生成话术
                 </n-button>
               </div>
-              <!-- 话术就地在卡内展示（PRD §七），不再强制跳审核队列页 -->
+              <!-- 话术就地在卡内展示（PRD §七：不强制跳页） -->
               <div
                 v-if="generatedScript"
                 class="script-block"
@@ -884,14 +793,6 @@ onMounted(fetchDetail)
                     @click="copyScript"
                   >
                     复制话术
-                  </n-button>
-                  <n-button
-                    size="tiny"
-                    quaternary
-                    type="primary"
-                    @click="router.push('/sales/messages')"
-                  >
-                    查看审核队列
                   </n-button>
                 </div>
               </div>
@@ -943,30 +844,6 @@ onMounted(fetchDetail)
               >
                 点击「AI 分析客户」生成企业概况 / 机会 / 痛点 / 推荐产品 / 切入点
               </div>
-            </n-card>
-
-            <!-- 商机（§37） -->
-            <n-card
-              size="small"
-              title="商机（轻量 CRM）"
-            >
-              <template #header-extra>
-                <n-button
-                  size="small"
-                  type="primary"
-                  secondary
-                  @click="openOppModal()"
-                >
-                  新增商机
-                </n-button>
-              </template>
-              <n-data-table
-                :columns="oppColumns"
-                :data="detail.opportunities"
-                :row-key="(r: Opportunity) => r.id"
-                size="small"
-                :scroll-x="640"
-              />
             </n-card>
 
             <!-- 联系人 -->
@@ -1132,71 +1009,6 @@ onMounted(fetchDetail)
               <n-button
                 type="primary"
                 @click="submitContact"
-              >
-                保存
-              </n-button>
-            </div>
-          </template>
-        </n-modal>
-
-        <!-- 商机编辑弹窗 -->
-        <n-modal
-          v-model:show="oppModalShow"
-          preset="card"
-          title="商机"
-          style="width: 520px"
-        >
-          <n-form
-            label-placement="left"
-            label-width="84"
-          >
-            <n-form-item
-              label="商机名称"
-              required
-            >
-              <n-input
-                v-model:value="oppForm.name"
-                placeholder="如 WA 客服 SaaS 年单"
-              />
-            </n-form-item>
-            <n-form-item label="金额（元）">
-              <n-input-number
-                v-model:value="oppForm.amount"
-                :min="0"
-                style="width: 100%"
-              />
-            </n-form-item>
-            <n-form-item label="阶段">
-              <n-select
-                v-model:value="oppForm.stage"
-                :options="salesApi.OPPORTUNITY_STAGE_OPTIONS"
-              />
-            </n-form-item>
-            <n-form-item label="预计成交">
-              <n-date-picker
-                v-model:value="oppForm.expected_close"
-                type="datetime"
-                clearable
-                style="width: 100%"
-              />
-            </n-form-item>
-            <n-form-item label="备注">
-              <n-input
-                v-model:value="oppForm.note"
-                type="textarea"
-                :rows="2"
-                maxlength="2000"
-              />
-            </n-form-item>
-          </n-form>
-          <template #footer>
-            <div class="flex justify-end gap-3">
-              <n-button @click="oppModalShow = false">
-                取消
-              </n-button>
-              <n-button
-                type="primary"
-                @click="submitOpp"
               >
                 保存
               </n-button>

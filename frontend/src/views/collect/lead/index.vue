@@ -17,7 +17,7 @@ import { useUserStore } from '@/stores/user'
 import { formatTime, parseUtc } from '@/utils/format'
 import { message, confirm } from '@/utils/feedback'
 import { downloadFile } from '@/utils/download'
-import { autoAssignLeads, searchNl } from '@/api/sales'
+import { autoAssignLeads } from '@/api/sales'
 
 const router = useRouter()
 const userStore = useUserStore()
@@ -354,91 +354,6 @@ async function handleFollowSubmit() {
   }
 }
 
-// ---------- 自然语言搜索（PRD §27，需后端配置 LLM） ----------
-const nlText = ref('')
-const nlLoading = ref(false)
-/** NL 命中的条件（回填筛选后展示，便于确认/撤销）；key 是回填到 query 的参数名 */
-const nlApplied = ref<Array<{ key: string; label: string; value: string }>>([])
-
-const NL_LABELS: Record<string, string> = {
-  keyword: '关键词',
-  country: '国家',
-  industry: '行业',
-  grade: '等级',
-  min_score: '最低分',
-  whatsapp_hit: 'WhatsApp',
-  is_cn: '中国出海',
-  follow_status: '跟进状态',
-}
-
-async function handleNlSearch() {
-  const text = nlText.value.trim()
-  if (!text) {
-    message.warning('请输入自然语言描述，如：深圳 跨境电商 美国市场 使用WhatsApp')
-    return
-  }
-  nlLoading.value = true
-  try {
-    const { params } = await searchNl(text)
-    const entries = Object.entries(params).filter(([, v]) => v !== undefined && v !== null && v !== '')
-    if (!entries.length) {
-      message.warning('未识别出有效筛选条件，请换种说法')
-      return
-    }
-    // 回填筛选器（覆盖同名项）
-    for (const [k, v] of entries) {
-      if (k === 'keyword') query.keyword = String(v)
-      else if (k === 'country') query.country = String(v)
-      else if (k === 'industry') query.industry = String(v)
-      else if (k === 'grade') query.grade = v as Grade
-      else if (k === 'min_score') query.min_score = Number(v)
-      else if (k === 'whatsapp_hit') query.whatsapp = v ? 'hit' : null
-      else if (k === 'is_cn') query.is_cn = Boolean(v)
-      else if (k === 'follow_status') query.follow_status = v as FollowStatus
-    }
-    nlApplied.value = entries.map(([k, v]) => ({ key: k, label: NL_LABELS[k] ?? k, value: String(v) }))
-    query.page = 1
-    fetchData()
-    message.success(`已识别 ${entries.length} 个条件并应用`)
-  } finally {
-    nlLoading.value = false
-  }
-}
-
-/** 关掉单个 NL 标签：同步清掉它回填的筛选参数再刷新，保证 UI 与实际过滤条件一致 */
-function removeNlTag(index: number) {
-  const [removed] = nlApplied.value.splice(index, 1)
-  if (!removed) return
-  switch (removed.key) {
-    case 'keyword':
-      query.keyword = ''
-      break
-    case 'country':
-      query.country = null
-      break
-    case 'industry':
-      query.industry = null
-      break
-    case 'grade':
-      query.grade = null
-      break
-    case 'min_score':
-      query.min_score = null
-      break
-    case 'whatsapp_hit':
-      query.whatsapp = null
-      break
-    case 'is_cn':
-      query.is_cn = false
-      break
-    case 'follow_status':
-      query.follow_status = null
-      break
-  }
-  query.page = 1
-  fetchData()
-}
-
 // ---------- 自动分配（PRD §24，主管操作） ----------
 const autoAssignShow = ref(false)
 const autoAssignSubmitting = ref(false)
@@ -765,53 +680,6 @@ onUnmounted(() => {
     </div>
 
     <!-- 筛选 -->
-    <n-card
-      size="small"
-      class="mb-4"
-    >
-      <div class="flex flex-wrap items-center gap-3">
-        <span class="nl-label">🤖 AI 搜索</span>
-        <n-input
-          v-model:value="nlText"
-          placeholder="自然语言描述，如：深圳 跨境电商 美国市场 使用WhatsApp"
-          clearable
-          style="width: 440px"
-          @keyup.enter="handleNlSearch"
-        />
-        <n-button
-          type="primary"
-          secondary
-          :loading="nlLoading"
-          @click="handleNlSearch"
-        >
-          识别并筛选
-        </n-button>
-        <template v-if="nlApplied.length">
-          <n-tag
-            v-for="(item, i) in nlApplied"
-            :key="item.key + item.value"
-            size="small"
-            type="info"
-            closable
-            @close="removeNlTag(i)"
-          >
-            {{ item.label }}:{{ item.value }}
-          </n-tag>
-          <n-button
-            quaternary
-            size="tiny"
-            @click="() => { nlApplied = []; resetQuery() }"
-          >
-            清除
-          </n-button>
-        </template>
-        <span
-          v-else
-          class="nl-hint"
-        >需后端配置 LLM（LLM_BASE_URL / LLM_API_KEY）</span>
-      </div>
-    </n-card>
-
     <n-card
       size="small"
       class="mb-4"
@@ -1332,10 +1200,6 @@ onUnmounted(() => {
   overflow-y: auto;
   padding: 4px 4px 0;
   border-bottom: 1px dashed var(--yz-border-color, #e0e0e6);
-}
-.nl-label {
-  font-size: 13px;
-  font-weight: 500;
 }
 .nl-hint {
   font-size: 12px;

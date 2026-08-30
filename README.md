@@ -45,7 +45,8 @@ make dev    # 装依赖 + 准备中间件 + 启动前后端，Ctrl+C 一起停
 |---|---|
 | `GOOGLE_MAPS_API_KEY` | google_maps 采集器必需，缺失时任务直接 failed |
 | `SCORING_DIM_WEIGHTS` / `TARGET_REGIONS` | 覆盖六维评分权重 / 目标地区 |
-| `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | AI 分析/话术/自然语言搜索（OpenAI 兼容：智谱 GLM/DeepSeek 等；未配置降级规则模板） |
+| `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | AI 企业分析/销售话术（OpenAI 兼容：智谱 GLM/DeepSeek 等；未配置降级规则模板） |
+| `GOOGLE_CSE_KEY`+`GOOGLE_CSE_CX` / `BING_SEARCH_KEY` | web_search 采集器（搜索引擎发现企业种子，二选一） |
 | `ENRICH_INTERVAL_HOURS` | C 级线索富化兜底周期（默认 168h；S/A/B 级固定 1/3/7 天更勤） |
 | `SCHEDULER_ENABLED=true` | 开启 cron 定时调度（单进程） |
 
@@ -88,11 +89,9 @@ make dev    # 装依赖 + 准备中间件 + 启动前后端，Ctrl+C 一起停
 | 📡 动态事件 | WhatsApp 发现/场景变化/等级迁移等 11 类事件自动记录，详情页时间线 |
 | 🎯 产品推荐 | 规则引擎按画像推荐产品 + 销售建议文案（不依赖 LLM） |
 | 📤 CSV 导出 | 当前筛选口径、36 个可选字段、UTF-8 BOM（Excel 直接打开） |
-| 💼 商机 CRM | 商机漏斗（商机→报价→谈判→成交）联动线索状态，金额/GMV/ARPU/排行榜 |
-| 📋 话术审核队列 | AI/模板生成话术 → 销售审核 → 复制发送 → 标记已发（不自动外发） |
-| 🤖 AI 能力 | 企业分析/话术生成/自然语言筛选（OpenAI 兼容协议，未配置降级规则模板） |
+| 🤖 AI 能力 | 企业分析/话术生成（§七 输出规格；OpenAI 兼容协议，未配置降级规则模板） |
 | 👑 RBAC + 数据权限 | 5 种子角色 × 7 权限码；公司/团队/个人三级数据权限 |
-| 📊 销售驾驶舱 | 月度指标、销售漏斗、排行榜、数据源管理（渠道×等级产出） |
+| 📊 数据源管理 | 渠道×等级产出分析（§一「分析哪个渠道商机产出最高」） |
 | ⏱️ 任务体系 | DB 即队列（无 Celery/Redis），支持并发闸门、取消、进度/日志实时轮询、APScheduler cron 定时 |
 | 🖥️ 控制台 UI | 线索筛选（等级/国家/行业/来源/分数/WhatsApp 检测/关键词）、企业画像详情页、勾选批量检测、任务表单按 param_schema 动态渲染、日志流式查看 |
 

@@ -333,17 +333,6 @@ export interface LeadDetail extends Lead {
   score_breakdown: { total: number; items: Array<{ key: string; label: string; points: number }> }
   /** WhatsApp Business 账号（号码级验证命中） */
   wa_business: boolean
-  opportunities: Array<{
-    id: number
-    name: string
-    amount: number
-    stage: string
-    expected_close_at: string | null
-    won_at: string | null
-    owner_name: string | null
-    note: string | null
-    created_at: string
-  }>
 }
 
 export interface CollectTask {
@@ -629,7 +618,6 @@ export interface CollectStats {
   /** 月度口径（§39） */
   month_new_leads: number
   month_won_count: number
-  month_won_amount: number
 }
 
 export function getStats() {

@@ -20,7 +20,6 @@ import {
   FlashOutline,
   PulseOutline,
   NotificationsOutline,
-  ChatbubbleEllipsesOutline,
 } from '@vicons/ionicons5'
 import { useUserStore } from '@/stores/user'
 import { useAppStore, THEME_PRESETS } from '@/stores/app'
@@ -52,9 +51,8 @@ const menus: MenuOption[] = [
     key: 'sales',
     icon: renderIcon(FlashOutline),
     children: [
-      { label: '销售驾驶舱', key: '/sales', icon: renderIcon(PulseOutline) },
+      { label: '数据源管理', key: '/sales', icon: renderIcon(PulseOutline) },
       { label: '高价值预警', key: '/sales/alerts', icon: renderIcon(NotificationsOutline) },
-      { label: '话术审核', key: '/sales/messages', icon: renderIcon(ChatbubbleEllipsesOutline) },
     ],
   },
   {
