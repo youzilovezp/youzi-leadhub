@@ -65,6 +65,7 @@ from app.schemas.collect import (
     LeadOut,
     OpportunityOut,
     RecommendationOut,
+    SignalEvidenceOut,
     TaskCreate,
     TaskLogOut,
     TaskOut,
@@ -467,6 +468,29 @@ async def get_lead_detail(db: SessionDep, user: CurrentUser, lead_id: int):
         oo = OpportunityOut.model_validate(o)
         oo.owner_name = opp_name_map.get(o.owner_id)
         out.opportunities.append(oo)
+    # 信号体系（§4.2/§4.3/§4.1）：出海/招聘/广告信号 + 证据链
+    from app.crud.lead_signals import SIGNAL_TYPE_LABELS_ZH, list_signals
+
+    out.overseas_signals = dict(lead.overseas_signals or {})
+    out.job_signals = dict(lead.job_signals or {})
+    out.ad_count = lead.ad_count or 0
+    out.last_ad_at = lead.last_ad_at
+    signal_rows = await list_signals(db, lead_id)
+    out.signals = [
+        SignalEvidenceOut(
+            id=r.id,
+            signal_type=r.signal_type,
+            signal_type_label=SIGNAL_TYPE_LABELS_ZH.get(r.signal_type, r.signal_type),
+            value=r.value,
+            evidence_url=r.evidence_url,
+            evidence_raw=r.evidence_raw,
+            confidence=r.confidence,
+            source=r.source,
+            first_seen=r.first_seen,
+            last_seen=r.last_seen,
+        )
+        for r in signal_rows
+    ]
     return ResponseModel(data=out)
 
 

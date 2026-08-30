@@ -284,6 +284,9 @@ def _new_lead(
         fb_whatsapp=draft.fb_whatsapp,
         target_countries=list(draft.target_countries or []),
         whatsapp_numbers=list(draft.whatsapp_numbers or []),
+        overseas_signals=dict(draft.overseas_signals or {}),
+        job_signals=dict(draft.job_signals or {}),
+        ad_count=draft.ad_count or 0,
         sources=[{"source": draft.source, "first_seen": now.isoformat(), "last_seen": now.isoformat()}],
         dedupe_key=dedupe_key,
         namecity_key=namecity_key,
@@ -302,6 +305,10 @@ def _new_lead(
         touch_field_meta(lead, "target_countries", draft.source, confidence=90, now=now)
     if draft.whatsapp_numbers:
         touch_field_meta(lead, "whatsapp_numbers", draft.source, confidence=95, now=now)
+    if draft.overseas_signals:
+        touch_field_meta(lead, "overseas_signals", draft.source, confidence=85, now=now)
+    if draft.job_signals:
+        touch_field_meta(lead, "job_signals", draft.source, confidence=85, now=now)
     apply_score(lead)  # 写 score / score_signals（六维） / grade
     return lead
 
@@ -370,6 +377,29 @@ async def _merge_into(
                 merged_wa.append(n)
         existing.whatsapp_numbers = merged_wa
         touch_field_meta(existing, "whatsapp_numbers", draft.source, confidence=95, now=now)
+    if draft.overseas_signals:
+        # 出海信号只增不减：{键: [证据串]} 按键并集
+        merged_ov = dict(existing.overseas_signals or {})
+        for k, vals in draft.overseas_signals.items():
+            bucket = list(merged_ov.get(k) or [])
+            for v in vals or []:
+                if v not in bucket:
+                    bucket.append(v)
+            merged_ov[k] = bucket
+        existing.overseas_signals = merged_ov
+        touch_field_meta(existing, "overseas_signals", draft.source, confidence=85, now=now)
+    if draft.job_signals:
+        # 招聘信号并集（同键取 points 大者；不同键累加）
+        merged_js = dict(existing.job_signals or {})
+        for k, v in draft.job_signals.items():
+            old = merged_js.get(k)
+            if old is None or int(v.get("points", 0)) > int(old.get("points", 0)):
+                merged_js[k] = v
+        existing.job_signals = merged_js
+        touch_field_meta(existing, "job_signals", draft.source, confidence=85, now=now)
+    if draft.ad_count:
+        # 广告累计只增不减
+        existing.ad_count = max(existing.ad_count or 0, draft.ad_count)
     # 补空成功的字段记数据质量来源（§32）
     for field, value in (
         ("website", draft.website),

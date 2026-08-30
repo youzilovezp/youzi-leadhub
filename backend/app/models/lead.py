@@ -90,6 +90,18 @@ class Lead(Base, TimestampMixin):
     target_countries: Mapped[list[str]] = mapped_column(JSON, default=list)  # 投放/目标国家 ISO2 列表
     export_type: Mapped[str | None] = mapped_column(String(64))  # 出海业务类型（如 跨境电商/品牌出海）
 
+    # ---------- 出海信号（PRD §4.2，website_enrich 检测，只增不减） ----------
+    # {currencies/languages/ecommerce/shipping/markets/export_words: [证据串]}
+    overseas_signals: Mapped[dict[str, list[str]]] = mapped_column(JSON, default=dict)
+
+    # ---------- 招聘信号细分（PRD §4.3，job_posting 按岗位标题分类） ----------
+    # {wa_ops/overseas_cs/social_ops/crm_ops/overseas_sales: {label, points}}
+    job_signals: Mapped[dict[str, dict[str, Any]]] = mapped_column(JSON, default=dict)
+
+    # ---------- 广告信号（PRD §4.1 meta_ads 累计；CTWA 由 fb_whatsapp 代理） ----------
+    ad_count: Mapped[int] = mapped_column(Integer, default=0)  # 累计在投广告数（只增）
+    last_ad_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # 最近一次见到在投广告
+
     # ---------- 字段级数据质量（PRD §32）：{字段: {source, updated_at, confidence}} ----------
     field_meta: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
@@ -152,6 +164,44 @@ class LeadContact(Base, TimestampMixin):
 
     def __repr__(self) -> str:
         return f"<LeadContact id={self.id} lead_id={self.lead_id} email={self.email!r}>"
+
+
+class LeadSignal(Base):
+    """信号级证据链（PRD §4.1：每个信号保存 类型/值/来源页面/原文/发现时间/置信度）。
+
+    写入方（collectors 检测命中时 upsert，(lead_id, signal_type, value) 唯一）：
+    - website_enrich：whatsapp_link / whatsapp_plugin / whatsapp_number /
+      overseas_currency / multilang / ecommerce_stack / intl_shipping / market_mention
+    - meta_ads：fb_whatsapp / whatsapp_number / meta_ad
+
+    与宽表 JSON 列（whatsapp_numbers/overseas_signals…）的关系：宽表是评分与
+    筛选的快速输入，本表是可追溯证据——销售能看到"系统为什么判定有需求"。
+    """
+
+    __tablename__ = "lead_signals"
+    __table_args__ = (
+        UniqueConstraint("lead_id", "signal_type", "value", name="uq_lead_signals_type_value"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    lead_id: Mapped[int] = mapped_column(
+        ForeignKey("leads.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    signal_type: Mapped[str] = mapped_column(String(32), index=True, nullable=False)  # 见各 collector 词表
+    value: Mapped[str] = mapped_column(String(512), nullable=False)  # 号码/货币码/平台名等
+    evidence_url: Mapped[str | None] = mapped_column(String(512))  # 发现信号的页面
+    evidence_raw: Mapped[str | None] = mapped_column(String(1024))  # 命中的链接/片段原文
+    confidence: Mapped[int] = mapped_column(Integer, default=80)  # 0-100
+    source: Mapped[str] = mapped_column(String(32), default="")  # website_enrich / meta_ads / job_posting
+    first_seen: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    last_seen: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<LeadSignal id={self.id} lead_id={self.lead_id} {self.signal_type}={self.value!r}>"
 
 
 class LeadEvent(Base):

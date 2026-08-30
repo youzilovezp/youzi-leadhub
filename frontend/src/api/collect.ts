@@ -71,6 +71,16 @@ export function gradeTagType(g: string): 'error' | 'warning' | 'info' | 'default
 /** WhatsApp 场景键（后端 collectors/scenes.py 词表一致） */
 export type SceneKey = 'customer_service' | 'marketing' | 'transactional' | 'saas'
 
+/** 出海信号键 → 中文（§4.2，与后端 collectors/overseas.py 对齐） */
+export const OVERSEAS_LABELS: Record<string, string> = {
+  currencies: '海外货币',
+  languages: '多语言版本',
+  ecommerce: '电商平台',
+  shipping: '海外配送',
+  markets: '海外市场提及',
+  export_words: '出海自述',
+}
+
 export const SCENE_LABELS: Record<string, string> = {
   customer_service: '客服',
   marketing: '营销',
@@ -286,6 +296,20 @@ export interface Recommendation {
 }
 
 /** 企业画像详情（GET /collect/leads/{id}） */
+/** 信号级证据（PRD §4.1：系统为什么判定此客户有需求） */
+export interface SignalEvidence {
+  id: number
+  signal_type: string
+  signal_type_label: string
+  value: string
+  evidence_url: string | null
+  evidence_raw: string | null
+  confidence: number
+  source: string
+  first_seen: string | null
+  last_seen: string | null
+}
+
 export interface LeadDetail extends Lead {
   dimensions: Record<string, number>
   dimension_weights: Record<string, number>
@@ -296,6 +320,15 @@ export interface LeadDetail extends Lead {
   sales_suggestion: string
   /** 需求类型 A-E（§4.4）：[{type, label, selling}] */
   need_types: Array<{ type: string; label: string; selling: string }>
+  /** 出海信号（§4.2）：{currencies/languages/ecommerce/shipping/markets/export_words: [证据]} */
+  overseas_signals: Record<string, string[]>
+  /** 招聘信号细分（§4.3）：{wa_ops/overseas_cs/...: {label, points}} */
+  job_signals: Record<string, { label: string; points: number }>
+  /** 广告信号（§4.1）：累计在投广告数 */
+  ad_count: number
+  last_ad_at: string | null
+  /** 信号级证据链（§4.1） */
+  signals: SignalEvidence[]
   opportunities: Array<{
     id: number
     name: string

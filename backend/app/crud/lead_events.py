@@ -28,6 +28,8 @@ EVENT_TYPES: list[str] = [
     "social_found",  # 新增社媒主页
     "scene_change",  # WhatsApp 场景新增（客服/营销/交易/SaaS）
     "saas_signal_change",  # SaaS 需求信号新增（CRM/工单/Chatbot…）
+    "overseas_signal_found",  # 出海信号新增（货币/多语言/电商栈/配送/市场，§4.2）
+    "job_signal_found",  # 招聘信号细分新增（wa_ops/overseas_cs/…，§4.3）
     "score_change",  # 六维总分变化（含 old/new）
     "grade_change",  # 等级变化（含 old/new）
     "contact_added",  # 新增联系人
@@ -46,6 +48,8 @@ EVENT_TYPE_LABELS_ZH: dict[str, str] = {
     "social_found": "新增社媒",
     "scene_change": "场景变化",
     "saas_signal_change": "SaaS 需求信号",
+    "overseas_signal_found": "出海信号",
+    "job_signal_found": "招聘信号",
     "score_change": "评分变化",
     "grade_change": "等级变化",
     "contact_added": "新增联系人",
@@ -93,6 +97,8 @@ def snapshot_lead(lead: Lead) -> dict[str, Any]:
         "social_keys": set((lead.social or {}).keys()),
         "scenes": set(lead.scenes or []),
         "saas_keys": set((lead.saas_signals or {}).keys()),
+        "overseas_keys": set((getattr(lead, "overseas_signals", None) or {}).keys()),
+        "job_signal_keys": set((getattr(lead, "job_signals", None) or {}).keys()),
         "source_names": {r.get("source") for r in (lead.sources or []) if r.get("source")},
         "score": lead.score,
         "grade": lead.grade,
@@ -237,6 +243,37 @@ async def diff_lead_events(
             note=f"新增 SaaS 需求信号：{'、'.join(labels)}",
             created_by=created_by,
             is_alert=True,  # SaaS 信号出现 = 高价值预警（§55）
+        )
+    new_overseas = set((getattr(lead, "overseas_signals", None) or {}).keys()) - set(
+        before.get("overseas_keys") or set()
+    )
+    if new_overseas:
+        from app.collectors.overseas import OVERSEAS_LABELS_ZH
+
+        labels = [OVERSEAS_LABELS_ZH.get(k, k) for k in sorted(new_overseas)]
+        add_event(
+            db,
+            lead,
+            "overseas_signal_found",
+            payload={"added": sorted(new_overseas)},
+            note=f"新增出海信号：{'、'.join(labels)}",
+            created_by=created_by,
+        )
+    new_job_sigs = set((getattr(lead, "job_signals", None) or {}).keys()) - set(
+        before.get("job_signal_keys") or set()
+    )
+    if new_job_sigs:
+        from app.collectors.job_signals import JOB_SIGNAL_LABELS_ZH
+
+        labels = [JOB_SIGNAL_LABELS_ZH.get(k, k) for k in sorted(new_job_sigs)]
+        add_event(
+            db,
+            lead,
+            "job_signal_found",
+            payload={"added": sorted(new_job_sigs)},
+            note=f"新增招聘信号：{'、'.join(labels)}",
+            created_by=created_by,
+            is_alert="wa_ops" in new_job_sigs,  # WhatsApp 岗位 = 高价值预警（§55）
         )
     new_sources = set()  # 来源只看新增 key，last_seen 刷新不算事件
     for rec in lead.sources or []:

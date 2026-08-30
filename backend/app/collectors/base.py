@@ -44,6 +44,13 @@ class LeadDraft:
     export_type: str | None = None  # 出海业务类型（跨境电商/品牌出海…）
     # WhatsApp 号码证据（§4.1）：页面出现的全部号码（多分线 = 规模化私域）
     whatsapp_numbers: list[str] = field(default_factory=list)
+    # 出海信号（§4.2，website_enrich 检测）：{currencies/languages/ecommerce/
+    # shipping/markets/export_words: [证据串]}
+    overseas_signals: dict[str, list[str]] = field(default_factory=dict)
+    # 招聘信号细分（§4.3，job_posting 按标题分类）：{键: {label, points}}
+    job_signals: dict[str, dict[str, int | str]] = field(default_factory=dict)
+    # 广告信号（§4.1 meta_ads）：累计在投广告数
+    ad_count: int = 0
 
 
 @dataclass
