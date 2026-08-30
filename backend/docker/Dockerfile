@@ -16,11 +16,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # 一起 copy pyproject + readme + app 代码：hatchling 构建 wheel 时需要读取 readme 和 packages=["app"]
 COPY pyproject.toml 后端说明.md ./
+COPY requirements.lock.txt ./
 COPY app ./app
 COPY alembic ./alembic
 
+# 冻结安装：依赖全部来自 uv export 的带哈希锁文件（可复现构建 + 供应链完整性
+# 校验），应用本体 --no-deps 装入（依赖已由锁文件钉死，不允许构建时重新解析）
 RUN pip install --upgrade "pip>=24.0" && \
-    pip install --prefix=/install .
+    pip install --prefix=/install --require-hashes -r requirements.lock.txt && \
+    pip install --prefix=/install --no-deps .
 
 # ---------- Stage 2: runtime ----------
 # 用 debian-slim 而非 alpine：避免 asyncpg / bcrypt / cryptography musl 兼容坑
@@ -63,13 +67,14 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
     CMD curl -fsS http://localhost:8000/healthz || exit 1
 
 # gunicorn 配置：
-# - WORKERS 从环境变量读（默认 4，调大 = 高 spec，调小 = 容器限资源）
+# - WORKERS 从环境变量读（默认 1：任务系统是单进程设计——WORKERS>1 时
+#   TaskRunner/调度器被禁用，采集任务会停在 queued；见 app/main.py lifespan）
 # - --max-requests 防 Python 进程长时间累积内存
 # - --keep-alive 与 LB / Nginx 默认 idle timeout 对齐
 # - --access-logformat 含响应时间 microseconds 便于 ELK/Loki 关联
 # - timeout 120s（兼容 alembic 迁移、批量导入、备份恢复等长任务）
 ENTRYPOINT ["sh", "-c", "exec gunicorn app.main:app \
-    -w \"${WORKERS:-4}\" \
+    -w \"${WORKERS:-1}\" \
     -k uvicorn.workers.UvicornWorker \
     -b 0.0.0.0:8000 \
     --timeout 120 \

@@ -32,6 +32,7 @@ dependencies = [
     "gunicorn>=21.2.0",     # 生产 WSGI 服务器（Dockerfile 用）
 
     # 线索采集
+    "slowapi>=0.1.9,<0.2",  # HTTP 限流（app/core/ratelimit.py；当前仅登录限流走 DB 计数）
     "crawlee[beautifulsoup]>=1.9,<2",  # 爬虫引擎（Apify 开源，asyncio 原生；beautifulsoup extra 含 bs4+lxml）
     "phonenumbers>=8.13,<9",           # 电话 E.164 归一化（libphonenumber 官方移植）
     "tldextract>=5.1,<6",              # registrable domain 解析（公共后缀表，去重键的正确性依赖）

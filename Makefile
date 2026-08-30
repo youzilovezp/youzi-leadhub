@@ -30,6 +30,10 @@ help:           ## 显示帮助
 	@echo "可用命令（默认 PostgreSQL；make start 复用本机已有中间件，缺的用 Docker 起）："
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
 
+lock:           ## 重新生成依赖锁文件（uv.lock + requirements.lock.txt，改 pyproject 后必跑）
+	cd backend && uv lock && uv export --frozen --no-dev --no-emit-project -o requirements.lock.txt
+	@echo "✅ 锁文件已更新：backend/uv.lock + backend/requirements.lock.txt"
+
 install:        ## 安装依赖（后端 venv + 前端 node_modules）
 	@python3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)" || \
 		{ echo "❌ Python $$(python3 --version 2>&1) 过低：本项目需要 3.11+（python.org 下载）"; exit 1; }

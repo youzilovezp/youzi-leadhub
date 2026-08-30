@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev, feature/**]
+  pull_request:
+    branches: [main, dev]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: 后端（pytest + ruff）
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 缓存 uv
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-py3.11-${{ hashFiles('backend/uv.lock') }}
+          restore-keys: uv-${{ runner.os }}-py3.11-
+
+      - name: 安装依赖（运行时来自锁文件，dev 工具单独装）
+        run: |
+          pip install --upgrade "pip>=24.0"
+          pip install --require-hashes -r requirements.lock.txt
+          pip install --no-deps .
+          pip install "pytest>=8.0.0" "pytest-asyncio>=0.23.5" "ruff>=0.3.0,<0.9"
+
+      - name: Ruff 静态检查
+        run: python -m ruff check app/ tests/
+
+      - name: Pytest（SQLite 封闭库，无需外部服务）
+        env:
+          # conftest 会强制切临时 SQLite；这里只保证必需 env 有值
+          SECRET_KEY: ci-only-secret-key-0123456789abcdef0123456789abcdef
+        run: python -m pytest tests/ -q --deselect tests/test_collect_core.py::test_fetch_ignores_env_proxy
+
+  frontend:
+    name: 前端（vue-tsc + vitest）
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 类型检查（vue-tsc）
+        run: pnpm type-check
+
+      - name: 单元测试（vitest）
+        run: pnpm test

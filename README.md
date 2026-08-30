@@ -115,6 +115,7 @@ youzi-leadhub/
 ├── frontend/               # Vue 3 + TS
 │   └── src/views/collect/  # 线索列表 / 任务列表 / 任务详情
 ├── docs/业务逻辑.md         # 业务逻辑梳理（数据流/去重/评分/设计取舍）
+├── docs/运维部署.md         # 生产部署手册（上线 checklist / 备份恢复 / 故障 runbook / PII 合规）
 ├── docker-compose.yml      # PostgreSQL / Redis + adminer
 ├── Makefile                # 常用命令
 ├── AGENTS.md               # AI 开发手册（模块注册流程、勿动文件清单）
@@ -166,6 +167,7 @@ make admin-pass NEW=xxx  # 重置 admin 密码
 | 你想了解什么 | 看这里 |
 |---|---|
 | 🧠 业务逻辑（数据流 / 去重合并 / 评分 / 任务生命周期 / 设计取舍） | [docs/业务逻辑.md](docs/业务逻辑.md) |
+| 🛠️ 运维部署（部署架构 / 上线 checklist / 备份恢复 / 故障 runbook / PII 合规） | [docs/运维部署.md](docs/运维部署.md) |
 | 🚀 脚手架使用（启动、命令、加业务模块） | [项目说明.md](项目说明.md) |
 | 🤖 AI 助手开发约定 | [AGENTS.md](AGENTS.md) |
 | ⚙️ 后端架构 / 配置 / 开发 / API | [架构](backend/docs/架构说明.md) · [配置](backend/docs/配置说明.md) · [开发](backend/docs/开发指南.md) · [API](backend/docs/API文档.md) |
