@@ -163,6 +163,33 @@ SAAS_SIGNALS: list[tuple[str, str, list[str]]] = [
             "统一收件箱",
         ],
     ),
+    # WhatsApp BSP 竞品栈（PRD §4.1「已使用其他 WhatsApp SaaS = 替换商机」）：
+    # 官网/联系页出现的 BSP 品牌指纹（js 域名、widget、集成声明）——命中即
+    # 说明已在用竞品做 WhatsApp 商业化，是我们最直接的替换商机
+    (
+        "wa_bsp",
+        "WhatsApp SaaS 竞品",
+        [
+            "wati.io",
+            "wati",
+            "360dialog",
+            "gupshup",
+            "interakt",
+            "twilio",
+            "sleekflow",
+            "respond.io",
+            "zoko",
+            "webengage",
+            "vonage",
+            "bird.com",
+            "messagebird",
+            "landbot",
+            "brevo",
+            "whatsapp business solution provider",
+            "whatsapp api provider",
+            "whatsapp business partner",
+        ],
+    ),
 ]
 
 SAAS_LABELS_ZH: dict[str, str] = {key: label for key, label, _ in SAAS_SIGNALS}
@@ -208,13 +235,26 @@ def detect_scenes(html_list: list[str] | None) -> list[str]:
 
 
 def detect_saas_signals(html_list: list[str] | None) -> dict[str, int]:
-    """返回 {信号键: 命中关键词数}（只含命中 ≥1 的键；分值在评分层查表）。"""
+    """返回 {信号键: 命中关键词数}（只含命中 ≥1 的键；分值在评分层查表）。
+
+    两层匹配：
+    - 正文文本（page_text：剥 script/style/标签后）——普通关键词词边界命中
+    - 原始 HTML 子串——BSP 竞品等品牌词常出现在 script src / a href 属性里，
+      剥标签后全部丢失（wati.io widget、360dialog 链接），必须在 raw 里扫
+    """
     text = page_text(html_list)
-    if not text:
+    raw = "\n".join(p for p in (html_list or []) if p)[:_MAX_TEXT].lower()
+    if not text and not raw:
         return {}
     hits: dict[str, int] = {}
     for key, _label, keywords in SAAS_SIGNALS:
-        count = sum(1 for kw in keywords if _keyword_hit(text, kw))
+        count = 0
+        for kw in keywords:
+            if text and _keyword_hit(text, kw):
+                count += 1
+            elif key == "wa_bsp" and kw in raw:
+                # 品牌词足够独特（wati.io/360dialog/gupshup…），raw 子串命中
+                count += 1
         if count:
             hits[key] = count
     return hits

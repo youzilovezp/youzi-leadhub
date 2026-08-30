@@ -46,7 +46,29 @@ SAAS_SIGNAL_POINTS: dict[str, int] = {
     "ai_service": 18,
     "marketing_automation": 12,
     "omnichannel": 8,
+    "wa_bsp": 30,  # WhatsApp SaaS 竞品在用（§4.1 替换商机，最强 SaaS 信号）
 }
+
+# ---------- MVP 加分制（PRD §五：简单、可解释、可调参） ----------
+# 13 条信号加分表——与六维加权并存：六维是主分（成熟阶段口径），
+# 加分明细是可解释层（销售直读"这分怎么来的"，调参只改这张表）。
+BONUS_SIGNALS: list[tuple[str, str, int]] = [
+    ("ctwa_ad", "CTWA 广告（FB 主页挂 wa.me 代理信号）", 40),
+    ("site_whatsapp", "官网存在 WhatsApp 入口", 30),
+    ("wa_ops_job", "招聘 WhatsApp 运营/客服", 30),
+    ("wa_bsp_competitor", "已使用其他 WhatsApp SaaS（竞品替换商机）", 30),
+    ("overseas_cs_job", "招聘海外/英文客服", 20),
+    ("wa_business", "使用 WhatsApp Business", 15),
+    ("meta_ads", "在投 Meta 广告", 15),
+    ("overseas_biz", "海外业务特征", 15),
+    ("multi_numbers", "多个 WhatsApp 分线（规模化使用）", 10),
+    ("overseas_site", "海外独立站（多语言/电商建站栈）", 10),
+    ("crm_job", "招聘 CRM/Customer Success", 10),
+    ("three_markets", "投放/提及 ≥3 国市场", 10),
+    ("social_active", "海外社媒活跃（≥3 平台）", 5),
+]
+
+BONUS_LABELS_ZH: dict[str, str] = {k: label for k, label, _ in BONUS_SIGNALS}
 
 
 def effective_dim_weights() -> dict[str, int]:
@@ -77,6 +99,57 @@ def grade_of(score: int) -> str:
     return "C"
 
 
+def bonus_breakdown(
+    *,
+    fb_whatsapp: bool = False,
+    whatsapp_hit: bool = False,
+    whatsapp_numbers: list[str] | None = None,
+    job_signals: dict[str, Any] | None = None,
+    saas_signals: dict[str, Any] | None = None,
+    wa_business: bool = False,
+    sources: list[dict[str, Any]] | None = None,
+    ad_count: int = 0,
+    is_cn: bool = False,
+    overseas_signals: dict[str, list[str]] | None = None,
+    target_countries: list[str] | None = None,
+    social: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """MVP 加分制明细（PRD §五 13 条）：返回 {"total": 加分制总分, "items": [...]}。
+
+    items 只含命中项 [{key, label, points}]——销售直读"这分怎么来的"。
+    与六维总分并存：六维是主分/主分级，加分制是可解释参考口径。
+    """
+    job_keys = set(job_signals or {})
+    saas_keys = set(saas_signals or {})
+    source_names = {r.get("source") for r in (sources or []) if r.get("source")}
+    overseas_signals = overseas_signals or {}
+    tc_count = len({c.upper() for c in (target_countries or []) if c})
+    social = social or {}
+
+    matched: dict[str, bool] = {
+        "ctwa_ad": fb_whatsapp,
+        "site_whatsapp": whatsapp_hit,
+        "wa_ops_job": "wa_ops" in job_keys,
+        "wa_bsp_competitor": "wa_bsp" in saas_keys,
+        "overseas_cs_job": "overseas_cs" in job_keys,
+        "wa_business": wa_business,
+        "meta_ads": ("meta_ads" in source_names) or ad_count > 0,
+        "overseas_biz": is_cn or len(overseas_signals) >= 2,
+        "multi_numbers": len(whatsapp_numbers or []) >= 2,
+        "overseas_site": bool(overseas_signals.get("languages")) or bool(overseas_signals.get("ecommerce")),
+        "crm_job": "crm_ops" in job_keys,
+        "three_markets": tc_count >= 3,
+        "social_active": len(social) >= 3,
+    }
+    items = [
+        {"key": key, "label": label, "points": points}
+        for key, label, points in BONUS_SIGNALS
+        if matched.get(key)
+    ]
+    total = min(100, sum(it["points"] for it in items))
+    return {"total": total, "items": items}
+
+
 def score_lead_inputs(
     *,
     is_cn: bool = False,
@@ -88,6 +161,7 @@ def score_lead_inputs(
     whatsapp_job: bool = False,
     scenes: list[str] | None = None,
     whatsapp_numbers: list[str] | None = None,
+    wa_business: bool = False,
     saas_signals: dict[str, Any] | None = None,
     job_urls: list[str] | None = None,
     social: dict[str, Any] | None = None,
@@ -147,6 +221,7 @@ def score_lead_inputs(
         + (15 if whatsapp_url else 0)
         + (15 if whatsapp_job else 0)
         + (15 if "wa_ops" in (job_signals or {}) else 0)
+        + (15 if wa_business else 0)  # WhatsApp Business 业务号（§4.1 +15~20）
         + (10 if wa_number_count >= 2 else 0)  # 多分线 = 已规模化使用
         + (10 if "customer_service" in scene_set else 0)
         + (10 if "marketing" in scene_set else 0)
@@ -250,6 +325,7 @@ def apply_score(
         whatsapp_job=lead.whatsapp_job,
         scenes=lead.scenes,
         whatsapp_numbers=lead.whatsapp_numbers,
+        wa_business=getattr(lead, "wa_business", False),
         saas_signals=lead.saas_signals,
         job_urls=lead.job_urls,
         social=lead.social,
@@ -268,4 +344,19 @@ def apply_score(
     lead.score = total
     lead.score_signals = dims
     lead.grade = grade
+    # MVP 加分制明细（§五）：与六维并存的可解释层
+    lead.score_breakdown = bonus_breakdown(
+        fb_whatsapp=lead.fb_whatsapp,
+        whatsapp_hit=lead.whatsapp_hit,
+        whatsapp_numbers=lead.whatsapp_numbers,
+        job_signals=getattr(lead, "job_signals", None),
+        saas_signals=lead.saas_signals,
+        wa_business=getattr(lead, "wa_business", False),
+        sources=lead.sources,
+        ad_count=getattr(lead, "ad_count", 0) or 0,
+        is_cn=lead.is_cn,
+        overseas_signals=getattr(lead, "overseas_signals", None),
+        target_countries=getattr(lead, "target_countries", None),
+        social=lead.social,
+    )
     return old_score, total, grade

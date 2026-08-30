@@ -44,6 +44,8 @@ class LeadDraft:
     export_type: str | None = None  # 出海业务类型（跨境电商/品牌出海…）
     # WhatsApp 号码证据（§4.1）：页面出现的全部号码（多分线 = 规模化私域）
     whatsapp_numbers: list[str] = field(default_factory=list)
+    # WhatsApp Business 使用（§4.1 代理判定）
+    wa_business: bool = False
     # 出海信号（§4.2，website_enrich 检测）：{currencies/languages/ecommerce/
     # shipping/markets/export_words: [证据串]}
     overseas_signals: dict[str, list[str]] = field(default_factory=dict)

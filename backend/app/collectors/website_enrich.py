@@ -54,10 +54,39 @@ _WHATSAPP_PATTERNS = [
         r"(?:ht-ctc|joinchat|getbutton|chaty|elfsight|click-to-chat|whatsapp-chat)",
     )
 ]
+# 群组邀请链接（PRD §4.1）：chat.whatsapp.com/xxx = 已在运营 WhatsApp 社群（私域证据）
+_GROUP_LINK_RE = re.compile(r"https?://chat\.whatsapp\.com/[A-Za-z0-9_-]{5,}")
 # 命中前 3 条之一的捕获组 → 拿到号码还原标准链接；插件指纹命中则只置标记
 _PHONE_PATTERNS = _WHATSAPP_PATTERNS[:3]
 # 插件特征（第 5 条）：ht-ctc/joinchat/getbutton/chaty/elfsight/click-to-chat
 _PLUGIN_PATTERNS = _WHATSAPP_PATTERNS[4:]
+
+# WhatsApp Business 使用代理判定（§4.1「号码类型/入口形态」）：页面自述在用
+# WhatsApp Business（业务号而非个人号）——文本或类属性出现即认为命中
+_WA_BUSINESS_RES = [
+    re.compile(r"whatsapp\s+business", re.I),
+    re.compile(r"wa\s+business\s+(?:account|number|api)", re.I),
+    re.compile(r"whatsapp\s*商业号|whatsapp\s*企业号", re.I),
+]
+
+
+def detect_wa_business(html_list: list[str | None]) -> bool:
+    """页面是否自述使用 WhatsApp Business（业务号）。"""
+    joined = "\n".join(h for h in html_list if h)
+    if not joined:
+        return False
+    return any(rx.search(joined) for rx in _WA_BUSINESS_RES)
+
+
+def detect_whatsapp_groups(html_list: list[str | None]) -> list[str]:
+    """页面里的 WhatsApp 群邀请链接（去重保序）——私域运营证据。"""
+    joined = "\n".join(h for h in html_list if h)
+    groups: list[str] = []
+    for m in _GROUP_LINK_RE.finditer(joined):
+        url = m.group(0)
+        if url not in groups:
+            groups.append(url)
+    return groups
 
 _EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
 _SOCIAL_RES = [
@@ -66,11 +95,12 @@ _SOCIAL_RES = [
     ("linkedin", re.compile(r"https?://(?:www\.)?linkedin\.com/(?:company|in)/[^\s\"'<>]+", re.I)),
     ("telegram", re.compile(r"https?://(?:t\.me|telegram\.me)/[^\s\"'<>]+", re.I)),
     ("tiktok", re.compile(r"https?://(?:www\.)?tiktok\.com/@[^\s\"'<>]+", re.I)),
+    ("youtube", re.compile(r"https?://(?:www\.)?youtube\.com/(?:c|channel|user|@)[^\s\"'<>]+", re.I)),
 ]
 # Contact/About/Products 三类内页（官网四层抓取：首页 + 联系/关于/产品页）。
 # Products 层是 B2B/B2C/品类与交易场景关键词的主要来源（跨境电商站尤其）
 _INNER_PAGE_LINK_RE = re.compile(
-    r'href=["\']([^"\']*(?:contact|kontak|about|hubungi|product|shop|store|catalog|collection)[^"\']*)["\']',
+    r'href=["\']([^"\']*(?:contact|kontak|about|hubungi|product|shop|store|catalog|collection|faq|help)[^"\']*)["\']',
     re.I,
 )
 # 内页抓取上限（首页 + 最多 3 个内页；原来只 2 个联系页）
@@ -335,6 +365,9 @@ async def _enrich_one(
     saas_signals = detect_saas_signals(pages)
     # 出海信号（PRD §4.2）：货币/多语言/电商栈/配送/市场/出海自述
     overseas = detect_overseas_signals(pages)
+    # WhatsApp Business 使用（§4.1）+ 群组链接（§4.1 私域证据）
+    wa_business = detect_wa_business(pages)
+    wa_groups = detect_whatsapp_groups(pages)
 
     async with _session_factory()() as session:
         from app.crud.contact import auto_create_from_email
@@ -384,6 +417,9 @@ async def _enrich_one(
                 merged_saas[k] = max(merged_saas.get(k, 0), v)
             lead.saas_signals = merged_saas
             touch_field_meta(lead, "saas_signals", "website_enrich", confidence=75, now=now)
+        if wa_business and not lead.wa_business:
+            lead.wa_business = True
+            touch_field_meta(lead, "wa_business", "website_enrich", confidence=75, now=now)
         if overseas:
             merged_ov = dict(lead.overseas_signals or {})
             for k, vals in overseas.items():
@@ -396,6 +432,20 @@ async def _enrich_one(
             touch_field_meta(lead, "overseas_signals", "website_enrich", confidence=85, now=now)
         # ---------- 信号级证据链（§4.1：类型/值/来源页面/原文/置信度/时间） ----------
         from app.crud.lead_signals import upsert_signal
+
+        # 群邀请链接 = 社群私域运营证据（§4.1/§4.4-E）
+        for g in wa_groups:
+            await upsert_signal(
+                session, lead.id, "whatsapp_group", g,
+                source="website_enrich", evidence_url=base,
+                evidence_raw=g, confidence=90,
+            )
+        if wa_business:
+            await upsert_signal(
+                session, lead.id, "wa_business", "WhatsApp Business",
+                source="website_enrich", evidence_url=base,
+                evidence_raw="页面自述使用 WhatsApp Business", confidence=75,
+            )
 
         for i, page_html in enumerate(pages):
             page_url = page_urls[i] if i < len(page_urls) else base
