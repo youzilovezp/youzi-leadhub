@@ -57,6 +57,8 @@ class Lead(Base, TimestampMixin):
     namecity_key: Mapped[str | None] = mapped_column(String(64), index=True)
     score: Mapped[int] = mapped_column(Integer, default=0, index=True)
     score_signals: Mapped[dict[str, int]] = mapped_column(JSON, default=dict)  # {维度键: 维度分}（六维）
+    # MVP 加分制明细（PRD §五 13 条）：{"total": 参考总分, "items": [{key,label,points}]}
+    score_breakdown: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     grade: Mapped[str] = mapped_column(String(2), default="C", server_default="C", index=True)  # S/A/B/C
 
     # ---------- WhatsApp 场景 & SaaS 需求（website_enrich 检测，只增不减） ----------
@@ -66,6 +68,8 @@ class Lead(Base, TimestampMixin):
     saas_signals: Mapped[dict[str, int]] = mapped_column(JSON, default=dict)
     # 页面出现的全部 WhatsApp 号码（去重；多分线 = 规模化私域证据，§4.1）
     whatsapp_numbers: Mapped[list[str]] = mapped_column(JSON, default=list)
+    # WhatsApp Business 使用（§4.1「号码类型/入口形态」代理判定：页面自述业务号）
+    wa_business: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
 
     # ---------- 来源记录：[{source, first_seen, last_seen}]，按 (lead, source) 唯一 ----------
     sources: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)

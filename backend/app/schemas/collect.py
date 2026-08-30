@@ -46,6 +46,25 @@ class LeadCreate(BaseModel):
     note_source: str = "manual"
 
 
+class LeadImportPayload(BaseModel):
+    """Seed Pool 批量导入（PRD §三 模块①：企业种子库入口）。
+
+    CSV 文本（首行表头可选，列名见 _SEED_COLUMNS）：
+    name,website,phone,country,city,industry
+    """
+
+    csv_text: str = Field(min_length=1, max_length=2_000_000)  # ~5 万行上限
+    is_cn: bool = True  # 中国企业种子默认打上出海特征标记（评分/筛选用）
+
+
+class LeadImportResult(BaseModel):
+    total: int = 0
+    created: int = 0
+    merged: int = 0
+    skipped: int = 0
+    errors: list[str] = []
+
+
 class LeadOut(BaseModel):
     id: int
     name: str
@@ -271,6 +290,9 @@ class LeadDetailOut(LeadOut):
     need_types: list[dict[str, str]] = []
     # 出海信号（§4.2）：{currencies/languages/ecommerce/shipping/markets/export_words: [证据]}
     overseas_signals: dict[str, list[str]] = {}
+    # MVP 加分制明细（§五 13 条）：{"total": 参考总分, "items": [{key,label,points}]}
+    score_breakdown: dict[str, Any] = {}
+    wa_business: bool = False
     # 招聘信号细分（§4.3）：{wa_ops/overseas_cs/...: {label, points}}
     job_signals: dict[str, dict[str, object]] = {}
     # 广告信号（§4.1）

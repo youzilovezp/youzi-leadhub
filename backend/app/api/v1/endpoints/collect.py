@@ -62,6 +62,8 @@ from app.schemas.collect import (
     LeadCreate,
     LeadDetailOut,
     LeadEventOut,
+    LeadImportPayload,
+    LeadImportResult,
     LeadOut,
     OpportunityOut,
     RecommendationOut,
@@ -200,6 +202,79 @@ async def create_lead(db: SessionDep, _user: CurrentUser, payload: LeadCreate):
     # 直接 model_validate 会触发懒加载 IO → MissingGreenlet 422。显式刷新。
     await db.refresh(lead)
     return ResponseModel(data=LeadOut.model_validate(lead))
+
+
+@router.post(
+    "/leads/import",
+    response_model=ResponseModel[LeadImportResult],
+    summary="Seed Pool 批量导入企业种子（CSV 文本，走去重合并）",
+)
+async def import_leads(db: SessionDep, user: CurrentUser, payload: LeadImportPayload):
+    """批量导入中国企业种子（PRD §三 模块①）：CSV 首行表头可选。
+
+    列：name(必填),website,phone,country,city,industry——每行走 upsert_lead
+    去重合并（domain/电话/名称三身份列反查），source=seed_import。
+    """
+    import csv as csv_mod
+    import io as io_mod
+
+    from app.collectors.base import LeadDraft
+
+    # 权限：录入走 lead:write 口径；未配角色的登录用户沿用列表/手工录入的宽口径
+    reader = csv_mod.reader(io_mod.StringIO(payload.csv_text.strip()))
+    rows = [r for r in reader if any(c.strip() for c in r)]
+    if not rows:
+        raise BusinessError(code=40001, message="CSV 内容为空")
+
+    # 首行是表头（含 name 字样）则跳过
+    first = [c.strip().lower() for c in rows[0]]
+    if "name" in first:
+        header = {c: i for i, c in enumerate(first)}
+        rows = rows[1:]
+    else:
+        header = {c: i for i, c in enumerate(("name", "website", "phone", "country", "city", "industry"))}
+    if not rows:
+        raise BusinessError(code=40001, message="CSV 没有数据行（只有表头或空行）")
+
+    result = LeadImportResult(total=len(rows))
+
+    def _col(row: list[str], key: str) -> str | None:
+        i = header.get(key)
+        if i is None or i >= len(row):
+            return None
+        v = row[i].strip()
+        return v or None
+
+    for idx, row in enumerate(rows, start=1):
+
+        name = _col(row, "name")
+        if not name:
+            result.skipped += 1
+            if len(result.errors) < 20:
+                result.errors.append(f"第 {idx} 行缺少企业名称，已跳过")
+            continue
+        try:
+            draft = LeadDraft(
+                source="seed_import",
+                name=name[:255],
+                website=_col(row, "website"),
+                phone_raw=_col(row, "phone"),
+                country=(_col(row, "country") or "").upper()[:8] or None,
+                city=_col(row, "city"),
+                industry=_col(row, "industry"),
+                is_cn=payload.is_cn,
+            )
+            lead, created = await upsert_lead(db, draft)
+            if created:
+                result.created += 1
+            else:
+                result.merged += 1
+        except Exception as exc:  # noqa: BLE001  单行失败不中断整批
+            result.skipped += 1
+            if len(result.errors) < 20:
+                result.errors.append(f"第 {idx} 行导入失败：{type(exc).__name__}: {str(exc)[:80]}")
+    await db.commit()
+    return ResponseModel(data=result)
 
 
 @router.get("/leads/export", summary="导出线索 CSV（当前筛选口径，UTF-8 BOM 兼容 Excel）")
@@ -472,6 +547,8 @@ async def get_lead_detail(db: SessionDep, user: CurrentUser, lead_id: int):
     from app.crud.lead_signals import SIGNAL_TYPE_LABELS_ZH, list_signals
 
     out.overseas_signals = dict(lead.overseas_signals or {})
+    out.score_breakdown = dict(lead.score_breakdown or {})
+    out.wa_business = bool(lead.wa_business)
     out.job_signals = dict(lead.job_signals or {})
     out.ad_count = lead.ad_count or 0
     out.last_ad_at = lead.last_ad_at

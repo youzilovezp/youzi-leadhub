@@ -16,6 +16,8 @@ SIGNAL_TYPE_LABELS_ZH: dict[str, str] = {
     "whatsapp_link": "官网 WhatsApp 直链",
     "whatsapp_plugin": "官网 WhatsApp 插件",
     "whatsapp_number": "WhatsApp 号码",
+    "whatsapp_group": "WhatsApp 群组（私域）",
+    "wa_business": "WhatsApp Business",
     "fb_whatsapp": "FB 主页 WhatsApp 按钮",
     "meta_ad": "Meta 在投广告",
     "overseas_currency": "海外货币",

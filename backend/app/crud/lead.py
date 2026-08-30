@@ -284,6 +284,7 @@ def _new_lead(
         fb_whatsapp=draft.fb_whatsapp,
         target_countries=list(draft.target_countries or []),
         whatsapp_numbers=list(draft.whatsapp_numbers or []),
+        wa_business=bool(draft.wa_business),
         overseas_signals=dict(draft.overseas_signals or {}),
         job_signals=dict(draft.job_signals or {}),
         ad_count=draft.ad_count or 0,
@@ -351,6 +352,8 @@ async def _merge_into(
         existing.is_cn = True  # 布尔 OR：任一来源命中即认为是中国出海特征
     if draft.fb_whatsapp:
         existing.fb_whatsapp = True
+    if draft.wa_business:
+        existing.wa_business = True
     if draft.job_urls:
         urls = list(existing.job_urls or [])
         for u in draft.job_urls:
