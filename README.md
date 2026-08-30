@@ -6,6 +6,8 @@
 
 **为 WhatsApp Business API 产品获客：挖「做海外生意的中国企业」——投 CTWA 类广告、主页挂 wa.me、在招 WA 客服的出海品牌/跨境大卖，销售直接跟进建联**
 
+> 🆓 **纯开源免费运行**：全链路零 API 费用——Meta Ad Library API（免费公开数据）+ DuckDuckGo/SearxNG（零 key/自托管）+ 自研官网爬虫 + 规则引擎评分（LLM 可选，接本地 Ollama 即零成本）。技术栈 FastAPI/Vue3/PostgreSQL 全开源。
+
 ![License](https://img.shields.io/badge/License-MIT-orange.svg)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB.svg)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-009688.svg)
@@ -43,10 +45,9 @@ make dev    # 装依赖 + 准备中间件 + 启动前后端，Ctrl+C 一起停
 
 | 配置项 | 作用 |
 |---|---|
-| `GOOGLE_MAPS_API_KEY` | google_maps 采集器必需，缺失时任务直接 failed |
 | `SCORING_DIM_WEIGHTS` / `TARGET_REGIONS` | 覆盖六维评分权重 / 目标地区 |
-| `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | AI 企业分析/销售话术（OpenAI 兼容：智谱 GLM/DeepSeek 等；未配置降级规则模板） |
-| `GOOGLE_CSE_KEY`+`GOOGLE_CSE_CX` / `BING_SEARCH_KEY` | web_search 采集器（搜索引擎发现企业种子，二选一） |
+| `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | AI 企业分析/销售话术（OpenAI 兼容协议；可指向本地 Ollama/vLLM 跑开源模型实现零成本；未配置降级规则模板，全功能可用） |
+| `SEARCH_ENGINE` | web_search 搜索引擎：`duckduckgo`（默认，零 key 零费用）/ `searxng`（自托管开源元搜索，配 `SEARXNG_URL`）/ google_cse、bing（可选付费加速） |
 | `ENRICH_INTERVAL_HOURS` | C 级线索富化兜底周期（默认 168h；S/A/B 级固定 1/3/7 天更勤） |
 | `SCHEDULER_ENABLED=true` | 开启 cron 定时调度（单进程） |
 
@@ -57,7 +58,7 @@ make dev    # 装依赖 + 准备中间件 + 启动前后端，Ctrl+C 一起停
 给销售找「需要用 WhatsApp 做生意」的企业线索，完整链路：**采集 → 归一化 → 去重合并 → 六维评分分级 → 画像/联系人/事件 → 列表筛选 → 跟进建联**。
 
 ```
-采集器产出 LeadDraft（meta_ads 主通道 / seed_import 种子导入 / job_posting / website_enrich / 手工录入）
+采集器产出 LeadDraft（meta_ads 主通道 / web_search 搜索发现 / seed_import 种子导入 / job_posting / website_enrich / 手工录入）
         │
         ▼
 归一化：电话 E.164 · 域名 registrable domain · 公司名归一
@@ -78,8 +79,7 @@ make dev    # 装依赖 + 准备中间件 + 启动前后端，Ctrl+C 一起停
 |---|---|
 | 🔌 多源采集 | 插件式采集器，注册即接入任务/去重/评分体系 |
 | 🌱 Seed Pool | CSV 批量导入中国企业种子（`POST /collect/leads/import`，走去重合并，is_cn 标记）——PRD 模块①入口 |
-| 📣 `meta_ads` | **主通道**（PRD ICP=中国出海企业）：广告库搜投放企业 → 主页探测 WA/邮箱/官网 + 中文特征 |
-| 🗺️ `google_maps` | 辅助源（海外本地商家，非主 ICP）：Places API 按「关键词 × 城市」采集 |
+| 📣 `meta_ads` | **主通道**（PRD ICP=中国出海企业）：广告库搜投放企业 → 主页探测 WA/邮箱/官网 + 中文特征（Ad Library API 免费） |
 | 💼 `job_posting` | 招聘站点监控（kalibrr 等），在招 WhatsApp 客服的公司即高意向线索 |
 | 🔍 `website_enrich` | 富化存量线索：官网检测 WhatsApp/邮箱/社媒 + 场景（客服/营销/交易）与 SaaS 需求关键词，邮箱自动生成联系人 |
 | ✍️ 手工录入 | 同样走去重合并 |
