@@ -10,6 +10,7 @@ import type { AiAnalysis } from '@/api/sales'
 import {
   DIM_LABELS,
   EVENT_TYPE_LABELS,
+  ICP_STATUS_LABELS,
   SAAS_LABELS,
   OVERSEAS_LABELS,
   SCENE_LABELS,
@@ -558,6 +559,7 @@ onMounted(fetchDetail)
               </div>
               <div class="kv">
                 <span class="k">中国出海</span><span>{{ detail.is_cn ? '✓ 是' : '—' }}</span>
+                <span class="k">ICP 资格</span><span>{{ ICP_STATUS_LABELS[detail.icp_status] ?? detail.icp_status }}</span>
                 <span class="k">主要市场</span>
                 <span>
                   <template v-if="detail.target_countries?.length">

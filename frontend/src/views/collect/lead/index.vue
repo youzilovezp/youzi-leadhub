@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { NButton, NTag, type DataTableColumns, type FormInst, type FormRules } from 'naive-ui'
 import * as collectApi from '@/api/collect'
 import { FOLLOW_STATUS_OPTIONS, EXPORT_FIELDS, followStatusLabel, followStatusTagType, gradeTagType } from '@/api/collect'
+import { ICP_STATUS_LABELS } from '@/api/collect'
 import type {
   FollowOptions,
   FollowStatus,
@@ -11,6 +12,7 @@ import type {
   GeoOptions,
   Grade,
   IndustryOption,
+  IcpStatus,
   Lead,
 } from '@/api/collect'
 import { useUserStore } from '@/stores/user'
@@ -65,6 +67,8 @@ const query = reactive({
   owner_id: null as number | null,
   due_follow: false,
   is_cn: false,
+  /** ICP 二重门筛选：null=默认（排除非中国企业） */
+  icp: null as IcpStatus | 'all' | null,
 })
 
 /** 跟进弹窗选项（状态词表 + 跟进人下拉），onMounted 拉一次 */
@@ -73,6 +77,15 @@ const followOptions = ref<FollowOptions>({ statuses: FOLLOW_STATUS_OPTIONS, user
 function whatsappFilter(): boolean | undefined {
   return !query.whatsapp ? undefined : query.whatsapp === 'hit'
 }
+
+/** ICP 二重门筛选项（null=默认排除非中国企业，见后端 icp 参数） */
+const icpFilterOptions = [
+  { label: '全部（不过滤）', value: 'all' },
+  ...(['qualified', 'cn_domestic', 'foreign', 'unknown'] as const).map((v) => ({
+    label: ICP_STATUS_LABELS[v] ?? v,
+    value: v,
+  })),
+]
 
 const sourceOptions = [
   { label: 'Meta 广告库', value: 'meta_ads' },
@@ -135,6 +148,7 @@ async function fetchData() {
       owner_id: query.owner_id ?? undefined,
       due_follow: query.due_follow || undefined,
       is_cn: query.is_cn || undefined,
+      icp: query.icp || undefined,
     })
     tableData.value = data.items
     total.value = data.total
@@ -418,8 +432,16 @@ const columns: DataTableColumns<Lead> = [
         row.whatsapp_job
           ? h(NTag, { size: 'small', type: 'warning', style: 'margin-left:4px' }, { default: () => '在招' })
           : null,
-        row.is_cn
+        // ICP 二重门资格标：qualified=出海（默认口径）/ cn_domestic=国内待培育 /
+        // foreign=非中国企业（默认列表已排除，显式筛才见）
+        row.icp_status === 'qualified'
           ? h(NTag, { size: 'small', bordered: false, style: 'margin-left:4px' }, { default: () => '出海' })
+          : null,
+        row.icp_status === 'cn_domestic'
+          ? h(NTag, { size: 'small', bordered: false, type: 'default', style: 'margin-left:4px' }, { default: () => '国内' })
+          : null,
+        row.icp_status === 'foreign'
+          ? h(NTag, { size: 'small', bordered: false, type: 'error', style: 'margin-left:4px' }, { default: () => '非中国企业' })
           : null,
       ]),
   },
@@ -632,6 +654,7 @@ function resetQuery() {
     owner_id: null,
     due_follow: false,
     is_cn: false,
+    icp: null,
   })
   fetchData()
 }
@@ -767,6 +790,14 @@ onUnmounted(() => {
         >
           中国出海
         </n-checkbox>
+        <n-select
+          v-model:value="query.icp"
+          :options="icpFilterOptions"
+          clearable
+          size="small"
+          placeholder="ICP：默认排除非中国企业"
+          style="width: 190px"
+        />
         <n-button
           type="primary"
           secondary

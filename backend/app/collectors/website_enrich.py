@@ -70,6 +70,22 @@ _WA_BUSINESS_RES = [
     re.compile(r"whatsapp\s*商业号|whatsapp\s*企业号", re.I),
 ]
 
+# ICP 备案号（中国网站强证据）：页脚「京ICP备12345678号-1」等——纯英文站的
+# 中国出海企业常保留备案信息，是防误杀的关键 CN 证据
+_ICP_LICENSE_RE = re.compile(
+    r"[京沪津渝冀晋蒙辽吉黑苏浙皖闽赣鲁豫鄂湘粤桂琼川黔滇藏陕甘青宁新港澳]"
+    r"ICP[备证]\s*\d{6,10}\s*号(?:-\d{1,3})?"
+)
+
+
+def detect_icp_license(html_list: list[str | None]) -> str | None:
+    """页面是否含 ICP 备案号（中国企业强证据）。返回命中的备案号原文。"""
+    joined = "\n".join(h for h in html_list if h)
+    if not joined:
+        return None
+    m = _ICP_LICENSE_RE.search(joined)
+    return m.group(0) if m else None
+
 
 def detect_cn_content(html_list: list[str | None]) -> bool:
     """页面是否以中文为主（中国企业官网特征）：可见文本 CJK 占比 ≥ 30%。"""
@@ -433,8 +449,14 @@ async def _enrich_one(
         if wa_business and not lead.wa_business:
             lead.wa_business = True
             touch_field_meta(lead, "wa_business", "website_enrich", confidence=75, now=now)
-        if not lead.is_cn and detect_cn_content(pages):
-            # 中国企业特征（§ICP）：官网含显著中文内容——中文站服务海外市场 = 出海企业
+        # 中国企业证据（ICP 二重门·门1）：ICP 备案号 > 中文内容占比——
+        # 纯英文站的中国出海企业常保留备案号，是防误杀为 foreign 的关键证据
+        icp_license = detect_icp_license(pages)
+        if icp_license and not lead.is_cn:
+            lead.is_cn = True
+            touch_field_meta(lead, "is_cn", "website_enrich", confidence=98, now=now)
+        elif not lead.is_cn and detect_cn_content(pages):
+            # 官网含显著中文内容——中文站服务海外市场 = 出海企业
             lead.is_cn = True
             touch_field_meta(lead, "is_cn", "website_enrich", confidence=85, now=now)
         if overseas:
@@ -462,6 +484,13 @@ async def _enrich_one(
                 session, lead.id, "wa_business", "WhatsApp Business",
                 source="website_enrich", evidence_url=base,
                 evidence_raw="页面自述使用 WhatsApp Business", confidence=75,
+            )
+        if icp_license:
+            # CN 证据入证据链：销售可见"为什么判定是中国企业"
+            await upsert_signal(
+                session, lead.id, "cn_icp", icp_license,
+                source="website_enrich", evidence_url=base,
+                evidence_raw=f"页脚备案号：{icp_license}", confidence=98,
             )
 
         for i, page_html in enumerate(pages):

@@ -19,6 +19,7 @@ from sqlalchemy import select, tuple_
 from app.api.deps import CurrentUser, SessionDep, SuperUser
 from app.api.perms import lead_visible, require_permission, scope_filter_params
 from app.collectors import list_collectors
+from app.collectors.icp import ICP_STATUS_LABELS_ZH
 from app.collectors.recommend import detect_need_types, recommend_products, sales_suggestion
 from app.collectors.scenes import SAAS_LABELS_ZH, SCENE_LABELS_ZH
 from app.collectors.scoring import effective_dim_weights
@@ -144,6 +145,11 @@ async def list_leads(
     owner_id: int | None = Query(default=None, ge=1),
     due_follow: bool | None = None,
     is_cn: bool | None = None,
+    icp: str | None = Query(
+        default=None,
+        pattern="^(qualified|cn_domestic|foreign|unknown|all)$",
+        description="ICP 资格：缺省=排除非中国企业；all=不过滤",
+    ),
 ):
     # 数据权限（§43）：own/team 级强制限定可见 owner，接口层无旁路
     scope_ids, include_unassigned = await scope_filter_params(db, user)
@@ -163,6 +169,7 @@ async def list_leads(
         owner_id=owner_id,
         due_follow=due_follow,
         is_cn=is_cn,
+        icp=icp,
         scope_owner_ids=scope_ids,
         scope_include_unassigned=include_unassigned,
     )
@@ -294,6 +301,11 @@ async def export_leads(
     owner_id: int | None = Query(default=None, ge=1),
     due_follow: bool | None = None,
     is_cn: bool | None = None,
+    icp: str | None = Query(
+        default=None,
+        pattern="^(qualified|cn_domestic|foreign|unknown|all)$",
+        description="ICP 资格：缺省=排除非中国企业；all=不过滤（与列表同口径）",
+    ),
 ):
     """注意：本路由必须声明在 GET /leads/{lead_id} 之前（否则 "export" 被当作 lead_id）。"""
     if fields:
@@ -316,6 +328,7 @@ async def export_leads(
         owner_id=owner_id,
         due_follow=due_follow,
         is_cn=is_cn,
+        icp=icp,
     )
     # 数据权限与列表同口径（§43），导出无法绕过
     scope_ids, include_unassigned = await scope_filter_params(db, user)
@@ -362,6 +375,8 @@ async def export_leads(
                 )
             elif key == "owner_name":
                 value = name_map.get(lead.owner_id, "")
+            elif key == "icp_status":
+                value = ICP_STATUS_LABELS_ZH.get(lead.icp_status, lead.icp_status or "")
             elif key == "scenes":
                 value = "; ".join(SCENE_LABELS_ZH.get(s, s) for s in (lead.scenes or []))
             elif key == "saas_signals":
@@ -1121,6 +1136,13 @@ async def collect_stats(db: SessionDep, _user: CurrentUser):
     fb_wa_leads = (
         await db.execute(select(func.count()).select_from(Lead).where(Lead.fb_whatsapp))
     ).scalar_one()
+    # ICP 二重门分布：qualified（销售池）/ cn_domestic（培育）/ foreign / unknown
+    icp_rows = (
+        await db.execute(select(Lead.icp_status, func.count()).group_by(Lead.icp_status))
+    ).all()
+    icp_counts = {s: 0 for s in ("qualified", "cn_domestic", "foreign", "unknown")}
+    for s, cnt in icp_rows:
+        icp_counts[s] = cnt
     # 月度口径：本月新增线索 + 本月成交（follow_status=won 的数据飞轮回传，
     # §二「成交/未成交」——CRM 商机金额已按需求边界移除，成交按线索状态统计）
     # 月初用 Python 算：date_trunc 是 PG 专属，SQLite 测试库没有
@@ -1153,6 +1175,7 @@ async def collect_stats(db: SessionDep, _user: CurrentUser):
             "due_follow_leads": due_follow,
             "cn_leads": cn_leads,
             "fb_wa_leads": fb_wa_leads,
+            "icp_counts": icp_counts,
             "month_new_leads": month_new,
             "month_won_count": month_won,
         }

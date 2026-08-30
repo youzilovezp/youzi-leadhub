@@ -344,6 +344,11 @@ def apply_score(
     lead.score = total
     lead.score_signals = dims
     lead.grade = grade
+    # ICP 二重门（2026-08-31 业务重构）：资格与评分同点重算——upsert/富化/联系人
+    # 变更都会走到这里，icp_status 始终与行属性一致
+    from app.collectors.icp import compute_icp_status_of
+
+    lead.icp_status = compute_icp_status_of(lead)
     # MVP 加分制明细（§五）：与六维并存的可解释层
     lead.score_breakdown = bonus_breakdown(
         fb_whatsapp=lead.fb_whatsapp,
