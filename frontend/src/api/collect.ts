@@ -38,6 +38,8 @@ export interface Lead {
   last_followed_at: string | null
   next_follow_at: string | null
   is_cn: boolean
+  /** ICP 二重门：qualified=中国出海 / cn_domestic=中国·未出海 / foreign=非中国企业 / unknown=待验证 */
+  icp_status: IcpStatus
   fb_whatsapp: boolean
   /** 投放/目标国家（meta_ads 累计，§8） */
   target_countries: string[]
@@ -210,7 +212,28 @@ export interface LeadQuery {
   due_follow?: boolean
   /** 只看中国出海企业 */
   is_cn?: boolean
+  /** ICP 资格筛选：缺省=排除非中国企业；all=不过滤 */
+  icp?: IcpStatus | 'all'
 }
+
+/** ICP 二重门资格（后端 collectors/icp.py 同口径） */
+export type IcpStatus = 'qualified' | 'cn_domestic' | 'foreign' | 'unknown'
+
+export const ICP_STATUS_LABELS: Record<string, string> = {
+  qualified: '中国出海',
+  cn_domestic: '中国·未出海',
+  foreign: '非中国企业',
+  unknown: '待验证',
+}
+
+export const ICP_STATUS_OPTIONS = [
+  { value: '', label: '默认（排除非中国企业）' },
+  { value: 'all', label: '全部（不过滤）' },
+  { value: 'qualified', label: '中国出海' },
+  { value: 'cn_domestic', label: '中国·未出海' },
+  { value: 'foreign', label: '非中国企业' },
+  { value: 'unknown', label: '待验证' },
+]
 
 export interface LeadCreatePayload {
   name: string
@@ -510,6 +533,7 @@ export const EXPORT_FIELDS: Array<{ key: string; label: string }> = [
   { key: 'scenes', label: 'WhatsApp场景' },
   { key: 'saas_signals', label: 'SaaS需求信号' },
   { key: 'is_cn', label: '中国出海' },
+  { key: 'icp_status', label: 'ICP资格' },
   { key: 'fb_whatsapp', label: 'FB私域' },
   { key: 'job_urls', label: '在招岗位链接' },
   { key: 'sources', label: '来源' },

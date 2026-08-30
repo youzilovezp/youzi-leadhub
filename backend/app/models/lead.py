@@ -109,6 +109,13 @@ class Lead(Base, TimestampMixin):
     # ---------- 字段级数据质量（PRD §32）：{字段: {source, updated_at, confidence}} ----------
     field_meta: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
+    # ---------- ICP 资格（二重门：中国企业 × 出海业务，见 collectors/icp.py） ----------
+    # qualified=CN+出海（销售池） / cn_domestic=CN 未出海（培育） /
+    # foreign=有评估结论的非 CN（不进默认销售池） / unknown=证据不足（待验证）
+    icp_status: Mapped[str] = mapped_column(
+        String(16), default="unknown", server_default="unknown", index=True
+    )
+
     def __repr__(self) -> str:
         return f"<Lead id={self.id} name={self.name!r} score={self.score} grade={self.grade}>"
 

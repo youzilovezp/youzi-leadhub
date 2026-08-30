@@ -147,22 +147,21 @@ def test_detect_whatsapp_negative():
 # ---------- 富化抓取：client 必须无视系统代理（primal.com.ph 症状回归） ----------
 
 
-async def test_fetch_ignores_env_proxy(monkeypatch):
-    import httpx
+async def test_fetch_falls_back_to_direct_when_proxy_dead(monkeypatch):
+    """双通道回归（原 P0「代理软拦截误报」的现行语义，2026-08-31 起）：
+    主 client 代理优先（本机环境海外站需系统代理），代理不可用时宽松兜底
+    client（trust_env=False 直连）仍能抓到页面——单一死代理不再造成误报。"""
+    from app.collectors.website_enrich import _SSL_LOOSE_CLIENT_ARGS, _fetch_site, _make_client
 
-    from app.collectors.website_enrich import _fetch
-
-    # 模拟被劫持的系统代理：任何请求都打到不存在的本地端口
+    # 模拟被劫持/失效的系统代理：任何请求都打到不存在的本地端口
     monkeypatch.setenv("all_proxy", "socks5://127.0.0.1:1")
     monkeypatch.setenv("https_proxy", "http://127.0.0.1:1")
     monkeypatch.setenv("http_proxy", "http://127.0.0.1:1")
-    async with httpx.AsyncClient() as _:  # 确认 httpx 默认会受影响的环境存在
-        pass
-    from app.collectors.website_enrich import _make_client
 
-    async with _make_client() as client:
-        html = await _fetch(client, "https://www.primal.com.ph/")
-    assert html is not None and "primal" in html.lower()
+    # 目标用直连稳定的站点（海外站直连路由本机间歇不可达，会让回归抖动）
+    async with _make_client() as primary, _make_client(**_SSL_LOOSE_CLIENT_ARGS) as loose:
+        html = await _fetch_site((primary, loose), "https://www.baidu.com/")
+    assert html is not None and "baidu" in html.lower()
 
 
 async def test_fetch_site_scheme_fallback():

@@ -20,6 +20,7 @@ from app.collectors.normalize import (
     normalize_phone,
 )
 from app.collectors.scoring import apply_score
+from app.collectors.icp import ICP_STATUS_VALUES, has_cn_evidence
 from app.crud.lead_events import rescore_and_log, snapshot_lead
 from app.models.lead import Lead, LeadEvent
 
@@ -280,7 +281,10 @@ def _new_lead(
         whatsapp_url=draft.whatsapp_url,
         whatsapp_job=draft.whatsapp_job,
         job_urls=list(draft.job_urls or []),
-        is_cn=draft.is_cn,
+        # CN 证据（ICP 门1）：来源标记 / 国家码 CN / +86 号码，任一命中
+        is_cn=has_cn_evidence(
+            is_cn=draft.is_cn, country=draft.country, phone_e164=phone_e164
+        ),
         fb_whatsapp=draft.fb_whatsapp,
         target_countries=list(draft.target_countries or []),
         whatsapp_numbers=list(draft.whatsapp_numbers or []),
@@ -348,7 +352,7 @@ async def _merge_into(
             existing.whatsapp_url = draft.whatsapp_url
     if draft.whatsapp_job:
         existing.whatsapp_job = True
-    if draft.is_cn:
+    if draft.is_cn or (draft.country or "").upper() == "CN":
         existing.is_cn = True  # 布尔 OR：任一来源命中即认为是中国出海特征
     if draft.fb_whatsapp:
         existing.fb_whatsapp = True
@@ -468,11 +472,22 @@ def _lead_conditions(
     owner_id: int | None = None,
     due_follow: bool | None = None,
     is_cn: bool | None = None,
+    icp: str | None = None,
 ) -> list:
-    """线索筛选条件构造（列表与导出共用，保证两边口径一致）。"""
+    """线索筛选条件构造（列表与导出共用，保证两边口径一致）。
+
+    icp（ICP 二重门）：None=默认排除 foreign（不进销售池口径）；
+    "all"=不过滤；其余值 = 精确匹配 icp_status。
+    """
     from sqlalchemy import Text, func, or_
 
     conds = []
+    if icp is None:
+        conds.append(Lead.icp_status != "foreign")
+    elif icp != "all":
+        if icp not in ICP_STATUS_VALUES:
+            raise ValueError(f"invalid icp filter: {icp}")
+        conds.append(Lead.icp_status == icp)
     if country:
         conds.append(Lead.country == country.upper())
     if industry:
@@ -543,6 +558,7 @@ async def search_leads(
     owner_id: int | None = None,
     due_follow: bool | None = None,
     is_cn: bool | None = None,
+    icp: str | None = None,
     # 数据权限（§43）：scope_owner_ids 非 None 时强制限定可见 owner 集合；
     # scope_include_unassigned=共享池是否可见（个人/团队级默认可见以便认领）
     scope_owner_ids: list[int] | None = None,
@@ -568,6 +584,7 @@ async def search_leads(
         owner_id=owner_id,
         due_follow=due_follow,
         is_cn=is_cn,
+        icp=icp,
     )
     if scope_owner_ids is not None:
         visible = Lead.owner_id.in_(scope_owner_ids)

@@ -97,6 +97,7 @@ class LeadOut(BaseModel):
     last_followed_at: datetime | None
     next_follow_at: datetime | None
     is_cn: bool = False  # 中国出海企业特征
+    icp_status: str = "unknown"  # ICP 二重门：qualified/cn_domestic/foreign/unknown
     fb_whatsapp: bool = False  # FB 主页带 wa.me（CTWA/私域运营证据）
     target_countries: list[str] = []  # 投放/目标国家（meta_ads 累计，§8）
     export_type: str | None = None  # 出海业务类型
@@ -212,6 +213,7 @@ EXPORT_FIELDS: list[tuple[str, str]] = [
     ("scenes", "WhatsApp场景"),
     ("saas_signals", "SaaS需求信号"),
     ("is_cn", "中国出海"),
+    ("icp_status", "ICP资格"),
     ("fb_whatsapp", "FB私域"),
     ("job_urls", "在招岗位链接"),
     ("sources", "来源"),
