@@ -74,10 +74,7 @@ async def test_own_scope_isolation(client: AsyncClient, admin_credentials):
         )
     ).status_code == 404
     assert (await client.get(f"/api/v1/collect/leads/{lead_a['id']}/events", headers=b)).status_code == 404
-    # 商机/AI 同样拒绝
-    assert (
-        await client.post(f"/api/v1/sales/leads/{lead_a['id']}/opportunities", headers=b, json={"name": "x"})
-    ).status_code == 404
+    # AI 端点同样拒绝
     assert (await client.get(f"/api/v1/sales/leads/{lead_a['id']}/ai-analysis", headers=b)).status_code == 404
 
     # b 的列表里没有 a 的线索；a 的列表里有
@@ -133,7 +130,7 @@ async def test_followup_cannot_reassign_without_perm(client: AsyncClient, admin_
 
 @pytest.mark.asyncio
 async def test_stats_endpoints_require_permission(client: AsyncClient, admin_credentials):
-    """漏斗/排行/数据源需要 stats:read 权限码；无角色用户 403，超管 200。"""
+    """数据源管理需要 stats:read 权限码；无角色用户 403，超管 200。"""
     admin = {"Authorization": f"Bearer {(await client.post('/api/v1/auth/login', json=admin_credentials)).json()['data']['access_token']}"}
     # 无角色用户（权限码为空集）
     r = await client.post(
@@ -146,6 +143,6 @@ async def test_stats_endpoints_require_permission(client: AsyncClient, admin_cre
     )
     no_role = {"Authorization": f"Bearer {login.json()['data']['access_token']}"}
 
-    for path in ("/api/v1/sales/funnel", "/api/v1/sales/leaderboard", "/api/v1/sales/data-sources"):
+    for path in ("/api/v1/sales/data-sources",):
         assert (await client.get(path, headers=no_role)).status_code == 403, path
         assert (await client.get(path, headers=admin)).status_code == 200, path

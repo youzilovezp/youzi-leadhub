@@ -39,12 +39,10 @@ from app.crud.lead import (
     upsert_lead,
 )
 from app.crud.lead_events import describe_dimensions
-from app.crud.opportunity import list_opportunities
 from app.crud.task_crud import list_tasks as query_tasks
 from app.crud.task_crud import task_crud
 from app.models.collect_task import CollectTask, CollectTaskLog
 from app.models.lead import Lead, LeadContact, LeadEvent, LeadFollowUp
-from app.models.sales import Opportunity
 from app.models.user import User
 from app.schemas.collect import (
     EXPORT_FIELD_KEYS,
@@ -65,7 +63,6 @@ from app.schemas.collect import (
     LeadImportPayload,
     LeadImportResult,
     LeadOut,
-    OpportunityOut,
     RecommendationOut,
     SignalEvidenceOut,
     TaskCreate,
@@ -491,8 +488,6 @@ async def get_lead_detail(db: SessionDep, user: CurrentUser, lead_id: int):
         .scalars()
         .all()
     )
-    opportunities = await list_opportunities(db, lead_id)
-    opp_name_map = await _user_display_map(db, {o.owner_id for o in opportunities})
 
     dims = describe_dimensions(lead.score_signals)
     recs = recommend_products(
@@ -538,11 +533,6 @@ async def get_lead_detail(db: SessionDep, user: CurrentUser, lead_id: int):
         saas_signals=lead.saas_signals,
         sources=lead.sources,
     )
-    out.opportunities = []
-    for o in opportunities:
-        oo = OpportunityOut.model_validate(o)
-        oo.owner_name = opp_name_map.get(o.owner_id)
-        out.opportunities.append(oo)
     # 信号体系（§4.2/§4.3/§4.1）：出海/招聘/广告信号 + 证据链
     from app.crud.lead_signals import SIGNAL_TYPE_LABELS_ZH, list_signals
 
@@ -917,11 +907,11 @@ async def lead_industries(db: SessionDep, _user: CurrentUser):
 
     不用预设词表——google_maps 存关键词、OSM 存标签值、手工录入任意填，
     distinct 才能保证「选项里有的就能查到」。label 是中文展示名
-    （OSM 词表映射，未收录原样显示），value 保持原 token 保证筛选精确。
+    （词表映射，未收录原样显示），value 保持原 token 保证筛选精确。
     """
     from sqlalchemy import func
 
-    from app.collectors.osm_overpass import INDUSTRY_LABELS_ZH
+    from app.collectors.industry_labels import INDUSTRY_LABELS_ZH
 
     rows = (
         await db.execute(
@@ -1131,7 +1121,8 @@ async def collect_stats(db: SessionDep, _user: CurrentUser):
     fb_wa_leads = (
         await db.execute(select(func.count()).select_from(Lead).where(Lead.fb_whatsapp))
     ).scalar_one()
-    # 月度口径（PRD §39）：本月新增线索 + 本月成交（商机 won_at 落在本月）
+    # 月度口径：本月新增线索 + 本月成交（follow_status=won 的数据飞轮回传，
+    # §二「成交/未成交」——CRM 商机金额已按需求边界移除，成交按线索状态统计）
     # 月初用 Python 算：date_trunc 是 PG 专属，SQLite 测试库没有
     from datetime import datetime, timezone
 
@@ -1143,13 +1134,14 @@ async def collect_stats(db: SessionDep, _user: CurrentUser):
             select(func.count()).select_from(Lead).where(Lead.created_at >= month_start)
         )
     ).scalar_one()
-    month_won_row = (
+    month_won = (
         await db.execute(
-            select(func.count(), func.coalesce(func.sum(Opportunity.amount), 0)).where(
-                Opportunity.won_at.is_not(None), Opportunity.won_at >= month_start
+            select(func.count()).select_from(Lead).where(
+                Lead.follow_status == "won", Lead.last_followed_at.is_not(None),
+                Lead.last_followed_at >= month_start,
             )
         )
-    ).one()
+    ).scalar_one()
     return ResponseModel(
         data={
             "total_leads": total,
@@ -1162,7 +1154,6 @@ async def collect_stats(db: SessionDep, _user: CurrentUser):
             "cn_leads": cn_leads,
             "fb_wa_leads": fb_wa_leads,
             "month_new_leads": month_new,
-            "month_won_count": month_won_row[0],
-            "month_won_amount": month_won_row[1],
+            "month_won_count": month_won,
         }
     )

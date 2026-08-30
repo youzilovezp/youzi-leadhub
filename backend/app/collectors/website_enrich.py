@@ -28,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.collectors.base import Collector, TaskContext
 from app.collectors.normalize import extract_domain
-from app.collectors.overseas import detect_overseas_signals
+from app.collectors.overseas import detect_domain_tld, detect_overseas_signals
 from app.collectors.scenes import (
     SAAS_LABELS_ZH,
     SCENE_LABELS_ZH,
@@ -363,8 +363,11 @@ async def _enrich_one(
     social = detect_social(pages)
     scenes = detect_scenes(pages)
     saas_signals = detect_saas_signals(pages)
-    # 出海信号（PRD §4.2）：货币/多语言/电商栈/配送/市场/出海自述
+    # 出海信号（PRD §4.2）：货币/多语言/电商栈/配送/市场/出海自述/海外域名
     overseas = detect_overseas_signals(pages)
+    tld = detect_domain_tld(base)
+    if tld:
+        overseas.setdefault("domain_tld", []).append(tld)
     # WhatsApp Business 使用（§4.1）+ 群组链接（§4.1 私域证据）
     wa_business = detect_wa_business(pages)
     wa_groups = detect_whatsapp_groups(pages)

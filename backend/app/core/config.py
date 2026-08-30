@@ -152,6 +152,10 @@ class Settings(BaseSettings):
     # 获取：https://www.facebook.com/ads/archive/api 创建应用申请 token（免费），
     # 需要的权限很窄（ads_archive 只读公开广告数据）。
     META_ADS_ACCESS_TOKEN: str = ""
+    # web_search 采集器（§6.2 P1 搜索数据源，官方 API 层）：二选一
+    GOOGLE_CSE_KEY: str = ""   # Google Custom Search JSON API key（免费 100 次/天）
+    GOOGLE_CSE_CX: str = ""    # Google CSE 的搜索引擎 ID（programmablesearchengine.google.com 创建）
+    BING_SEARCH_KEY: str = ""  # Bing Web Search（Azure）key
     COLLECT_MAX_CONCURRENT: int = 2   # 同时运行的采集任务数（满则排队）
     COLLECT_TASK_TIMEOUT: int = 3600  # 单任务超时（秒）
     ENRICH_CONCURRENCY: int = 5     # 富化并发站点数

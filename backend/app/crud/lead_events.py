@@ -34,8 +34,6 @@ EVENT_TYPES: list[str] = [
     "grade_change",  # 等级变化（含 old/new）
     "contact_added",  # 新增联系人
     "assigned",  # 分配/转移/释放（PRD §24）
-    "opportunity_created",  # 新增商机（§37）
-    "opportunity_stage",  # 商机阶段推进（§37）
 ]
 
 EVENT_TYPE_LABELS_ZH: dict[str, str] = {
@@ -54,8 +52,6 @@ EVENT_TYPE_LABELS_ZH: dict[str, str] = {
     "grade_change": "等级变化",
     "contact_added": "新增联系人",
     "assigned": "分配变动",
-    "opportunity_created": "新增商机",
-    "opportunity_stage": "商机推进",
 }
 
 # 高价值预警事件类型（PRD §55）：等级升到 S/A、发现 WhatsApp、SaaS 信号出现
