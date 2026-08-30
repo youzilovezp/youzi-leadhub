@@ -60,6 +60,7 @@ const query = reactive({
   follow_status: null as FollowStatus | null,
   owner_id: null as number | null,
   due_follow: false,
+  is_cn: false,
 })
 
 /** 跟进弹窗选项（状态词表 + 跟进人下拉），onMounted 拉一次 */
@@ -70,6 +71,7 @@ function whatsappFilter(): boolean | undefined {
 }
 
 const sourceOptions = [
+  { label: 'Meta 广告库', value: 'meta_ads' },
   { label: '开源地图', value: 'osm_overpass' },
   { label: '谷歌地图', value: 'google_maps' },
   { label: '招聘监控', value: 'job_posting' },
@@ -83,7 +85,8 @@ function sourceLabel(token: string): string {
 }
 
 /** 来源标签配色：不同来源一眼可辨 */
-const SOURCE_TAG_TYPES: Record<string, 'success' | 'warning' | 'info' | 'default'> = {
+const SOURCE_TAG_TYPES: Record<string, 'success' | 'warning' | 'info' | 'default' | 'error'> = {
+  meta_ads: 'error',
   osm_overpass: 'success',
   google_maps: 'warning',
   job_posting: 'info',
@@ -106,6 +109,8 @@ const stats = ref({
   active_tasks: 0,
   pending_leads: 0,
   due_follow_leads: 0,
+  cn_leads: 0,
+  fb_wa_leads: 0,
 })
 
 async function fetchData() {
@@ -123,6 +128,7 @@ async function fetchData() {
       follow_status: query.follow_status || undefined,
       owner_id: query.owner_id ?? undefined,
       due_follow: query.due_follow || undefined,
+      is_cn: query.is_cn || undefined,
     })
     tableData.value = data.items
     total.value = data.total
@@ -272,11 +278,17 @@ const columns: DataTableColumns<Lead> = [
     render: (row) =>
       h('span', null, [
         h('span', { style: 'font-weight:500' }, row.name),
+        row.fb_whatsapp
+          ? h(NTag, { size: 'small', type: 'error', style: 'margin-left:6px' }, { default: () => 'FB私域' })
+          : null,
         row.whatsapp_hit
           ? h(NTag, { size: 'small', type: 'success', style: 'margin-left:6px' }, { default: () => 'WA' })
           : null,
         row.whatsapp_job
           ? h(NTag, { size: 'small', type: 'warning', style: 'margin-left:4px' }, { default: () => '在招' })
+          : null,
+        row.is_cn
+          ? h(NTag, { size: 'small', bordered: false, style: 'margin-left:4px' }, { default: () => '出海' })
           : null,
       ]),
   },
@@ -452,6 +464,7 @@ function resetQuery() {
     follow_status: null,
     owner_id: null,
     due_follow: false,
+    is_cn: false,
   })
   fetchData()
 }
@@ -479,6 +492,10 @@ onUnmounted(() => {
       <n-card size="small">
         <div class="stat-row">
           <span>线索总数 <b>{{ stats.total_leads }}</b></span>
+          <n-divider vertical />
+          <span>中国出海 <b class="stat-cn">{{ stats.cn_leads }}</b></span>
+          <n-divider vertical />
+          <span>FB 私域按钮 <b class="stat-wa">{{ stats.fb_wa_leads }}</b></span>
           <n-divider vertical />
           <span>检测到 WhatsApp <b class="stat-wa">{{ stats.whatsapp_leads }}</b></span>
           <n-divider vertical />
@@ -542,6 +559,7 @@ onUnmounted(() => {
           style="width: 120px"
         />
         <n-checkbox v-model:checked="query.due_follow" size="small">该回访了</n-checkbox>
+        <n-checkbox v-model:checked="query.is_cn" size="small">中国出海</n-checkbox>
         <n-button type="primary" secondary @click="() => { query.page = 1; fetchData() }">查询</n-button>
         <n-button quaternary @click="resetQuery">重置</n-button>
         <div class="flex-1" />
@@ -701,6 +719,9 @@ onUnmounted(() => {
 }
 .stat-wa {
   color: #18a058;
+}
+.stat-cn {
+  color: #2080f0;
 }
 .stat-pending {
   color: #f0a020;

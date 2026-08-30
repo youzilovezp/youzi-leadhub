@@ -8,10 +8,10 @@ describe('app store 主题', () => {
     setActivePinia(createPinia())
   })
 
-  it('默认亮色 + 默认主题色为柚子橙（品牌色）', () => {
+  it('默认亮色 + 默认主题色为翡翠绿', () => {
     const app = useAppStore()
     expect(app.isDark).toBe(false)
-    expect(app.primaryColor).toBe('#f59e0b')
+    expect(app.primaryColor).toBe('#10b981')
   })
 
   it('setDark 同步 html class 与 localStorage', () => {

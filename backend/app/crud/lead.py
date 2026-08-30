@@ -122,6 +122,7 @@ def _new_lead(
         phone_raw=draft.phone_raw,
         phone_e164=phone_e164,
         social=draft.social,
+        fb_whatsapp=draft.fb_whatsapp,
     )
     return Lead(
         name=draft.name.strip(),
@@ -139,6 +140,8 @@ def _new_lead(
         whatsapp_url=draft.whatsapp_url,
         whatsapp_job=draft.whatsapp_job,
         job_urls=list(draft.job_urls or []),
+        is_cn=draft.is_cn,
+        fb_whatsapp=draft.fb_whatsapp,
         sources=[{"source": draft.source, "first_seen": now.isoformat(), "last_seen": now.isoformat()}],
         dedupe_key=dedupe_key,
         namecity_key=namecity_key,
@@ -180,6 +183,10 @@ async def _merge_into(
             existing.whatsapp_url = draft.whatsapp_url
     if draft.whatsapp_job:
         existing.whatsapp_job = True
+    if draft.is_cn:
+        existing.is_cn = True  # 布尔 OR：任一来源命中即认为是中国出海特征
+    if draft.fb_whatsapp:
+        existing.fb_whatsapp = True
     if draft.job_urls:
         urls = list(existing.job_urls or [])
         for u in draft.job_urls:
@@ -223,6 +230,7 @@ def _score_from_lead(lead: Lead) -> tuple[int, dict[str, int]]:
         phone_raw=lead.phone_raw,
         phone_e164=lead.phone_e164,
         social=lead.social,
+        fb_whatsapp=getattr(lead, "fb_whatsapp", False),
     )
 
 
@@ -260,6 +268,7 @@ async def search_leads(
     follow_status: str | None = None,
     owner_id: int | None = None,
     due_follow: bool | None = None,
+    is_cn: bool | None = None,
 ) -> tuple[list[Lead], int]:
     """线索列表筛选：国家/行业/来源/评分下限/WhatsApp 检测/关键词/跟进维度。"""
     from sqlalchemy import func, or_
@@ -284,6 +293,8 @@ async def search_leads(
     if due_follow:
         # 该回访了：约定了下次跟进时间且已到期
         conds.append(Lead.next_follow_at.is_not(None) & (Lead.next_follow_at <= func.now()))
+    if is_cn is not None:
+        conds.append(Lead.is_cn.is_(is_cn))
     if whatsapp_hit is not None:
         conds.append(Lead.whatsapp_hit.is_(whatsapp_hit))
     if has_website is not None:

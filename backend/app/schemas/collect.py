@@ -61,6 +61,8 @@ class LeadOut(BaseModel):
     follow_status: str | None
     last_followed_at: datetime | None
     next_follow_at: datetime | None
+    is_cn: bool = False  # 中国出海企业特征
+    fb_whatsapp: bool = False  # FB 主页带 wa.me（CTWA/私域运营证据）
     created_at: datetime
     updated_at: datetime
 

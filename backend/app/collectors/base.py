@@ -23,7 +23,7 @@ from app.core.exceptions import BusinessError
 class LeadDraft:
     """采集器产出的原始线索（未归一化、未去重）。"""
 
-    source: str  # 来源标识：google_maps / website_enrich / job_posting / manual
+    source: str  # 来源标识：google_maps / website_enrich / job_posting / manual / meta_ads
     name: str
     country: str | None = None  # ISO2
     city: str | None = None
@@ -36,6 +36,9 @@ class LeadDraft:
     whatsapp_url: str | None = None  # 检测到的 wa.me / 插件链接
     whatsapp_job: bool = False  # 采集器可直接断言「在招 WhatsApp 岗位」
     job_urls: list[str] = field(default_factory=list)
+    # ---------- 中国出海 ICP（meta_ads 链路） ----------
+    is_cn: bool = False  # 中国出海企业特征（品牌/文案含中文等）
+    fb_whatsapp: bool = False  # FB 主页带 wa.me 按钮（CTWA/私域运营证据）
 
 
 @dataclass

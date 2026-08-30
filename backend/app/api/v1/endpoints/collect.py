@@ -70,6 +70,7 @@ async def list_leads(
     follow_status: str | None = None,
     owner_id: int | None = Query(default=None, ge=1),
     due_follow: bool | None = None,
+    is_cn: bool | None = None,
 ):
     items, total = await search_leads(
         db,
@@ -85,6 +86,7 @@ async def list_leads(
         follow_status=follow_status,
         owner_id=owner_id,
         due_follow=due_follow,
+        is_cn=is_cn,
     )
     name_map = await _user_display_map(db, {i.owner_id for i in items})
     outs = []
@@ -463,6 +465,13 @@ async def collect_stats(db: SessionDep, _user: CurrentUser):
             select(func.count()).select_from(Lead).where(Lead.next_follow_at <= func.now())
         )
     ).scalar_one()
+    # 商机维度：中国出海企业数 + FB 主页带 WA 私域按钮数
+    cn_leads = (
+        await db.execute(select(func.count()).select_from(Lead).where(Lead.is_cn))
+    ).scalar_one()
+    fb_wa_leads = (
+        await db.execute(select(func.count()).select_from(Lead).where(Lead.fb_whatsapp))
+    ).scalar_one()
     return ResponseModel(
         data={
             "total_leads": total,
@@ -471,5 +480,7 @@ async def collect_stats(db: SessionDep, _user: CurrentUser):
             "active_tasks": running,
             "pending_leads": pending_follow,
             "due_follow_leads": due_follow,
+            "cn_leads": cn_leads,
+            "fb_wa_leads": fb_wa_leads,
         }
     )

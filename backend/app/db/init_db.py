@@ -234,7 +234,7 @@ async def create_initial_data() -> None:
                 is_active=True,
                 is_superuser=True,
                 role_id=code_to_id["admin"],  # 用 code 查到的 id，避免硬编码
-                nickname="超级管理员",
+                nickname="柚子",
             )
             session.add(admin)
             await session.commit()

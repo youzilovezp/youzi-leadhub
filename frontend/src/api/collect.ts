@@ -29,6 +29,8 @@ export interface Lead {
   follow_status: FollowStatus | null
   last_followed_at: string | null
   next_follow_at: string | null
+  is_cn: boolean
+  fb_whatsapp: boolean
   created_at: string
   updated_at: string
 }
@@ -103,6 +105,8 @@ export interface LeadQuery {
   owner_id?: number
   /** 只看「该回访了」（下次跟进时间已到期） */
   due_follow?: boolean
+  /** 只看中国出海企业 */
+  is_cn?: boolean
 }
 
 export interface LeadCreatePayload {
@@ -295,6 +299,8 @@ export function getStats() {
       active_tasks: number
       pending_leads: number
       due_follow_leads: number
+      cn_leads: number
+      fb_wa_leads: number
     },
     {
       total_leads: number
@@ -303,6 +309,8 @@ export function getStats() {
       active_tasks: number
       pending_leads: number
       due_follow_leads: number
+      cn_leads: number
+      fb_wa_leads: number
     }
   >('/collect/stats')
 }

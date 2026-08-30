@@ -10,13 +10,16 @@ export interface ThemePreset {
 }
 
 export const THEME_PRESETS: ThemePreset[] = [
-  { name: '柚子橙', color: '#f59e0b' },
   { name: '翡翠绿', color: '#10b981' },
+  { name: '柚子橙', color: '#f59e0b' },
   { name: '品牌蓝', color: '#2080f0' },
   { name: '紫罗兰', color: '#7c3aed' },
   { name: '赤霞红', color: '#ef4444' },
   { name: '黛青蓝', color: '#0ea5e9' },
 ]
+
+/** 启动默认主题色：翡翠绿 */
+export const DEFAULT_PRIMARY = THEME_PRESETS[0]?.color ?? '#10b981'
 
 /** 合法主题色：仅 6 位 hex（非法输入忽略，防 NaN 通道写坏变量/overrides） */
 const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/
@@ -65,12 +68,9 @@ export const useAppStore = defineStore('app', () => {
     },
     { immediate: true, flush: 'sync' },
   )
-  const primaryColor = useStorage(
-    'youzi-app-primary',
-    THEME_PRESETS[0]?.color ?? '#f59e0b',
-    undefined,
-    { flush: 'sync' },
-  )
+  const primaryColor = useStorage('youzi-app-primary', DEFAULT_PRIMARY, undefined, {
+    flush: 'sync',
+  })
 
   function toggleSidebar() {
     sidebarCollapsed.value = !sidebarCollapsed.value
