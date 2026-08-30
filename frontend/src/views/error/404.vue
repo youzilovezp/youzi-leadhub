@@ -8,7 +8,12 @@ const router = useRouter()
     <div class="content">
       <h1>404</h1>
       <p>页面不存在</p>
-      <n-button type="primary" @click="router.push('/')">返回首页</n-button>
+      <n-button
+        type="primary"
+        @click="router.push('/')"
+      >
+        返回首页
+      </n-button>
     </div>
   </div>
 </template>

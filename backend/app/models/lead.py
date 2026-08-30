@@ -5,7 +5,18 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    false,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base_class import Base, TimestampMixin
@@ -45,7 +56,16 @@ class Lead(Base, TimestampMixin):
     # 行的主键可能是 domain:/tel:，另一来源只有名称+城市进来时靠这列命中。
     namecity_key: Mapped[str | None] = mapped_column(String(64), index=True)
     score: Mapped[int] = mapped_column(Integer, default=0, index=True)
-    score_signals: Mapped[dict[str, int]] = mapped_column(JSON, default=dict)  # {信号键: 得分}
+    score_signals: Mapped[dict[str, int]] = mapped_column(JSON, default=dict)  # {维度键: 维度分}（六维）
+    grade: Mapped[str] = mapped_column(String(2), default="C", server_default="C", index=True)  # S/A/B/C
+
+    # ---------- WhatsApp 场景 & SaaS 需求（website_enrich 检测，只增不减） ----------
+    # scenes: customer_service / marketing / transactional / saas（见 collectors/scenes.py）
+    scenes: Mapped[list[str]] = mapped_column(JSON, default=list)
+    # saas_signals: {crm/helpdesk/chatbot/ai_service/marketing_automation/omnichannel: 命中关键词数}
+    saas_signals: Mapped[dict[str, int]] = mapped_column(JSON, default=dict)
+    # 页面出现的全部 WhatsApp 号码（去重；多分线 = 规模化私域证据，§4.1）
+    whatsapp_numbers: Mapped[list[str]] = mapped_column(JSON, default=list)
 
     # ---------- 来源记录：[{source, first_seen, last_seen}]，按 (lead, source) 唯一 ----------
     sources: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
@@ -64,8 +84,15 @@ class Lead(Base, TimestampMixin):
         Boolean, default=False, index=True
     )  # FB 主页带 wa.me 按钮（CTWA/私域运营证据）
 
+    # ---------- 出海画像（PRD §8：显式投放市场，meta_ads 累计） ----------
+    target_countries: Mapped[list[str]] = mapped_column(JSON, default=list)  # 投放/目标国家 ISO2 列表
+    export_type: Mapped[str | None] = mapped_column(String(64))  # 出海业务类型（如 跨境电商/品牌出海）
+
+    # ---------- 字段级数据质量（PRD §32）：{字段: {source, updated_at, confidence}} ----------
+    field_meta: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
     def __repr__(self) -> str:
-        return f"<Lead id={self.id} name={self.name!r} score={self.score}>"
+        return f"<Lead id={self.id} name={self.name!r} score={self.score} grade={self.grade}>"
 
 
 class LeadFollowUp(Base):
@@ -84,6 +111,70 @@ class LeadFollowUp(Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False)  # 本次跟进后的状态
     note: Mapped[str | None] = mapped_column(Text)
     next_follow_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+        index=True,
+    )
+
+
+class LeadContact(Base, TimestampMixin):
+    """联系人（销售工作台数据）。
+
+    来源：手工录入（manual）或 website_enrich 抓到公开邮箱自动生成
+    （job_title 为空，前端展示「待补全」）。seniority 由 job_title 关键词自动分层，
+    参与联系人质量维度评分。
+    """
+
+    __tablename__ = "lead_contacts"
+    __table_args__ = (
+        UniqueConstraint("lead_id", "email", name="uq_lead_contacts_lead_email"),
+        # email 为 NULL 的多条记录在 PG/SQLite 都不受唯一约束限制（NULL != NULL）
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    lead_id: Mapped[int] = mapped_column(
+        ForeignKey("leads.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    name: Mapped[str | None] = mapped_column(String(255))
+    job_title: Mapped[str | None] = mapped_column(String(128))
+    department: Mapped[str | None] = mapped_column(String(128))
+    email: Mapped[str | None] = mapped_column(String(255), index=True)
+    phone: Mapped[str | None] = mapped_column(String(64))
+    linkedin: Mapped[str | None] = mapped_column(String(512))
+    # tier1=CEO/Founder/GM 等决策层 tier2=Marketing/客服负责人 tier3=CTO/IT/PM unknown=未识别
+    seniority: Mapped[str | None] = mapped_column(String(8), index=True)
+    confidence: Mapped[int] = mapped_column(Integer, default=50)  # 0-100，手工录入默认 50
+    source: Mapped[str] = mapped_column(String(32), default="manual")  # manual / website_enrich
+
+    def __repr__(self) -> str:
+        return f"<LeadContact id={self.id} lead_id={self.lead_id} email={self.email!r}>"
+
+
+class LeadEvent(Base):
+    """线索动态事件（不可变追加；详情页时间线数据源之一）。
+
+    事件在三个变更点发射：upsert 新建/合并、website_enrich 富化、联系人 CRUD，
+    统一走 crud/lead_events.rescore_and_log / diff_lead_events。
+    """
+
+    __tablename__ = "lead_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    lead_id: Mapped[int] = mapped_column(
+        ForeignKey("leads.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    event_type: Mapped[str] = mapped_column(String(32), index=True, nullable=False)  # 见 EVENT_TYPES
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # 事件明细（old/new 等）
+    is_alert: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false(), index=True
+    )  # 高价值预警（等级升到 S/A、发现 WhatsApp、SaaS 信号）——预警中心数据源
+    note: Mapped[str | None] = mapped_column(Text)  # 时间线展示用一句话
+    # SET NULL：操作人账号删除后事件仍保留
+    created_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

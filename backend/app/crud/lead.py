@@ -19,8 +19,9 @@ from app.collectors.normalize import (
     normalize_company_name,
     normalize_phone,
 )
-from app.collectors.scoring import compute_score
-from app.models.lead import Lead
+from app.collectors.scoring import apply_score
+from app.crud.lead_events import rescore_and_log, snapshot_lead
+from app.models.lead import Lead, LeadEvent
 
 
 def _namecity_key(name: str | None, city: str | None) -> str | None:
@@ -29,6 +30,146 @@ def _namecity_key(name: str | None, city: str | None) -> str | None:
     if not norm:
         return None
     return "namecity:" + hashlib.md5(f"{norm}|{(city or '').strip().lower()}".encode()).hexdigest()
+
+
+def touch_field_meta(
+    lead: Lead,
+    field: str,
+    source: str,
+    *,
+    confidence: int = 90,
+    now: datetime | None = None,
+) -> None:
+    """字段级数据质量（PRD §32）：记录 {字段: {source, updated_at, confidence}}。
+
+    JSON 列必须整体重新赋值才触发变更追踪。
+    """
+    meta = dict(lead.field_meta or {})
+    meta[field] = {
+        "source": source,
+        "updated_at": (now or datetime.now(timezone.utc)).isoformat(),
+        "confidence": confidence,
+    }
+    lead.field_meta = meta
+
+
+# ---------- 分配（PRD §24：手动分配/转移/释放 + 自动分配） ----------
+
+
+async def assign_lead(
+    db: AsyncSession,
+    lead: Lead,
+    owner_id: int,
+    *,
+    assigned_by: int | None = None,
+) -> Lead:
+    """指派/转移跟进人（撞单锁定 §44：分配后其他销售只读）。"""
+    from app.crud.lead_events import add_event
+    from app.models.user import User
+
+    if await db.get(User, owner_id) is None:
+        raise ValueError(f"跟进人不存在：{owner_id}")
+    old = lead.owner_id
+    lead.owner_id = owner_id
+    # 共享池线索被认领后进入「待跟进」；已推进的状态不回退
+    if lead.follow_status in (None, "unassigned"):
+        lead.follow_status = "pending"
+    if old != owner_id:
+        add_event(
+            db,
+            lead,
+            "assigned",
+            payload={"old": old, "new": owner_id},
+            note=f"分配跟进人 #{owner_id}" + (f"（原 #{old}）" if old else ""),
+            created_by=assigned_by,
+        )
+    await db.flush()
+    return lead
+
+
+async def release_lead(db: AsyncSession, lead: Lead, *, released_by: int | None = None) -> Lead:
+    """释放回共享池（主管可释放/重新分配 §44）。"""
+    from app.crud.lead_events import add_event
+
+    old = lead.owner_id
+    lead.owner_id = None
+    lead.follow_status = "unassigned"
+    add_event(
+        db,
+        lead,
+        "assigned",
+        payload={"old": old, "new": None},
+        note=f"释放回共享池（原 #{old}）" if old else "释放回共享池",
+        created_by=released_by,
+    )
+    await db.flush()
+    return lead
+
+
+async def auto_assign_leads(
+    db: AsyncSession,
+    *,
+    candidate_owner_ids: list[int],
+    max_per_owner: int = 50,
+    grade: str | None = None,
+    min_score: int | None = None,
+    industry: str | None = None,
+    country: str | None = None,
+    limit: int = 100,
+) -> tuple[list[Lead], dict[int, int]]:
+    """自动分配（§24）：把共享池线索按当前负载轮转分给候选销售。
+
+    规则：只分未分配（NULL/unassigned）线索，按 score 降序；每个销售已有
+    在跟进量 + 本次分得量 ≤ max_per_owner；返回 (分配的线索, 每人分得计数)。
+    """
+    if not candidate_owner_ids:
+        return [], {}
+
+    from sqlalchemy import func
+
+    # 候选人当前负载
+    rows = (
+        await db.execute(
+            select(Lead.owner_id, func.count())
+            .where(Lead.owner_id.in_(candidate_owner_ids))
+            .group_by(Lead.owner_id)
+        )
+    ).all()
+    load = {r[0]: r[1] for r in rows}
+    capacity = {uid: max_per_owner - load.get(uid, 0) for uid in candidate_owner_ids}
+
+    conds: list = [
+        Lead.owner_id.is_(None),  # 未分配 = owner IS NULL
+        (Lead.follow_status.is_(None)) | (Lead.follow_status == "unassigned"),
+    ]
+    if grade:
+        conds.append(Lead.grade == grade.upper())
+    if min_score is not None:
+        conds.append(Lead.score >= min_score)
+    if industry:
+        conds.append(Lead.industry == industry)
+    if country:
+        conds.append(Lead.country == country.upper())
+
+    stmt = select(Lead).where(*conds).order_by(Lead.score.desc(), Lead.id.desc()).limit(limit)
+    pool = list((await db.execute(stmt)).scalars().all())
+
+    assigned: list[Lead] = []
+    counts: dict[int, int] = {uid: 0 for uid in candidate_owner_ids}
+    for lead in pool:
+        # 轮转：取剩余容量最大的候选（并列取 id 小的，稳定）
+        uid = min(
+            (u for u in candidate_owner_ids if capacity.get(u, 0) > 0),
+            key=lambda u: (-(capacity.get(u, 0)), u),
+            default=None,
+        )
+        if uid is None:
+            break
+        await assign_lead(db, lead, uid)
+        capacity[uid] -= 1
+        counts[uid] += 1
+        assigned.append(lead)
+    return assigned, counts
 
 
 async def upsert_lead(db: AsyncSession, draft: LeadDraft) -> tuple[Lead, bool]:
@@ -75,6 +216,16 @@ async def upsert_lead(db: AsyncSession, draft: LeadDraft) -> tuple[Lead, bool]:
             if existing is None:  # 冲突来自别的唯一列等意外——不吞
                 raise
         else:
+            # 新建事件在 savepoint 成功后追加，避免 IntegrityError 重试路径残留
+            db.add(
+                LeadEvent(
+                    lead_id=lead.id,
+                    event_type="manual_entry" if draft.source == "manual" else "source_added",
+                    payload={"source": draft.source},
+                    note=f"{'手工录入创建' if draft.source == 'manual' else '新来源采集'}：{draft.source}",
+                )
+            )
+            await db.flush()
             return lead, True
 
     await _merge_into(db, existing, draft, domain, phone_e164, namecity_key, now)
@@ -113,18 +264,7 @@ def _new_lead(
     phone_e164: str | None,
     now: datetime,
 ) -> Lead:
-    score, signals = compute_score(
-        whatsapp_hit=bool(draft.whatsapp_url),
-        whatsapp_job=draft.whatsapp_job,
-        website=draft.website,
-        email=draft.email,
-        country=draft.country,
-        phone_raw=draft.phone_raw,
-        phone_e164=phone_e164,
-        social=draft.social,
-        fb_whatsapp=draft.fb_whatsapp,
-    )
-    return Lead(
+    lead = Lead(
         name=draft.name.strip(),
         country=draft.country,
         city=draft.city,
@@ -142,12 +282,28 @@ def _new_lead(
         job_urls=list(draft.job_urls or []),
         is_cn=draft.is_cn,
         fb_whatsapp=draft.fb_whatsapp,
+        target_countries=list(draft.target_countries or []),
+        whatsapp_numbers=list(draft.whatsapp_numbers or []),
         sources=[{"source": draft.source, "first_seen": now.isoformat(), "last_seen": now.isoformat()}],
         dedupe_key=dedupe_key,
         namecity_key=namecity_key,
-        score=score,
-        score_signals=signals,
     )
+    # 字段级数据质量（§32）：新建时所有非空字段标记来源
+    for field, value in (
+        ("website", draft.website),
+        ("email", draft.email),
+        ("phone_e164", phone_e164),
+        ("whatsapp_url", draft.whatsapp_url),
+        ("social", draft.social),
+    ):
+        if value:
+            touch_field_meta(lead, field, draft.source, confidence=95, now=now)
+    if draft.target_countries:
+        touch_field_meta(lead, "target_countries", draft.source, confidence=90, now=now)
+    if draft.whatsapp_numbers:
+        touch_field_meta(lead, "whatsapp_numbers", draft.source, confidence=95, now=now)
+    apply_score(lead)  # 写 score / score_signals（六维） / grade
+    return lead
 
 
 async def _merge_into(
@@ -160,6 +316,7 @@ async def _merge_into(
     now: datetime,
 ) -> None:
     """合并语义：标量补空、布尔 OR、URL/social 并集、来源 (lead, source) 唯一、重算评分。"""
+    before = snapshot_lead(existing)
     for field, value in (
         ("country", draft.country),
         ("city", draft.city),
@@ -198,7 +355,32 @@ async def _merge_into(
         for k, v in draft.social.items():
             merged.setdefault(k, v)
         existing.social = merged
+        touch_field_meta(existing, "social", draft.source, confidence=95, now=now)
+    if draft.target_countries:
+        merged_countries = list(existing.target_countries or [])
+        for c in draft.target_countries:
+            if c not in merged_countries:
+                merged_countries.append(c)
+        existing.target_countries = merged_countries
+        touch_field_meta(existing, "target_countries", draft.source, confidence=90, now=now)
+    if draft.whatsapp_numbers:
+        merged_wa = list(existing.whatsapp_numbers or [])
+        for n in draft.whatsapp_numbers:
+            if n not in merged_wa:
+                merged_wa.append(n)
+        existing.whatsapp_numbers = merged_wa
+        touch_field_meta(existing, "whatsapp_numbers", draft.source, confidence=95, now=now)
+    # 补空成功的字段记数据质量来源（§32）
+    for field, value in (
+        ("website", draft.website),
+        ("email", draft.email),
+        ("phone_e164", phone_e164),
+        ("whatsapp_url", draft.whatsapp_url),
+    ):
+        if value and not (existing.field_meta or {}).get(field):
+            touch_field_meta(existing, field, draft.source, confidence=95, now=now)
     _touch_source(existing, draft.source, now)
+
 
     # 合并后键升级：优先 domain（新数据可能补上了官网），冲突则保留旧键
     upgraded = make_dedupe_key(
@@ -217,21 +399,8 @@ async def _merge_into(
         if conflict is None:
             existing.dedupe_key = upgraded
 
-    existing.score, existing.score_signals = _score_from_lead(existing)
-
-
-def _score_from_lead(lead: Lead) -> tuple[int, dict[str, int]]:
-    return compute_score(
-        whatsapp_hit=lead.whatsapp_hit,
-        whatsapp_job=lead.whatsapp_job,
-        website=lead.website,
-        email=lead.email,
-        country=lead.country,
-        phone_raw=lead.phone_raw,
-        phone_e164=lead.phone_e164,
-        social=lead.social,
-        fb_whatsapp=getattr(lead, "fb_whatsapp", False),
-    )
+    # 统一重评钩子：六维重算 + grade 写回 + 快照 diff 发射动态事件
+    await rescore_and_log(db, existing, before=before)
 
 
 def _touch_source(lead: Lead, source: str, now: datetime) -> None:
@@ -248,20 +417,17 @@ def _touch_source(lead: Lead, source: str, now: datetime) -> None:
 
 async def rescore_lead(db: AsyncSession, lead: Lead) -> Lead:
     """字段被 API 层改动后重算评分（手工编辑入口用）。"""
-    lead.score, lead.score_signals = _score_from_lead(lead)
-    await db.flush()
+    await rescore_and_log(db, lead)
     return lead
 
 
-async def search_leads(
-    db: AsyncSession,
+def _lead_conditions(
     *,
-    page: int = 1,
-    page_size: int = 20,
     country: str | None = None,
     industry: str | None = None,
     source: str | None = None,
     min_score: int | None = None,
+    grade: str | None = None,
     whatsapp_hit: bool | None = None,
     has_website: bool | None = None,
     keyword: str | None = None,
@@ -269,12 +435,10 @@ async def search_leads(
     owner_id: int | None = None,
     due_follow: bool | None = None,
     is_cn: bool | None = None,
-) -> tuple[list[Lead], int]:
-    """线索列表筛选：国家/行业/来源/评分下限/WhatsApp 检测/关键词/跟进维度。"""
+) -> list:
+    """线索筛选条件构造（列表与导出共用，保证两边口径一致）。"""
     from sqlalchemy import func, or_
 
-    stmt = select(Lead)
-    count_stmt = select(func.count()).select_from(Lead)
     conds = []
     if country:
         conds.append(Lead.country == country.upper())
@@ -282,10 +446,12 @@ async def search_leads(
         conds.append(Lead.industry == industry)
     if min_score is not None:
         conds.append(Lead.score >= min_score)
+    if grade:
+        conds.append(Lead.grade == grade.upper())
     if follow_status:
-        if follow_status == "pending":
-            # 「待跟进」= 显式置为 pending + 从未跟进（NULL）的共享池线索
-            conds.append((Lead.follow_status.is_(None)) | (Lead.follow_status == "pending"))
+        if follow_status == "unassigned":
+            # 「未分配」= 显式 unassigned + 从未跟进（NULL）的共享池线索
+            conds.append((Lead.follow_status.is_(None)) | (Lead.follow_status == "unassigned"))
         else:
             conds.append(Lead.follow_status == follow_status)
     if owner_id is not None:
@@ -322,6 +488,59 @@ async def search_leads(
                 Lead.city.ilike(like),
             )
         )
+    return conds
+
+
+async def search_leads(
+    db: AsyncSession,
+    *,
+    page: int = 1,
+    page_size: int = 20,
+    country: str | None = None,
+    industry: str | None = None,
+    source: str | None = None,
+    min_score: int | None = None,
+    grade: str | None = None,
+    whatsapp_hit: bool | None = None,
+    has_website: bool | None = None,
+    keyword: str | None = None,
+    follow_status: str | None = None,
+    owner_id: int | None = None,
+    due_follow: bool | None = None,
+    is_cn: bool | None = None,
+    # 数据权限（§43）：scope_owner_ids 非 None 时强制限定可见 owner 集合；
+    # scope_include_unassigned=共享池是否可见（个人/团队级默认可见以便认领）
+    scope_owner_ids: list[int] | None = None,
+    scope_include_unassigned: bool = True,
+) -> tuple[list[Lead], int]:
+    """线索列表筛选：国家/行业/来源/评分下限/等级/WhatsApp 检测/关键词/跟进维度。
+
+    数据权限由调用方（endpoint）从当前用户算出 scope 参数注入——crud 层只认参数，
+    保证列表/导出/统计无法绕过。
+    """
+    from sqlalchemy import func, or_
+
+    conds = _lead_conditions(
+        country=country,
+        industry=industry,
+        source=source,
+        min_score=min_score,
+        grade=grade,
+        whatsapp_hit=whatsapp_hit,
+        has_website=has_website,
+        keyword=keyword,
+        follow_status=follow_status,
+        owner_id=owner_id,
+        due_follow=due_follow,
+        is_cn=is_cn,
+    )
+    if scope_owner_ids is not None:
+        visible = Lead.owner_id.in_(scope_owner_ids)
+        if scope_include_unassigned:
+            visible = or_(Lead.owner_id.is_(None), visible)
+        conds.append(visible)
+    stmt = select(Lead)
+    count_stmt = select(func.count()).select_from(Lead)
     for cond in conds:
         stmt = stmt.where(cond)
         count_stmt = count_stmt.where(cond)

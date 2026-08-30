@@ -345,7 +345,10 @@ onUnmounted(() => {
 
 <template>
   <div class="page">
-    <n-card size="small" class="mb-4">
+    <n-card
+      size="small"
+      class="mb-4"
+    >
       <div class="flex flex-wrap items-center gap-3">
         <n-select
           v-model:value="query.collector"
@@ -354,10 +357,28 @@ onUnmounted(() => {
           clearable
           style="width: 200px"
         />
-        <n-select v-model:value="query.status" :options="statusOptions" placeholder="状态" clearable style="width: 120px" />
-        <n-button type="primary" secondary @click="() => { query.page = 1; fetchData() }">查询</n-button>
+        <n-select
+          v-model:value="query.status"
+          :options="statusOptions"
+          placeholder="状态"
+          clearable
+          style="width: 120px"
+        />
+        <n-button
+          type="primary"
+          secondary
+          @click="() => { query.page = 1; fetchData() }"
+        >
+          查询
+        </n-button>
         <div class="flex-1" />
-        <n-button v-if="userStore.isSuperuser" type="primary" @click="openCreate">新建任务</n-button>
+        <n-button
+          v-if="userStore.isSuperuser"
+          type="primary"
+          @click="openCreate"
+        >
+          新建任务
+        </n-button>
       </div>
     </n-card>
 
@@ -379,8 +400,16 @@ onUnmounted(() => {
       }"
     />
 
-    <n-modal v-model:show="dialogVisible" preset="card" title="新建采集任务" style="width: 560px">
-      <n-form label-placement="left" label-width="100">
+    <n-modal
+      v-model:show="dialogVisible"
+      preset="card"
+      title="新建采集任务"
+      style="width: 560px"
+    >
+      <n-form
+        label-placement="left"
+        label-width="100"
+      >
         <n-form-item label="采集器">
           <n-select
             v-model:value="form.collector"
@@ -388,10 +417,17 @@ onUnmounted(() => {
           />
         </n-form-item>
         <n-form-item label="任务名">
-          <n-input v-model:value="form.name" placeholder="留空用采集器名" />
+          <n-input
+            v-model:value="form.name"
+            placeholder="留空用采集器名"
+          />
         </n-form-item>
         <template v-if="currentCollector()">
-          <n-form-item v-for="p in currentCollector()!.params" :key="p.key" :label="p.label">
+          <n-form-item
+            v-for="p in currentCollector()!.params"
+            :key="p.key"
+            :label="p.label"
+          >
             <!-- 国家：可搜索下拉，也允许手输列表外的 ISO2 -->
             <n-select
               v-if="p.type === 'select'"
@@ -428,7 +464,10 @@ onUnmounted(() => {
               :placeholder="p.placeholder || '请选择（可多选）'"
             />
             <!-- 布尔开关 -->
-            <div v-else-if="p.type === 'switch'" class="flex items-center gap-2">
+            <div
+              v-else-if="p.type === 'switch'"
+              class="flex items-center gap-2"
+            >
               <n-switch v-model:value="(paramForm as any)[p.key]" />
               <span class="text-xs text-gray-400">{{ p.placeholder }}</span>
             </div>
@@ -442,17 +481,31 @@ onUnmounted(() => {
               class="w-full"
             />
             <!-- 默认文本 -->
-            <n-input v-else v-model:value="(paramForm as any)[p.key]" :placeholder="p.placeholder || (p.required ? '必填' : '选填')" />
+            <n-input
+              v-else
+              v-model:value="(paramForm as any)[p.key]"
+              :placeholder="p.placeholder || (p.required ? '必填' : '选填')"
+            />
           </n-form-item>
         </template>
         <n-form-item label="定时 cron">
-          <n-input v-model:value="form.cron_expr" placeholder="留空=手动执行；如 0 9 * * *" />
+          <n-input
+            v-model:value="form.cron_expr"
+            placeholder="留空=手动执行；如 0 9 * * *"
+          />
         </n-form-item>
       </n-form>
       <template #footer>
         <div class="flex justify-end gap-3">
-          <n-button @click="dialogVisible = false">取消</n-button>
-          <n-button type="primary" @click="handleCreate">创建</n-button>
+          <n-button @click="dialogVisible = false">
+            取消
+          </n-button>
+          <n-button
+            type="primary"
+            @click="handleCreate"
+          >
+            创建
+          </n-button>
         </div>
       </template>
     </n-modal>

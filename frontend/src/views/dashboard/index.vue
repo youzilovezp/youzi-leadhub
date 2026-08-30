@@ -79,11 +79,15 @@ onMounted(async () => {
   <div class="space-y-4">
     <!-- 统计卡 -->
     <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-      <div v-for="stat in [
-        { label: '用户总数', value: totalUsers, icon: PeopleOutline },
-        { label: '启用用户', value: activeUsers, icon: CheckmarkCircleOutline },
-        { label: '角色数', value: roleCount, icon: PersonCircleOutline },
-      ]" :key="stat.label" class="flex items-center gap-4 rounded-card border border-border bg-bg-card p-5">
+      <div
+        v-for="stat in [
+          { label: '用户总数', value: totalUsers, icon: PeopleOutline },
+          { label: '启用用户', value: activeUsers, icon: CheckmarkCircleOutline },
+          { label: '角色数', value: roleCount, icon: PersonCircleOutline },
+        ]"
+        :key="stat.label"
+        class="flex items-center gap-4 rounded-card border border-border bg-bg-card p-5"
+      >
         <span
           class="inline-flex h-12 w-12 shrink-0 items-center justify-center rounded-full"
           :style="{
@@ -91,18 +95,29 @@ onMounted(async () => {
             color: 'var(--yz-primary)',
           }"
         >
-          <n-icon :size="22" :component="stat.icon" />
+          <n-icon
+            :size="22"
+            :component="stat.icon"
+          />
         </span>
         <div>
-          <div class="text-text-secondary text-sm">{{ stat.label }}</div>
-          <div class="text-text text-2xl font-semibold">{{ stat.value }}</div>
+          <div class="text-text-secondary text-sm">
+            {{ stat.label }}
+          </div>
+          <div class="text-text text-2xl font-semibold">
+            {{ stat.value }}
+          </div>
         </div>
       </div>
 
       <!-- 欢迎卡 -->
       <div class="rounded-card border border-border bg-bg-card p-5">
         <div class="flex items-center gap-2">
-          <n-icon :size="18" :style="{ color: 'var(--yz-primary)' }" :component="SunnyOutline" />
+          <n-icon
+            :size="18"
+            :style="{ color: 'var(--yz-primary)' }"
+            :component="SunnyOutline"
+          />
           <span class="text-text-secondary text-sm">{{ today }}</span>
         </div>
         <div class="text-text mt-2 truncate text-lg font-semibold">
@@ -114,13 +129,24 @@ onMounted(async () => {
     <!-- 图表 -->
     <div class="grid grid-cols-1 gap-4 lg:grid-cols-2">
       <div class="rounded-card border border-border bg-bg-card p-5">
-        <div class="text-text mb-2 font-semibold">近 7 日登录趋势</div>
+        <div class="text-text mb-2 font-semibold">
+          近 7 日登录趋势
+        </div>
         <LoginTrendChart />
       </div>
       <div class="rounded-card border border-border bg-bg-card p-5">
-        <div class="text-text mb-2 font-semibold">角色分布</div>
-        <n-empty v-if="roleDistFailed" description="角色分布加载失败" size="large" />
-        <RolePieChart v-else :data="roleDist" />
+        <div class="text-text mb-2 font-semibold">
+          角色分布
+        </div>
+        <n-empty
+          v-if="roleDistFailed"
+          description="角色分布加载失败"
+          size="large"
+        />
+        <RolePieChart
+          v-else
+          :data="roleDist"
+        />
       </div>
     </div>
 
@@ -141,14 +167,20 @@ onMounted(async () => {
               color: 'var(--yz-primary)',
             }"
           >
-            <n-icon :size="18" :component="item.icon" />
+            <n-icon
+              :size="18"
+              :component="item.icon"
+            />
           </span>
           <span>
             <span class="text-text block font-medium">{{ item.title }}</span>
             <span class="text-text-secondary block text-xs">{{ item.desc }}</span>
           </span>
         </span>
-        <n-icon class="text-text-secondary" :component="ArrowForwardOutline" />
+        <n-icon
+          class="text-text-secondary"
+          :component="ArrowForwardOutline"
+        />
       </button>
     </div>
   </div>

@@ -22,7 +22,15 @@ export interface Lead {
   job_urls: string[]
   enriched_at: string | null
   score: number
+  /** 六维分 {维度键: 维度分}（overseas/whatsapp/saas/scale/marketing/contact） */
   score_signals: Record<string, number>
+  grade: Grade
+  /** WhatsApp 场景（website_enrich 关键词检测） */
+  scenes: SceneKey[]
+  /** SaaS 需求信号 {键: 命中关键词数} */
+  saas_signals: Record<string, number>
+  /** 页面出现的全部 WhatsApp 号码（多分线 = 规模化证据，§4.1） */
+  whatsapp_numbers: string[]
   sources: Array<{ source: string; first_seen: string; last_seen: string }>
   owner_id: number | null
   owner_name: string | null
@@ -31,31 +39,115 @@ export interface Lead {
   next_follow_at: string | null
   is_cn: boolean
   fb_whatsapp: boolean
+  /** 投放/目标国家（meta_ads 累计，§8） */
+  target_countries: string[]
+  export_type: string | null
+  /** 字段级数据质量 {字段: {source, updated_at, confidence}}（§32） */
+  field_meta: Record<string, { source: string; updated_at: string; confidence: number }>
+  contacts_count: number
+  recommended_products: string[]
   created_at: string
   updated_at: string
 }
 
-/** 跟进状态（后端 FOLLOW_STATUS_OPTIONS 同词表） */
-export type FollowStatus =
-  | 'pending'
-  | 'following'
-  | 'interested'
-  | 'not_interested'
-  | 'unreachable'
-  | 'converted'
+/** 等级（六维总分：80+=S 60-79=A 40-59=B <40=C） */
+export type Grade = 'S' | 'A' | 'B' | 'C'
 
-export const FOLLOW_STATUS_OPTIONS: Array<{ value: FollowStatus; label: string }> = [
-  { value: 'pending', label: '待跟进' },
-  { value: 'following', label: '跟进中' },
-  { value: 'interested', label: '有意向' },
-  { value: 'not_interested', label: '无意向' },
-  { value: 'unreachable', label: '联系不上' },
-  { value: 'converted', label: '已成交' },
+export const GRADE_OPTIONS: Array<{ value: Grade; label: string }> = [
+  { value: 'S', label: 'S 级（立即跟进）' },
+  { value: 'A', label: 'A 级（高潜力）' },
+  { value: 'B', label: 'B 级（培育池）' },
+  { value: 'C', label: 'C 级（暂不优先）' },
 ]
 
-/** 状态 → 中文（null/未知值兜底「待跟进」） */
+/** 等级 → NTag type（S 红=A 级热度最高，C 灰） */
+export function gradeTagType(g: string): 'error' | 'warning' | 'info' | 'default' {
+  if (g === 'S') return 'error'
+  if (g === 'A') return 'warning'
+  if (g === 'B') return 'info'
+  return 'default'
+}
+
+/** WhatsApp 场景键（后端 collectors/scenes.py 词表一致） */
+export type SceneKey = 'customer_service' | 'marketing' | 'transactional' | 'saas'
+
+export const SCENE_LABELS: Record<string, string> = {
+  customer_service: '客服',
+  marketing: '营销',
+  transactional: '交易通知',
+  saas: 'SaaS',
+}
+
+/** SaaS 需求信号键 → 中文（后端 SAAS_LABELS_ZH 一致） */
+export const SAAS_LABELS: Record<string, string> = {
+  crm: 'CRM',
+  helpdesk: '工单/客服系统',
+  chatbot: '聊天机器人',
+  ai_service: 'AI 客服',
+  marketing_automation: '营销自动化',
+  omnichannel: '全渠道',
+}
+
+/** 六维键 → 中文（后端 DIM_LABELS_ZH 一致） */
+export const DIM_LABELS: Array<{ key: string; label: string; weight: number }> = [
+  { key: 'overseas', label: '出海指数', weight: 25 },
+  { key: 'whatsapp', label: 'WhatsApp 指数', weight: 30 },
+  { key: 'saas', label: 'SaaS 需求', weight: 20 },
+  { key: 'scale', label: '企业规模', weight: 10 },
+  { key: 'marketing', label: '营销活跃', weight: 10 },
+  { key: 'contact', label: '联系人质量', weight: 5 },
+]
+
+/** 跟进状态（后端 FOLLOW_STATUS_OPTIONS 同词表；PRD §23 十态） */
+export type FollowStatus =
+  | 'unassigned'
+  | 'pending'
+  | 'contacted'
+  | 'replied'
+  | 'opportunity'
+  | 'quote'
+  | 'negotiation'
+  | 'won'
+  | 'invalid'
+  | 'paused'
+
+export const FOLLOW_STATUS_OPTIONS: Array<{ value: FollowStatus; label: string }> = [
+  { value: 'unassigned', label: '未分配' },
+  { value: 'pending', label: '待跟进' },
+  { value: 'contacted', label: '已联系' },
+  { value: 'replied', label: '已回复' },
+  { value: 'opportunity', label: '有效商机' },
+  { value: 'quote', label: '报价' },
+  { value: 'negotiation', label: '谈判' },
+  { value: 'won', label: '成交' },
+  { value: 'invalid', label: '无效' },
+  { value: 'paused', label: '暂不考虑' },
+]
+
+/** 漏斗阶段顺序（统计/漏斗图口径） */
+export const FUNNEL_STAGES: FollowStatus[] = [
+  'unassigned',
+  'pending',
+  'contacted',
+  'replied',
+  'opportunity',
+  'quote',
+  'negotiation',
+  'won',
+]
+
+/** 状态 → 中文（null=未分配） */
 export function followStatusLabel(v: string | null): string {
-  return FOLLOW_STATUS_OPTIONS.find((s) => s.value === v)?.label ?? '待跟进'
+  return FOLLOW_STATUS_OPTIONS.find((s) => s.value === v)?.label ?? '未分配'
+}
+
+/** 状态 → NTag 配色（沿漏斗推进加深） */
+export function followStatusTagType(v: string | null): 'default' | 'info' | 'warning' | 'success' | 'error' {
+  if (v === 'won') return 'success'
+  if (v === 'opportunity' || v === 'quote' || v === 'negotiation') return 'warning'
+  if (v === 'pending' || v === 'contacted' || v === 'replied') return 'info'
+  if (v === 'invalid') return 'error'
+  return 'default' // unassigned / paused / null
 }
 
 /** 跟进历史记录（弹窗时间线） */
@@ -98,6 +190,7 @@ export interface LeadQuery {
   industry?: string
   source?: string
   min_score?: number
+  grade?: Grade
   whatsapp_hit?: boolean
   has_website?: boolean
   keyword?: string
@@ -118,6 +211,102 @@ export interface LeadCreatePayload {
   phone?: string
   website?: string
   email?: string
+}
+
+// ---------- 联系人 / 事件 / 详情 ----------
+
+export type Seniority = 'tier1' | 'tier2' | 'tier3' | 'unknown'
+
+export const SENIORITY_LABELS: Record<string, string> = {
+  tier1: '决策层',
+  tier2: '市场/客服负责人',
+  tier3: '技术/产品',
+  unknown: '未识别',
+}
+
+export interface Contact {
+  id: number
+  lead_id: number
+  name: string | null
+  job_title: string | null
+  department: string | null
+  email: string | null
+  phone: string | null
+  linkedin: string | null
+  seniority: Seniority | null
+  confidence: number
+  source: 'manual' | 'website_enrich' | string
+  created_at: string
+  updated_at: string
+}
+
+export interface ContactPayload {
+  name?: string
+  job_title?: string
+  department?: string
+  email?: string
+  phone?: string
+  linkedin?: string
+  confidence?: number
+}
+
+/** 动态事件（详情页时间线，与跟进历史合并展示） */
+export interface LeadEvent {
+  id: number
+  lead_id: number
+  event_type: string
+  payload: Record<string, unknown>
+  note: string | null
+  created_by: number | null
+  created_at: string
+}
+
+export const EVENT_TYPE_LABELS: Record<string, string> = {
+  source_added: '新来源',
+  manual_entry: '手工录入',
+  whatsapp_found: '发现 WhatsApp',
+  whatsapp_job_found: '在招 WhatsApp 岗位',
+  email_found: '发现邮箱',
+  social_found: '新增社媒',
+  scene_change: '场景变化',
+  saas_signal_change: 'SaaS 需求信号',
+  score_change: '评分变化',
+  grade_change: '等级变化',
+  contact_added: '新增联系人',
+  assigned: '分配变动',
+  opportunity_created: '新增商机',
+  opportunity_stage: '商机推进',
+}
+
+export interface Recommendation {
+  key: string
+  name: string
+  reason: string
+  priority: number
+}
+
+/** 企业画像详情（GET /collect/leads/{id}） */
+export interface LeadDetail extends Lead {
+  dimensions: Record<string, number>
+  dimension_weights: Record<string, number>
+  contacts: Contact[]
+  events: LeadEvent[]
+  follow_ups: FollowUpRecord[]
+  recommendations: Recommendation[]
+  sales_suggestion: string
+  /** 需求类型 A-E（§4.4）：[{type, label, selling}] */
+  need_types: Array<{ type: string; label: string; selling: string }>
+  opportunities: Array<{
+    id: number
+    name: string
+    amount: number
+    stage: string
+    expected_close_at: string | null
+    won_at: string | null
+    owner_name: string | null
+    note: string | null
+    created_at: string
+  }>
 }
 
 export interface CollectTask {
@@ -218,6 +407,88 @@ export function checkWhatsApp(leadIds: number[]) {
   return request.post<CollectTask, CollectTask>('/collect/leads/check-whatsapp', { lead_ids: leadIds })
 }
 
+/** 企业画像详情（六维分/联系人/事件/跟进/推荐/销售建议） */
+export function getLeadDetail(id: number) {
+  return request.get<LeadDetail, LeadDetail>(`/collect/leads/${id}`)
+}
+
+/** 动态事件分页（时间线「加载更多」） */
+export function getLeadEvents(id: number, page = 1, pageSize = 20) {
+  return request.get<
+    { items: LeadEvent[]; total: number; page: number; page_size: number },
+    { items: LeadEvent[]; total: number; page: number; page_size: number }
+  >(`/collect/leads/${id}/events`, { params: { page, page_size: pageSize } })
+}
+
+// ---------- 联系人 ----------
+
+export function listContacts(leadId: number) {
+  return request.get<Contact[], Contact[]>(`/collect/leads/${leadId}/contacts`)
+}
+
+export function createContact(leadId: number, payload: ContactPayload) {
+  return request.post<Contact, Contact>(`/collect/leads/${leadId}/contacts`, payload)
+}
+
+export function updateContact(leadId: number, contactId: number, payload: ContactPayload) {
+  return request.put<Contact, Contact>(`/collect/leads/${leadId}/contacts/${contactId}`, payload)
+}
+
+export function deleteContact(leadId: number, contactId: number) {
+  return request.delete<unknown, unknown>(`/collect/leads/${leadId}/contacts/${contactId}`)
+}
+
+// ---------- 导出 ----------
+
+/** 导出字段目录（key, 表头）——与后端 EXPORT_FIELDS 口径一致 */
+export const EXPORT_FIELDS: Array<{ key: string; label: string }> = [
+  { key: 'id', label: 'ID' },
+  { key: 'name', label: '企业名称' },
+  { key: 'country', label: '国家' },
+  { key: 'city', label: '城市' },
+  { key: 'industry', label: '行业' },
+  { key: 'website', label: '官网' },
+  { key: 'domain', label: '域名' },
+  { key: 'phone_e164', label: '电话(E.164)' },
+  { key: 'phone_raw', label: '电话(原始)' },
+  { key: 'email', label: '邮箱' },
+  { key: 'grade', label: '等级' },
+  { key: 'score', label: 'Lead Score' },
+  { key: 'dim_overseas', label: '出海指数' },
+  { key: 'dim_whatsapp', label: 'WhatsApp指数' },
+  { key: 'dim_saas', label: 'SaaS需求' },
+  { key: 'dim_scale', label: '企业规模' },
+  { key: 'dim_marketing', label: '营销活跃' },
+  { key: 'dim_contact', label: '联系人质量' },
+  { key: 'whatsapp_hit', label: 'WhatsApp' },
+  { key: 'whatsapp_url', label: 'WhatsApp链接' },
+  { key: 'whatsapp_numbers', label: 'WhatsApp号码' },
+  { key: 'whatsapp_job', label: '在招WA岗位' },
+  { key: 'scenes', label: 'WhatsApp场景' },
+  { key: 'saas_signals', label: 'SaaS需求信号' },
+  { key: 'is_cn', label: '中国出海' },
+  { key: 'fb_whatsapp', label: 'FB私域' },
+  { key: 'job_urls', label: '在招岗位链接' },
+  { key: 'sources', label: '来源' },
+  { key: 'contacts_count', label: '联系人数' },
+  { key: 'contacts_summary', label: '联系人明细' },
+  { key: 'social', label: '社媒' },
+  { key: 'recommended_products', label: '推荐产品' },
+  { key: 'need_types', label: '需求类型' },
+  { key: 'follow_status', label: '跟进状态' },
+  { key: 'owner_name', label: '跟进人' },
+  { key: 'created_at', label: '创建时间' },
+]
+
+/** 导出线索 CSV（blob 下载；fields 逗号分隔，缺省全部） */
+export function exportLeads(query: LeadQuery, fields?: string[]) {
+  return request.get<Blob, Blob>('/collect/leads/export', {
+    params: { ...query, page: undefined, page_size: undefined, fields: fields?.join(',') },
+    responseType: 'blob',
+    timeout: 60000,
+  })
+}
+
 // ---------- 跟进 ----------
 
 /** 跟进弹窗选项（状态词表 + 可选跟进人） */
@@ -290,27 +561,23 @@ export function getTaskLogs(id: number, afterId = 0, pageSize = 200) {
   })
 }
 
+export interface CollectStats {
+  total_leads: number
+  whatsapp_leads: number
+  high_intent_leads: number
+  /** S/A/B/C 等级分布（销售优先级口径） */
+  grade_counts: Record<Grade, number>
+  active_tasks: number
+  pending_leads: number
+  due_follow_leads: number
+  cn_leads: number
+  fb_wa_leads: number
+  /** 月度口径（§39） */
+  month_new_leads: number
+  month_won_count: number
+  month_won_amount: number
+}
+
 export function getStats() {
-  return request.get<
-    {
-      total_leads: number
-      whatsapp_leads: number
-      high_intent_leads: number
-      active_tasks: number
-      pending_leads: number
-      due_follow_leads: number
-      cn_leads: number
-      fb_wa_leads: number
-    },
-    {
-      total_leads: number
-      whatsapp_leads: number
-      high_intent_leads: number
-      active_tasks: number
-      pending_leads: number
-      due_follow_leads: number
-      cn_leads: number
-      fb_wa_leads: number
-    }
-  >('/collect/stats')
+  return request.get<CollectStats, CollectStats>('/collect/stats')
 }

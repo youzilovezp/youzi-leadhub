@@ -3,18 +3,21 @@ import { computed, h, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { NButton, NTag, type DataTableColumns, type FormInst, type FormRules } from 'naive-ui'
 import * as collectApi from '@/api/collect'
-import { FOLLOW_STATUS_OPTIONS, followStatusLabel } from '@/api/collect'
+import { FOLLOW_STATUS_OPTIONS, EXPORT_FIELDS, followStatusLabel, followStatusTagType, gradeTagType } from '@/api/collect'
 import type {
   FollowOptions,
   FollowStatus,
   FollowUpRecord,
   GeoOptions,
+  Grade,
   IndustryOption,
   Lead,
 } from '@/api/collect'
 import { useUserStore } from '@/stores/user'
 import { formatTime } from '@/utils/format'
 import { message, confirm } from '@/utils/feedback'
+import { downloadFile } from '@/utils/download'
+import { autoAssignLeads, searchNl } from '@/api/sales'
 
 const router = useRouter()
 const userStore = useUserStore()
@@ -55,6 +58,7 @@ const query = reactive({
   industry: null as string | null,
   source: null as string | null,
   min_score: null as number | null,
+  grade: null as Grade | null,
   // naive-ui select 的 boolean 值类型不兼容，用字符串承载
   whatsapp: null as 'hit' | 'miss' | null,
   follow_status: null as FollowStatus | null,
@@ -106,6 +110,7 @@ const stats = ref({
   total_leads: 0,
   whatsapp_leads: 0,
   high_intent_leads: 0,
+  grade_counts: { S: 0, A: 0, B: 0, C: 0 } as Record<Grade, number>,
   active_tasks: 0,
   pending_leads: 0,
   due_follow_leads: 0,
@@ -124,6 +129,7 @@ async function fetchData() {
       industry: query.industry || undefined,
       source: query.source || undefined,
       min_score: query.min_score ?? undefined,
+      grade: query.grade || undefined,
       whatsapp_hit: whatsappFilter(),
       follow_status: query.follow_status || undefined,
       owner_id: query.owner_id ?? undefined,
@@ -194,16 +200,53 @@ async function handleCheckWhatsApp() {
   router.push(`/collect/task/${task.id}`)
 }
 
-// ---------- 跟进 ----------
-const FOLLOW_TAG_TYPES: Record<string, 'default' | 'info' | 'success' | 'error' | 'warning'> = {
-  pending: 'default',
-  following: 'info',
-  interested: 'success',
-  not_interested: 'error',
-  unreachable: 'warning',
-  converted: 'success',
+// ---------- CSV 导出 ----------
+const exportVisible = ref(false)
+const exportSubmitting = ref(false)
+/** 字段选择（默认全选），提交时逗号拼接传 fields */
+const exportFields = ref<string[]>(EXPORT_FIELDS.map((f) => f.key))
+
+function openExport() {
+  exportFields.value = EXPORT_FIELDS.map((f) => f.key)
+  exportVisible.value = true
 }
 
+async function handleExport() {
+  if (!exportFields.value.length) {
+    message.warning('请至少选择一个导出字段')
+    return
+  }
+  exportSubmitting.value = true
+  try {
+    const d = new Date()
+    const pad = (n: number) => String(n).padStart(2, '0')
+    const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}`
+    await downloadFile(
+      '/collect/leads/export',
+      {
+        keyword: query.keyword || undefined,
+        country: query.country || undefined,
+        industry: query.industry || undefined,
+        source: query.source || undefined,
+        min_score: query.min_score ?? undefined,
+        grade: query.grade || undefined,
+        whatsapp_hit: whatsappFilter(),
+        follow_status: query.follow_status || undefined,
+        owner_id: query.owner_id ?? undefined,
+        due_follow: query.due_follow || undefined,
+        is_cn: query.is_cn || undefined,
+        fields: exportFields.value.join(','),
+      },
+      `leads_${stamp}.csv`,
+    )
+    message.success('导出完成')
+    exportVisible.value = false
+  } finally {
+    exportSubmitting.value = false
+  }
+}
+
+// ---------- 跟进 ----------
 /** 该回访了：约定了下次跟进时间且已到期 */
 function isDue(row: Lead): boolean {
   return !!row.next_follow_at && new Date(row.next_follow_at).getTime() <= Date.now()
@@ -214,7 +257,7 @@ const followSubmitting = ref(false)
 const followHistory = ref<FollowUpRecord[]>([])
 const followTarget = ref<Lead | null>(null)
 const followForm = reactive({
-  status: 'following' as FollowStatus,
+  status: 'contacted' as FollowStatus,
   owner_id: null as number | null,
   note: '',
   /** n-date-picker 的值是时间戳（毫秒），提交时转 ISO */
@@ -223,7 +266,7 @@ const followForm = reactive({
 
 async function openFollowUp(row: Lead) {
   followTarget.value = row
-  followForm.status = row.follow_status ?? 'following'
+  followForm.status = row.follow_status ?? 'contacted'
   followForm.owner_id = row.owner_id ?? userStore.userInfo?.id ?? null
   followForm.note = ''
   followForm.next_follow = null
@@ -239,7 +282,7 @@ async function openFollowUp(row: Lead) {
 
 /** 时间线节点配色与状态词表一致 */
 function timelineType(s: string): 'default' | 'info' | 'success' | 'error' | 'warning' {
-  return FOLLOW_TAG_TYPES[s] ?? 'default'
+  return followStatusTagType(s)
 }
 
 async function handleFollowSubmit() {
@@ -260,12 +303,100 @@ async function handleFollowSubmit() {
   }
 }
 
-// ---------- 表格 ----------
-function scoreTagType(score: number): 'success' | 'warning' | 'info' {
-  if (score >= 70) return 'success'
-  if (score >= 40) return 'warning'
-  return 'info'
+// ---------- 自然语言搜索（PRD §27，需后端配置 LLM） ----------
+const nlText = ref('')
+const nlLoading = ref(false)
+/** NL 命中的条件（回填筛选后展示，便于确认/撤销） */
+const nlApplied = ref<Array<{ label: string; value: string }>>([])
+
+const NL_LABELS: Record<string, string> = {
+  keyword: '关键词',
+  country: '国家',
+  industry: '行业',
+  grade: '等级',
+  min_score: '最低分',
+  whatsapp_hit: 'WhatsApp',
+  is_cn: '中国出海',
+  follow_status: '跟进状态',
 }
+
+async function handleNlSearch() {
+  const text = nlText.value.trim()
+  if (!text) {
+    message.warning('请输入自然语言描述，如：深圳 跨境电商 美国市场 使用WhatsApp')
+    return
+  }
+  nlLoading.value = true
+  try {
+    const { params } = await searchNl(text)
+    const entries = Object.entries(params).filter(([, v]) => v !== undefined && v !== null && v !== '')
+    if (!entries.length) {
+      message.warning('未识别出有效筛选条件，请换种说法')
+      return
+    }
+    // 回填筛选器（覆盖同名项）
+    for (const [k, v] of entries) {
+      if (k === 'keyword') query.keyword = String(v)
+      else if (k === 'country') query.country = String(v)
+      else if (k === 'industry') query.industry = String(v)
+      else if (k === 'grade') query.grade = v as Grade
+      else if (k === 'min_score') query.min_score = Number(v)
+      else if (k === 'whatsapp_hit') query.whatsapp = v ? 'hit' : null
+      else if (k === 'is_cn') query.is_cn = Boolean(v)
+      else if (k === 'follow_status') query.follow_status = v as FollowStatus
+    }
+    nlApplied.value = entries.map(([k, v]) => ({ label: NL_LABELS[k] ?? k, value: String(v) }))
+    query.page = 1
+    fetchData()
+    message.success(`已识别 ${entries.length} 个条件并应用`)
+  } finally {
+    nlLoading.value = false
+  }
+}
+
+// ---------- 自动分配（PRD §24，主管操作） ----------
+const autoAssignShow = ref(false)
+const autoAssignSubmitting = ref(false)
+const autoAssignForm = reactive({
+  owner_ids: [] as number[],
+  max_per_owner: 50,
+  grade: null as Grade | null,
+  min_score: null as number | null,
+  limit: 100,
+})
+
+function openAutoAssign() {
+  autoAssignForm.owner_ids = []
+  autoAssignForm.grade = null
+  autoAssignForm.min_score = null
+  autoAssignShow.value = true
+}
+
+async function handleAutoAssign() {
+  if (!autoAssignForm.owner_ids.length) {
+    message.warning('请选择候选销售')
+    return
+  }
+  autoAssignSubmitting.value = true
+  try {
+    const result = await autoAssignLeads({
+      owner_ids: autoAssignForm.owner_ids,
+      max_per_owner: autoAssignForm.max_per_owner,
+      grade: autoAssignForm.grade || undefined,
+      min_score: autoAssignForm.min_score ?? undefined,
+      limit: autoAssignForm.limit,
+    })
+    const detail = result.per_owner.filter((x) => x.count > 0).map((x) => `${x.owner_name ?? x.owner_id}:${x.count}`).join('、')
+    message.success(`已分配 ${result.assigned_count} 条线索（${detail || '共享池已空'}）`)
+    autoAssignShow.value = false
+    fetchData()
+    fetchStats()
+  } finally {
+    autoAssignSubmitting.value = false
+  }
+}
+
+// ---------- 表格 ----------
 
 const columns: DataTableColumns<Lead> = [
   { type: 'selection' },
@@ -314,11 +445,41 @@ const columns: DataTableColumns<Lead> = [
         : h('span', { style: `color:${PLACEHOLDER_GRAY}` }, '—'),
   },
   {
-    title: '评分',
-    key: 'score',
-    width: 90,
+    title: '等级',
+    key: 'grade',
+    width: 96,
     sorter: 'default',
-    render: (row) => h(NTag, { type: scoreTagType(row.score), size: 'small' }, { default: () => String(row.score) }),
+    render: (row) =>
+      h(
+        NTag,
+        { type: gradeTagType(row.grade), size: 'small' },
+        { default: () => `${row.grade} · ${row.score}` }
+      ),
+  },
+  {
+    title: '联系人',
+    key: 'contacts_count',
+    width: 80,
+    render: (row) =>
+      row.contacts_count
+        ? h('span', { style: 'font-weight:500' }, String(row.contacts_count))
+        : h('span', { style: `color:${PLACEHOLDER_GRAY}` }, '—'),
+  },
+  {
+    title: '推荐产品',
+    key: 'recommended_products',
+    width: 150,
+    render: (row) => {
+      if (!row.recommended_products.length)
+        return h('span', { style: `color:${PLACEHOLDER_GRAY}` }, '—')
+      return h(
+        'div',
+        { style: 'display:flex;flex-direction:column;gap:2px;align-items:flex-start' },
+        row.recommended_products.slice(0, 2).map((p) =>
+          h(NTag, { size: 'small', bordered: false, type: 'info' }, { default: () => p })
+        )
+      )
+    },
   },
   {
     title: '联系方式',
@@ -397,7 +558,7 @@ const columns: DataTableColumns<Lead> = [
           {
             size: 'small',
             bordered: false,
-            type: row.follow_status ? FOLLOW_TAG_TYPES[row.follow_status] || 'default' : 'default',
+            type: followStatusTagType(row.follow_status),
           },
           { default: () => followStatusLabel(row.follow_status) }
         ),
@@ -416,10 +577,15 @@ const columns: DataTableColumns<Lead> = [
   {
     title: '操作',
     key: 'actions',
-    width: 140,
+    width: 180,
     fixed: 'right', // 列多时固定右侧，横向滚动也不丢操作按钮
     render(row) {
       const buttons = [
+        h(
+          NButton,
+          { size: 'small', quaternary: true, type: 'primary', onClick: () => router.push(`/collect/lead/${row.id}`) },
+          { default: () => '详情' }
+        ),
         h(
           NButton,
           { size: 'small', quaternary: true, type: 'primary', onClick: () => openFollowUp(row) },
@@ -460,6 +626,7 @@ function resetQuery() {
     industry: null,
     source: null,
     min_score: null,
+    grade: null,
     whatsapp: null,
     follow_status: null,
     owner_id: null,
@@ -499,7 +666,9 @@ onUnmounted(() => {
           <n-divider vertical />
           <span>检测到 WhatsApp <b class="stat-wa">{{ stats.whatsapp_leads }}</b></span>
           <n-divider vertical />
-          <span>高意向（≥40 分） <b>{{ stats.high_intent_leads }}</b></span>
+          <span>S 级 <b class="stat-due">{{ stats.grade_counts?.S ?? 0 }}</b></span>
+          <n-divider vertical />
+          <span>A 级 <b class="stat-pending">{{ stats.grade_counts?.A ?? 0 }}</b></span>
           <n-divider vertical />
           <span>待跟进 <b class="stat-pending">{{ stats.pending_leads }}</b></span>
           <n-divider vertical />
@@ -511,9 +680,65 @@ onUnmounted(() => {
     </div>
 
     <!-- 筛选 -->
-    <n-card size="small" class="mb-4">
+    <n-card
+      size="small"
+      class="mb-4"
+    >
       <div class="flex flex-wrap items-center gap-3">
-        <n-input v-model:value="query.keyword" placeholder="关键词：名称/邮箱/域名/电话/城市" clearable style="width: 230px" @keyup.enter="() => { query.page = 1; fetchData() }" />
+        <span class="nl-label">🤖 AI 搜索</span>
+        <n-input
+          v-model:value="nlText"
+          placeholder="自然语言描述，如：深圳 跨境电商 美国市场 使用WhatsApp"
+          clearable
+          style="width: 440px"
+          @keyup.enter="handleNlSearch"
+        />
+        <n-button
+          type="primary"
+          secondary
+          :loading="nlLoading"
+          @click="handleNlSearch"
+        >
+          识别并筛选
+        </n-button>
+        <template v-if="nlApplied.length">
+          <n-tag
+            v-for="item in nlApplied"
+            :key="item.label + item.value"
+            size="small"
+            type="info"
+            closable
+            @close="nlApplied = []"
+          >
+            {{ item.label }}:{{ item.value }}
+          </n-tag>
+          <n-button
+            quaternary
+            size="tiny"
+            @click="() => { nlApplied = []; resetQuery() }"
+          >
+            清除
+          </n-button>
+        </template>
+        <span
+          v-else
+          class="nl-hint"
+        >需后端配置 LLM（LLM_BASE_URL / LLM_API_KEY）</span>
+      </div>
+    </n-card>
+
+    <n-card
+      size="small"
+      class="mb-4"
+    >
+      <div class="flex flex-wrap items-center gap-3">
+        <n-input
+          v-model:value="query.keyword"
+          placeholder="关键词：名称/邮箱/域名/电话/城市"
+          clearable
+          style="width: 230px"
+          @keyup.enter="() => { query.page = 1; fetchData() }"
+        />
         <n-select
           v-model:value="query.country"
           :options="(geo.countries as any)"
@@ -531,8 +756,27 @@ onUnmounted(() => {
           filterable
           style="width: 160px"
         />
-        <n-select v-model:value="query.source" :options="sourceOptions" placeholder="来源" clearable style="width: 125px" />
-        <n-input-number v-model:value="query.min_score" placeholder="最低分" clearable style="width: 105px" :min="0" />
+        <n-select
+          v-model:value="query.source"
+          :options="sourceOptions"
+          placeholder="来源"
+          clearable
+          style="width: 125px"
+        />
+        <n-select
+          v-model:value="query.grade"
+          :options="collectApi.GRADE_OPTIONS"
+          placeholder="等级"
+          clearable
+          style="width: 125px"
+        />
+        <n-input-number
+          v-model:value="query.min_score"
+          placeholder="最低分"
+          clearable
+          style="width: 105px"
+          :min="0"
+        />
         <n-select
           v-model:value="query.whatsapp"
           :options="[
@@ -558,22 +802,67 @@ onUnmounted(() => {
           filterable
           style="width: 120px"
         />
-        <n-checkbox v-model:checked="query.due_follow" size="small">该回访了</n-checkbox>
-        <n-checkbox v-model:checked="query.is_cn" size="small">中国出海</n-checkbox>
-        <n-button type="primary" secondary @click="() => { query.page = 1; fetchData() }">查询</n-button>
-        <n-button quaternary @click="resetQuery">重置</n-button>
+        <n-checkbox
+          v-model:checked="query.due_follow"
+          size="small"
+        >
+          该回访了
+        </n-checkbox>
+        <n-checkbox
+          v-model:checked="query.is_cn"
+          size="small"
+        >
+          中国出海
+        </n-checkbox>
+        <n-button
+          type="primary"
+          secondary
+          @click="() => { query.page = 1; fetchData() }"
+        >
+          查询
+        </n-button>
+        <n-button
+          quaternary
+          @click="resetQuery"
+        >
+          重置
+        </n-button>
         <div class="flex-1" />
-        <n-button :disabled="!checkedKeys.length" type="warning" secondary @click="handleCheckWhatsApp">
+        <n-button
+          :disabled="!checkedKeys.length"
+          type="warning"
+          secondary
+          @click="handleCheckWhatsApp"
+        >
           检测 WhatsApp（{{ checkedKeys.length }}）
         </n-button>
-        <n-button type="primary" @click="openCreate">手工录入</n-button>
+        <n-button
+          secondary
+          @click="openExport"
+        >
+          导出 CSV
+        </n-button>
+        <n-button
+          v-if="userStore.isSuperuser"
+          secondary
+          type="info"
+          @click="openAutoAssign"
+        >
+          自动分配
+        </n-button>
+        <n-button
+          type="primary"
+          @click="openCreate"
+        >
+          手工录入
+        </n-button>
       </div>
     </n-card>
 
     <n-data-table
       v-model:checked-row-keys="checkedKeys"
       remote
-      :scroll-x="1610"
+      :scroll-x="1846"
       :columns="columns"
       :data="tableData"
       :loading="loading"
@@ -595,9 +884,21 @@ onUnmounted(() => {
       title="手工录入线索"
       style="width: 520px"
     >
-      <n-form ref="formRef" :model="form" :rules="formRules" label-placement="left" label-width="80">
-        <n-form-item label="企业名称" path="name">
-          <n-input v-model:value="form.name" placeholder="必填" />
+      <n-form
+        ref="formRef"
+        :model="form"
+        :rules="formRules"
+        label-placement="left"
+        label-width="80"
+      >
+        <n-form-item
+          label="企业名称"
+          path="name"
+        >
+          <n-input
+            v-model:value="form.name"
+            placeholder="必填"
+          />
         </n-form-item>
         <n-form-item label="国家">
           <n-select
@@ -623,10 +924,16 @@ onUnmounted(() => {
           <n-input v-model:value="form.industry" />
         </n-form-item>
         <n-form-item label="电话">
-          <n-input v-model:value="form.phone" placeholder="带国家码更准，如 +60123456789" />
+          <n-input
+            v-model:value="form.phone"
+            placeholder="带国家码更准，如 +60123456789"
+          />
         </n-form-item>
         <n-form-item label="官网">
-          <n-input v-model:value="form.website" placeholder="https://..." />
+          <n-input
+            v-model:value="form.website"
+            placeholder="https://..."
+          />
         </n-form-item>
         <n-form-item label="邮箱">
           <n-input v-model:value="form.email" />
@@ -634,8 +941,15 @@ onUnmounted(() => {
       </n-form>
       <template #footer>
         <div class="flex justify-end gap-3">
-          <n-button @click="dialogVisible = false">取消</n-button>
-          <n-button type="primary" @click="handleSubmit">提交</n-button>
+          <n-button @click="dialogVisible = false">
+            取消
+          </n-button>
+          <n-button
+            type="primary"
+            @click="handleSubmit"
+          >
+            提交
+          </n-button>
         </div>
       </template>
     </n-modal>
@@ -657,16 +971,33 @@ onUnmounted(() => {
             :content="rec.note || ''"
             :time="formatTime(rec.created_at)"
           >
-            <template v-if="rec.next_follow_at" #footer>
+            <template
+              v-if="rec.next_follow_at"
+              #footer
+            >
               下次跟进：{{ formatTime(rec.next_follow_at) }}
             </template>
           </n-timeline-item>
         </n-timeline>
-        <n-empty v-else description="暂无跟进记录" size="small" />
+        <n-empty
+          v-else
+          description="暂无跟进记录"
+          size="small"
+        />
       </div>
-      <n-form label-placement="left" label-width="90" style="margin-top: 12px">
-        <n-form-item label="跟进状态" required>
-          <n-select v-model:value="followForm.status" :options="followOptions.statuses" />
+      <n-form
+        label-placement="left"
+        label-width="90"
+        style="margin-top: 12px"
+      >
+        <n-form-item
+          label="跟进状态"
+          required
+        >
+          <n-select
+            v-model:value="followForm.status"
+            :options="followOptions.statuses"
+          />
         </n-form-item>
         <n-form-item label="跟进人">
           <n-select
@@ -698,8 +1029,127 @@ onUnmounted(() => {
       </n-form>
       <template #footer>
         <div class="flex justify-end gap-3">
-          <n-button @click="followVisible = false">取消</n-button>
-          <n-button type="primary" :loading="followSubmitting" @click="handleFollowSubmit">保存跟进</n-button>
+          <n-button @click="followVisible = false">
+            取消
+          </n-button>
+          <n-button
+            type="primary"
+            :loading="followSubmitting"
+            @click="handleFollowSubmit"
+          >
+            保存跟进
+          </n-button>
+        </div>
+      </template>
+    </n-modal>
+
+    <!-- 导出弹窗：字段勾选（默认全选）+ 当前筛选口径 -->
+    <n-modal
+      v-model:show="exportVisible"
+      preset="card"
+      title="导出线索 CSV"
+      style="width: 560px"
+    >
+      <p class="export-hint">
+        按当前筛选条件导出（分页不生效，最多 5000 条）；UTF-8 BOM 编码，Excel 可直接打开。
+      </p>
+      <n-checkbox-group v-model:value="exportFields">
+        <div class="export-fields">
+          <n-checkbox
+            v-for="f in EXPORT_FIELDS"
+            :key="f.key"
+            :value="f.key"
+            :label="f.label"
+          />
+        </div>
+      </n-checkbox-group>
+      <template #footer>
+        <div class="flex justify-end gap-3">
+          <n-button @click="exportVisible = false">
+            取消
+          </n-button>
+          <n-button
+            type="primary"
+            :loading="exportSubmitting"
+            @click="handleExport"
+          >
+            导出（{{ exportFields.length }} 字段）
+          </n-button>
+        </div>
+      </template>
+    </n-modal>
+
+    <!-- 自动分配（§24，主管操作） -->
+    <n-modal
+      v-model:show="autoAssignShow"
+      preset="card"
+      title="自动分配共享池线索"
+      style="width: 520px"
+    >
+      <n-form
+        label-placement="left"
+        label-width="90"
+      >
+        <n-form-item
+          label="候选销售"
+          required
+        >
+          <n-select
+            v-model:value="autoAssignForm.owner_ids"
+            :options="followOptions.users"
+            multiple
+            filterable
+            placeholder="可被分配的销售（多选）"
+          />
+        </n-form-item>
+        <n-form-item label="每人上限">
+          <n-input-number
+            v-model:value="autoAssignForm.max_per_owner"
+            :min="1"
+            :max="500"
+            style="width: 100%"
+          />
+        </n-form-item>
+        <n-form-item label="等级限定">
+          <n-select
+            v-model:value="autoAssignForm.grade"
+            :options="collectApi.GRADE_OPTIONS"
+            clearable
+            placeholder="不限定"
+          />
+        </n-form-item>
+        <n-form-item label="最低分">
+          <n-input-number
+            v-model:value="autoAssignForm.min_score"
+            :min="0"
+            clearable
+            style="width: 100%"
+          />
+        </n-form-item>
+        <n-form-item label="本次上限">
+          <n-input-number
+            v-model:value="autoAssignForm.limit"
+            :min="1"
+            :max="1000"
+            style="width: 100%"
+          />
+        </n-form-item>
+      </n-form>
+      <p class="nl-hint">
+        规则：只分配「未分配」状态的共享池线索，按 Lead Score 降序轮转，兼顾各销售当前负载。
+      </p>
+      <template #footer>
+        <div class="flex justify-end gap-3">
+          <n-button @click="autoAssignShow = false">
+            取消
+          </n-button>
+          <n-button
+            type="primary"
+            :loading="autoAssignSubmitting"
+            @click="handleAutoAssign"
+          >
+            开始分配
+          </n-button>
         </div>
       </template>
     </n-modal>
@@ -735,5 +1185,26 @@ onUnmounted(() => {
   overflow-y: auto;
   padding: 4px 4px 0;
   border-bottom: 1px dashed var(--yz-border-color, #e0e0e6);
+}
+.nl-label {
+  font-size: 13px;
+  font-weight: 500;
+}
+.nl-hint {
+  font-size: 12px;
+  color: var(--yz-text-secondary, #999);
+  margin: 0;
+}
+.export-hint {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--yz-text-secondary, #888);
+}
+.export-fields {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px 10px;
+  max-height: 320px;
+  overflow-y: auto;
 }
 </style>

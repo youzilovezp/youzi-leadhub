@@ -155,6 +155,16 @@ class Settings(BaseSettings):
     SCHEDULER_ENABLED: bool = False  # 定时调度总开关（多 worker 只在一个进程开）
     # 评分权重覆盖（JSON，键名见 collectors/scoring.py）
     SCORING_WEIGHTS: dict[str, int] = {}
+    # 六维评分权重覆盖（JSON，键 overseas/whatsapp/saas/scale/marketing/contact，按和归一化）
+    SCORING_DIM_WEIGHTS: dict[str, int] = {}
+    # LLM（OpenAI 兼容协议：智谱 GLM / DeepSeek / OpenAI 均可）。未配置时 AI 能力降级为规则模板
+    LLM_BASE_URL: str = ""  # 如 https://open.bigmodel.cn/api/paas/v4
+    LLM_API_KEY: str = ""
+    LLM_MODEL: str = "glm-4-flash"
+    LLM_TIMEOUT: int = 30  # 单次调用超时（秒）
+    # website_enrich 定时全库扫描的刷新窗口（小时）。PRD §30 官网/WhatsApp 7 天 = 168；
+    # 列表勾选手动检测不受此限制
+    ENRICH_INTERVAL_HOURS: int = 168
     # 高渗透目标地区（ISO2），逗号分隔或 JSON 数组
     TARGET_REGIONS: Annotated[list[str], BeforeValidator(_parse_cors_origins)] = [
         "MY", "SG", "ID", "TH", "PH", "VN", "AE", "SA", "QA", "KW",

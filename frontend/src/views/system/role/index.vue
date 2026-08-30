@@ -112,7 +112,12 @@ onMounted(fetchData)
 <template>
   <div class="page">
     <div class="mb-4 flex justify-end">
-      <n-button type="primary" @click="openCreate">新增角色</n-button>
+      <n-button
+        type="primary"
+        @click="openCreate"
+      >
+        新增角色
+      </n-button>
     </div>
 
     <n-data-table
@@ -135,20 +140,40 @@ onMounted(fetchData)
         label-placement="left"
         label-width="72"
       >
-        <n-form-item label="角色名" path="name">
+        <n-form-item
+          label="角色名"
+          path="name"
+        >
           <n-input v-model:value="form.name" />
         </n-form-item>
-        <n-form-item label="角色编码" path="code">
-          <n-input v-model:value="form.code" :disabled="dialogMode === 'edit'" />
+        <n-form-item
+          label="角色编码"
+          path="code"
+        >
+          <n-input
+            v-model:value="form.code"
+            :disabled="dialogMode === 'edit'"
+          />
         </n-form-item>
         <n-form-item label="备注">
-          <n-input v-model:value="form.remark" type="textarea" :rows="3" />
+          <n-input
+            v-model:value="form.remark"
+            type="textarea"
+            :rows="3"
+          />
         </n-form-item>
       </n-form>
       <template #footer>
         <div class="flex justify-end gap-3">
-          <n-button @click="dialogVisible = false">取消</n-button>
-          <n-button type="primary" @click="handleSubmit">提交</n-button>
+          <n-button @click="dialogVisible = false">
+            取消
+          </n-button>
+          <n-button
+            type="primary"
+            @click="handleSubmit"
+          >
+            提交
+          </n-button>
         </div>
       </template>
     </n-modal>

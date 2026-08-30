@@ -59,8 +59,9 @@ async def test_lead_create_merge_and_filters(client, admin_credentials):
     assert len(lead["sources"]) == 1  # 同 source 不重复
 
     # 筛选：关键词 + min_score + has_website=false（P2 修复：false 不再被忽略）
+    # 六维口径下该画像 9 分（出海25×25%+规模20×10%+联系人10×5%），min_score 取 5
     r = await client.get("/api/v1/collect/leads", headers=h,
-                         params={"keyword": "apico", "min_score": 10})
+                         params={"keyword": "apico", "min_score": 5})
     assert any(i["id"] == lead["id"] for i in r.json()["data"]["items"])
     r = await client.get("/api/v1/collect/leads", headers=h, params={"has_website": False})
     assert all(not i["website"] for i in r.json()["data"]["items"])
@@ -91,21 +92,21 @@ async def test_follow_up_flow(client, admin_credentials):
 
     # 首次跟进：缺省跟进人 = 当前用户；状态 + 时间落库
     r = await client.post(f"/api/v1/collect/leads/{lead['id']}/follow-up", headers=h,
-                          json={"status": "interested", "note": "已加 WhatsApp，聊得不错"})
+                          json={"status": "opportunity", "note": "已加 WhatsApp，聊得不错，进入商机"})
     updated = r.json()["data"]
-    assert updated["follow_status"] == "interested"
+    assert updated["follow_status"] == "opportunity"
     assert updated["owner_id"] is not None and updated["owner_name"]
     assert updated["last_followed_at"] is not None
 
     # 历史多一条，字段齐全
     records = (await client.get(f"/api/v1/collect/leads/{lead['id']}/follow-ups", headers=h)).json()["data"]
     assert len(records) == 1
-    assert records[0]["status"] == "interested" and records[0]["note"] == "已加 WhatsApp，聊得不错"
+    assert records[0]["status"] == "opportunity" and records[0]["note"] == "已加 WhatsApp，聊得不错，进入商机"
     assert records[0]["user_name"] == updated["owner_name"]
 
     # 列表筛选：跟进状态命中；owner_name 注入
     r = await client.get("/api/v1/collect/leads", headers=h,
-                         params={"follow_status": "interested", "keyword": "followco"})
+                         params={"follow_status": "opportunity", "keyword": "followco"})
     items = r.json()["data"]["items"]
     assert any(i["id"] == lead["id"] and i["owner_name"] for i in items)
 
@@ -113,13 +114,13 @@ async def test_follow_up_flow(client, admin_credentials):
     r = await client.post("/api/v1/collect/leads", headers=h, json={
         "name": "Pending Co", "country": "MY", "website": "https://pendingco.com"})
     fresh = r.json()["data"]
-    r = await client.get("/api/v1/collect/leads", headers=h, params={"follow_status": "pending"})
+    r = await client.get("/api/v1/collect/leads", headers=h, params={"follow_status": "unassigned"})
     ids = [i["id"] for i in r.json()["data"]["items"]]
     assert fresh["id"] in ids and lead["id"] not in ids
 
     # 该回访：下次跟进时间设到过去 → due_follow 命中
     r = await client.post(f"/api/v1/collect/leads/{lead['id']}/follow-up", headers=h,
-                          json={"status": "following", "next_follow_at": "2020-01-01T00:00:00Z"})
+                          json={"status": "contacted", "next_follow_at": "2020-01-01T00:00:00Z"})
     assert r.json()["code"] == 0
     r = await client.get("/api/v1/collect/leads", headers=h, params={"due_follow": True})
     assert any(i["id"] == lead["id"] for i in r.json()["data"]["items"])
@@ -131,10 +132,10 @@ async def test_follow_up_flow(client, admin_credentials):
                           json={"status": "whatever"})
     assert r.status_code == 422
     r = await client.post("/api/v1/collect/leads/999999/follow-up", headers=h,
-                          json={"status": "following"})
+                          json={"status": "contacted"})
     assert r.status_code == 404
     r = await client.post(f"/api/v1/collect/leads/{lead['id']}/follow-up", headers=h,
-                          json={"status": "following", "owner_id": 999999})
+                          json={"status": "contacted", "owner_id": 999999})
     assert r.status_code == 400
 
     # 清理
@@ -156,7 +157,7 @@ async def test_sales_permissions(client, admin_credentials):
     assert (await client.get("/api/v1/collect/stats", headers=sales)).status_code == 200
     assert (await client.get("/api/v1/collect/tasks", headers=sales)).status_code == 200
     r = await client.post(f"/api/v1/collect/leads/{lead['id']}/follow-up", headers=sales,
-                          json={"status": "following", "note": "销售第一次联系"})
+                          json={"status": "contacted", "note": "销售第一次联系"})
     assert r.json()["data"]["owner_name"] == "销售一号"
 
     # 销售：任务管控 + 删线索 → 403
@@ -176,3 +177,101 @@ async def test_sales_permissions(client, admin_credentials):
     # 清理（销售不能删，用管理员）
     await client.delete(f"/api/v1/collect/tasks/{task['id']}", headers=admin)
     await client.delete(f"/api/v1/collect/leads/{lead['id']}", headers=admin)
+
+
+async def test_lead_detail_contacts_events_export(client, admin_credentials):
+    """画像详情 / 联系人 CRUD / 动态事件 / CSV 导出 / grade 筛选 / 统计等级分布。"""
+    h = await _login(client, admin_credentials)
+    r = await client.post("/api/v1/collect/leads", headers=h, json={
+        "name": "Profile Co", "country": "MY", "website": "https://profileco.com",
+        "email": "hi@profileco.com"})
+    lead = r.json()["data"]
+    assert lead["grade"] in ("S", "A", "B", "C")
+    assert set(lead["score_signals"]) == {
+        "overseas", "whatsapp", "saas", "scale", "marketing", "contact"}
+
+    # ---- 联系人 CRUD ----
+    r = await client.post(f"/api/v1/collect/leads/{lead['id']}/contacts", headers=h,
+                          json={"name": "张三", "job_title": "CEO", "email": "zhang@profileco.com"})
+    contact = r.json()["data"]
+    assert contact["seniority"] == "tier1" and contact["source"] == "manual"
+    r = await client.put(f"/api/v1/collect/leads/{lead['id']}/contacts/{contact['id']}",
+                         headers=h, json={"job_title": "Marketing Director"})
+    assert r.json()["data"]["seniority"] == "tier2"
+    # 同邮箱重复 → 业务错误
+    r = await client.post(f"/api/v1/collect/leads/{lead['id']}/contacts", headers=h,
+                          json={"name": "李四", "email": "zhang@profileco.com"})
+    assert r.json()["code"] == 40001
+    contacts = (await client.get(f"/api/v1/collect/leads/{lead['id']}/contacts", headers=h)).json()["data"]
+    assert len(contacts) == 1
+
+    # ---- 详情（画像聚合）----
+    detail = (await client.get(f"/api/v1/collect/leads/{lead['id']}", headers=h)).json()["data"]
+    assert detail["contacts_count"] == 1 and detail["contacts"][0]["id"] == contact["id"]
+    assert set(detail["dimensions"]) == {"overseas", "whatsapp", "saas", "scale", "marketing", "contact"}
+    assert detail["dimension_weights"]["whatsapp"] == 30
+    assert isinstance(detail["events"], list) and detail["events"]
+    types = [e["event_type"] for e in detail["events"]]
+    assert "manual_entry" in types and "contact_added" in types
+    assert isinstance(detail["follow_ups"], list)
+    assert isinstance(detail["sales_suggestion"], str) and detail["sales_suggestion"]
+    # 详情 404
+    assert (await client.get("/api/v1/collect/leads/999999", headers=h)).status_code == 404
+
+    # ---- 事件分页 ----
+    events = (await client.get(f"/api/v1/collect/leads/{lead['id']}/events", headers=h)).json()["data"]
+    assert events["total"] >= 2
+
+    # ---- grade 筛选 ----
+    r = await client.get("/api/v1/collect/leads", headers=h,
+                         params={"keyword": "profileco", "grade": lead["grade"]})
+    assert any(i["id"] == lead["id"] for i in r.json()["data"]["items"])
+    r = await client.get("/api/v1/collect/leads", headers=h,
+                         params={"keyword": "profileco", "grade": "Z"})
+    assert r.status_code == 422  # 非法 grade 被参数校验拦截
+
+    # ---- 统计等级分布 ----
+    stats = (await client.get("/api/v1/collect/stats", headers=h)).json()["data"]
+    assert set(stats["grade_counts"]) == {"S", "A", "B", "C"}
+    assert sum(stats["grade_counts"].values()) >= 1
+
+    # ---- CSV 导出：BOM / 表头 / 指定字段 / 内容 ----
+    r = await client.get("/api/v1/collect/leads/export", headers=h,
+                         params={"keyword": "profileco", "fields": "name,grade,score,contacts_count"})
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/csv")
+    assert r.headers["content-disposition"].startswith("attachment")
+    body = r.content
+    assert body.startswith(b"\xef\xbb\xbf")  # UTF-8 BOM：Excel 打开中文不乱码
+    text = body.decode("utf-8-sig")
+    lines = [ln for ln in text.splitlines() if ln]
+    assert lines[0] == "企业名称,等级,Lead Score,联系人数"
+    assert any(ln.startswith("Profile Co,") and ln.endswith(",1") for ln in lines[1:])
+    # 全字段导出（默认）含表头「ID」
+    r = await client.get("/api/v1/collect/leads/export", headers=h,
+                         params={"keyword": "profileco"})
+    assert r.content.decode("utf-8-sig").splitlines()[0].startswith("ID,")
+
+    # ---- 清理（级联删联系人与事件）----
+    await client.delete(f"/api/v1/collect/leads/{lead['id']}", headers=h)
+
+
+async def test_contacts_permission_matrix(client, admin_credentials):
+    """联系人属于销售工作台：销售可增删改，与跟进同口径。"""
+    sales = await _login_sales(client, admin_credentials, username="sales02")
+    h = await _login(client, admin_credentials)
+    r = await client.post("/api/v1/collect/leads", headers=h, json={
+        "name": "Contact Perm Co", "country": "MY", "website": "https://cperm.com"})
+    lead = r.json()["data"]
+
+    r = await client.post(f"/api/v1/collect/leads/{lead['id']}/contacts", headers=sales,
+                          json={"name": "王五", "job_title": "客服主管"})
+    assert r.status_code == 200 and r.json()["data"]["seniority"] == "tier2"
+    cid = r.json()["data"]["id"]
+    assert (await client.put(
+        f"/api/v1/collect/leads/{lead['id']}/contacts/{cid}", headers=sales,
+        json={"job_title": "CTO"})).json()["data"]["seniority"] == "tier3"
+    assert (await client.delete(
+        f"/api/v1/collect/leads/{lead['id']}/contacts/{cid}", headers=sales)).json()["code"] == 0
+
+    await client.delete(f"/api/v1/collect/leads/{lead['id']}", headers=h)

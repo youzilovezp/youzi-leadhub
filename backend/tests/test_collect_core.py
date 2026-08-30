@@ -7,15 +7,16 @@ from app.collectors.normalize import (
     normalize_company_name,
     normalize_phone,
 )
-from app.collectors.scoring import compute_score
+from app.collectors.scoring import score_lead_inputs
 from app.collectors.website_enrich import detect_email, detect_social, detect_whatsapp
 from app.crud.lead import upsert_lead
 
-# ---------- 评分 ----------
+# ---------- 评分（六维模型） ----------
 
 
 def test_score_full_hits():
-    score, signals = compute_score(
+    """旧「全命中」画像在六维模型下的期望值（出海 25 / WA 60 / SaaS 0 / 规模 40 / 营销 0 / 联系人 10 → 29）。"""
+    score, dims, grade = score_lead_inputs(
         whatsapp_hit=True,
         whatsapp_job=True,
         website="https://a.com",
@@ -25,20 +26,20 @@ def test_score_full_hits():
         phone_e164="+6012345678",
         social={"facebook": "https://facebook.com/a"},
     )
-    assert score == 110  # 文档口径：满分 110，不封顶
-    assert set(signals) == {
-        "whatsapp_plugin",
-        "whatsapp_job",
-        "has_website",
-        "has_public_email",
-        "is_target_region",
-        "has_phone",
-        "has_social",
+    assert score == 26
+    assert dims == {
+        "overseas": 25,  # 目标地区15 + 官网10
+        "whatsapp": 50,  # hit35 + job15（CTWA 口径调整后）
+        "saas": 0,
+        "scale": 40,  # 社媒15 + 官网10 + 邮箱10 + 电话5
+        "marketing": 0,
+        "contact": 10,  # 无联系人但有公开邮箱
     }
+    assert grade == "C"
 
 
 def test_score_non_target_country():
-    score, signals = compute_score(
+    score, dims, grade = score_lead_inputs(
         whatsapp_hit=False,
         whatsapp_job=False,
         website=None,
@@ -49,7 +50,8 @@ def test_score_non_target_country():
         social=None,
     )
     assert score == 0
-    assert signals == {}
+    assert dims == {"overseas": 0, "whatsapp": 0, "saas": 0, "scale": 0, "marketing": 0, "contact": 0}
+    assert grade == "C"
 
 
 # ---------- 电话归一化 ----------
@@ -193,7 +195,8 @@ async def test_upsert_merge(db_session):
     assert created1
     assert lead1.phone_e164 == "+60123456789"
     assert lead1.sources[0]["source"] == "google_maps"
-    assert lead1.score == 15  # 目标地区10 + 电话5
+    assert lead1.score == 4  # 出海15×25% + 规模5×10% = 4.25 → 4
+    assert lead1.grade == "C"
 
     # 同一企业 second source：有官网 + WhatsApp 链接（同城 → namecity 反查命中）
     d2 = LeadDraft(
@@ -217,8 +220,10 @@ async def test_upsert_merge(db_session):
     # 来源记录按 (lead, source) 唯一：两个来源，无重复
     assert sorted(s["source"] for s in lead2.sources) == ["google_maps", "job_posting"]
 
-    # 评分重算：plugin40+job30+website10+region10+phone5（无邮箱/社媒）=95
-    assert lead2.score == 95
+    # 六维重算：出海25×25% + WA65×30% + 规模40×10% + 营销15×10% = 31.25 → 31
+    assert lead2.score == 31
+    assert lead2.score_signals["whatsapp"] == 65
+    assert lead2.grade == "C"
 
     # 第三次同 source 不追加来源记录
     d3 = LeadDraft(source="google_maps", name="Acme", country="MY", website="https://acme.com")

@@ -28,6 +28,12 @@ class User(Base, TimestampMixin):
     avatar: Mapped[str | None] = mapped_column(String(255))
     phone: Mapped[str | None] = mapped_column(String(20))
 
+    # ---------- 数据权限（PRD §43 三级）：all=公司级看全部 / team=团队级 / own=个人级 ----------
+    data_scope: Mapped[str] = mapped_column(
+        String(16), default="all", server_default="all", index=True
+    )
+    team: Mapped[str | None] = mapped_column(String(64), index=True)  # 团队标识（team 级数据权限的分组键）
+
     role_id: Mapped[int | None] = mapped_column(
         ForeignKey("roles.id", ondelete="SET NULL"), index=True
     )
