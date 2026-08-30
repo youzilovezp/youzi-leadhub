@@ -44,7 +44,8 @@ def detect_need_types(
     """需求类型识别（§4.4）：返回 [{type, label, selling}]，按证据强度排序。
 
     A 消息需求：官网 WhatsApp + 交易/营销场景（有量就有消息成本诉求）
-    B API 升级：个人号/Business App 使用中（无 SaaS 工具痕迹 = 大概率个人号）
+    B API 升级：个人号/Business App 使用中（无 SaaS 工具痕迹 = 大概率个人号）；
+      已在用竞品 BSP（wa_bsp）= 替换商机，排最前（卖点改成替换口径）
     C 客服需求：WhatsApp + 客服场景/在招客服/多分线
     D 营销需求：meta_ads 在投 + WhatsApp + 独立站
     E 私域需求：多 WhatsApp 号 + 营销场景（社群/活动运营形态）
@@ -54,8 +55,15 @@ def detect_need_types(
     uses_wa = bool(whatsapp_hit or whatsapp_url)
     multi_line = len(whatsapp_numbers or []) >= 2
     ad_running = any(r.get("source") == "meta_ads" for r in (sources or []))
+    using_bsp = "wa_bsp" in saas  # 已在用 WhatsApp SaaS 竞品（§4.1 替换商机）
     out: list[dict[str, str]] = []
 
+    if using_bsp:
+        out.append({
+            "type": "api_upgrade",
+            **NEED_TYPES["api_upgrade"],
+            "selling": "竞品替换：迁移方案/更优价格与送达率（检测到在用其他 WhatsApp SaaS）",
+        })
     if uses_wa and ("transactional" in scene_set or "marketing" in scene_set):
         out.append({"type": "messaging", **NEED_TYPES["messaging"]})
     if uses_wa and not saas:
@@ -66,7 +74,14 @@ def detect_need_types(
         out.append({"type": "marketing", **NEED_TYPES["marketing"]})
     if multi_line and "marketing" in scene_set:
         out.append({"type": "private_domain", **NEED_TYPES["private_domain"]})
-    return out
+    # 同类型去重（using_bsp 与"无 SaaS 痕迹"可能都产出 api_upgrade）
+    seen: set[str] = set()
+    deduped: list[dict[str, str]] = []
+    for item in out:
+        if item["type"] not in seen:
+            seen.add(item["type"])
+            deduped.append(item)
+    return deduped
 
 
 # 行业里偏电商的关键词（营销消息推荐的条件之一）

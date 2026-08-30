@@ -56,7 +56,7 @@ make dev    # 装依赖 + 准备中间件 + 启动前后端，Ctrl+C 一起停
 给销售找「需要用 WhatsApp 做生意」的企业线索，完整链路：**采集 → 归一化 → 去重合并 → 六维评分分级 → 画像/联系人/事件 → 列表筛选 → 跟进建联**。
 
 ```
-采集器产出 LeadDraft（google_maps / job_posting / website_enrich / 手工录入）
+采集器产出 LeadDraft（meta_ads 主通道 / seed_import 种子导入 / job_posting / website_enrich / 手工录入）
         │
         ▼
 归一化：电话 E.164 · 域名 registrable domain · 公司名归一
@@ -76,7 +76,9 @@ make dev    # 装依赖 + 准备中间件 + 启动前后端，Ctrl+C 一起停
 | 能力 | 说明 |
 |---|---|
 | 🔌 多源采集 | 插件式采集器，注册即接入任务/去重/评分体系 |
-| 🗺️ `google_maps` | Google Places API 按「关键词 × 城市」采集商家 |
+| 🌱 Seed Pool | CSV 批量导入中国企业种子（`POST /collect/leads/import`，走去重合并，is_cn 标记）——PRD 模块①入口 |
+| 📣 `meta_ads` | **主通道**（PRD ICP=中国出海企业）：广告库搜投放企业 → 主页探测 WA/邮箱/官网 + 中文特征 |
+| 🗺️ `google_maps` | 辅助源（海外本地商家，非主 ICP）：Places API 按「关键词 × 城市」采集 |
 | 💼 `job_posting` | 招聘站点监控（kalibrr 等），在招 WhatsApp 客服的公司即高意向线索 |
 | 🔍 `website_enrich` | 富化存量线索：官网检测 WhatsApp/邮箱/社媒 + 场景（客服/营销/交易）与 SaaS 需求关键词，邮箱自动生成联系人 |
 | ✍️ 手工录入 | 同样走去重合并 |
