@@ -39,6 +39,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '角色管理', requiresAdmin: true },
       },
       {
+        path: 'collect/daily',
+        name: 'CollectDaily',
+        component: () => import('@/views/collect/daily.vue'),
+        meta: { title: '今日商机' },
+      },
+      {
         path: 'collect/lead',
         name: 'CollectLead',
         component: () => import('@/views/collect/lead/index.vue'),

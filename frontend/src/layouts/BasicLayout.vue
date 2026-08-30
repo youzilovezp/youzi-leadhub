@@ -15,6 +15,7 @@ import {
   LogOutOutline,
   PersonOutline,
   CompassOutline,
+  FlameOutline,
   ListOutline,
   DownloadOutline,
   FlashOutline,
@@ -42,6 +43,7 @@ const menus: MenuOption[] = [
     key: 'collect',
     icon: renderIcon(CompassOutline),
     children: [
+      { label: '今日商机', key: '/collect/daily', icon: renderIcon(FlameOutline) },
       { label: '线索列表', key: '/collect/lead', icon: renderIcon(ListOutline) },
       { label: '采集任务', key: '/collect/task', icon: renderIcon(DownloadOutline) },
     ],

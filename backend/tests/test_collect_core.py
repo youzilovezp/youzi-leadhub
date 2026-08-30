@@ -149,19 +149,41 @@ def test_detect_whatsapp_negative():
 
 async def test_fetch_falls_back_to_direct_when_proxy_dead(monkeypatch):
     """双通道回归（原 P0「代理软拦截误报」的现行语义，2026-08-31 起）：
-    主 client 代理优先（本机环境海外站需系统代理），代理不可用时宽松兜底
-    client（trust_env=False 直连）仍能抓到页面——单一死代理不再造成误报。"""
-    from app.collectors.website_enrich import _SSL_LOOSE_CLIENT_ARGS, _fetch_site, _make_client
+    主 client 代理优先，代理不可用时宽松兜底 client（trust_env=False 直连）
+    仍能抓到页面——单一死代理不再造成误报。
 
-    # 模拟被劫持/失效的系统代理：任何请求都打到不存在的本地端口
-    monkeypatch.setenv("all_proxy", "socks5://127.0.0.1:1")
-    monkeypatch.setenv("https_proxy", "http://127.0.0.1:1")
-    monkeypatch.setenv("http_proxy", "http://127.0.0.1:1")
+    用本地回环 HTTP 服务验证，不依赖外部网络（此前 primal.com.ph / baidu
+    直连路由抖动会让回归摇摆）。"""
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
 
-    # 目标用直连稳定的站点（海外站直连路由本机间歇不可达，会让回归抖动）
-    async with _make_client() as primary, _make_client(**_SSL_LOOSE_CLIENT_ARGS) as loose:
-        html = await _fetch_site((primary, loose), "https://www.baidu.com/")
-    assert html is not None and "baidu" in html.lower()
+    class _LocalHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            body = b"<html>local-ok-dual-channel</html>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, fmt: str, *args: object) -> None:  # 静默，别污染测试输出
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), _LocalHandler)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        # 模拟失效的系统代理：任何请求都打到不存在的本地端口
+        monkeypatch.setenv("all_proxy", "socks5://127.0.0.1:1")
+        monkeypatch.setenv("https_proxy", "http://127.0.0.1:1")
+        monkeypatch.setenv("http_proxy", "http://127.0.0.1:1")
+        from app.collectors.website_enrich import _SSL_LOOSE_CLIENT_ARGS, _fetch_site, _make_client
+
+        async with _make_client() as primary, _make_client(**_SSL_LOOSE_CLIENT_ARGS) as loose:
+            html = await _fetch_site((primary, loose), f"http://127.0.0.1:{port}/")
+        assert html is not None and "local-ok-dual-channel" in html
+    finally:
+        srv.shutdown()
 
 
 async def test_fetch_site_scheme_fallback():
