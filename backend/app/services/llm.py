@@ -16,6 +16,7 @@ import json
 from typing import Any
 
 import httpx
+from loguru import logger
 
 from app.collectors.recommend import recommend_products, sales_suggestion
 from app.collectors.scenes import SAAS_LABELS_ZH, SCENE_LABELS_ZH
@@ -112,7 +113,8 @@ async def ai_analysis(lead: Any, dims: dict[str, int], contacts: list[Any]) -> d
     try:
         result = await chat_json(_ANALYSIS_SYSTEM, _lead_context(lead, dims, contacts))
         return {**fallback, **result, "generated_by": "llm"}
-    except Exception:  # noqa: BLE001  LLM 失败不挡业务，降级模板
+    except Exception as exc:  # noqa: BLE001  LLM 失败不挡业务，降级模板
+        logger.warning("llm.ai_analysis 降级模板：{}: {}", type(exc).__name__, exc)
         return {**fallback, "generated_by": "template"}
 
 
@@ -148,7 +150,8 @@ async def sales_script(lead: Any) -> dict[str, Any]:
     try:
         result = await chat_json(_SCRIPT_SYSTEM, _lead_context(lead, {}, []))
         return {"script": result.get("script") or _script_fallback(lead), "generated_by": "llm"}
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("llm.sales_script 降级模板：{}: {}", type(exc).__name__, exc)
         return {"script": _script_fallback(lead), "generated_by": "template"}
 
 

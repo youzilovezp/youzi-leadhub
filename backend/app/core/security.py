@@ -76,7 +76,7 @@ async def blacklist_token(token: str) -> bool:
     jti = payload.get("jti")
     exp = payload.get("exp")
     sub = payload.get("sub")
-    if not jti or not isinstance(exp, (int, float)):
+    if not jti or not isinstance(exp, int | float):
         return False
     expires_at = datetime.fromtimestamp(exp, tz=timezone.utc)
     if expires_at <= datetime.now(timezone.utc):

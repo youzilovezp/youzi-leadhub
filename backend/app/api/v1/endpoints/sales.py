@@ -442,16 +442,29 @@ async def data_sources_endpoint(db: SessionDep, _user: User = RequireStatsRead):
     ).all()
     stats_by_collector = {r[0]: r for r in rows}
     # 渠道 × 等级产出（补充需求 §一：记录来源用于分析哪个渠道商机产出最高）。
-    # sources 是 JSON 数组，SQL 拆解方言差异大——Python 侧聚合最稳
-    leads_src_grade = (await db.execute(select(Lead.sources, Lead.grade))).all()
+    # sources 是 JSON 数组，SQL 拆解方言差异大——Python 侧聚合最稳；
+    # 按 id 键集分批流式取，避免百万级线索全表载入内存
     grade_by_source: dict[str, dict[str, int]] = {}
-    for sources_json, grade in leads_src_grade:
-        for rec in sources_json or []:
-            name = rec.get("source")
-            if name:
-                bucket = grade_by_source.setdefault(name, {"S": 0, "A": 0, "B": 0, "C": 0})
-                if grade in bucket:
-                    bucket[grade] += 1
+    last_id = 0
+    while True:
+        chunk = (
+            await db.execute(
+                select(Lead.id, Lead.sources, Lead.grade)
+                .where(Lead.id > last_id)
+                .order_by(Lead.id)
+                .limit(5000)
+            )
+        ).all()
+        if not chunk:
+            break
+        for _lead_id, sources_json, grade in chunk:
+            for rec in sources_json or []:
+                name = rec.get("source")
+                if name:
+                    bucket = grade_by_source.setdefault(name, {"S": 0, "A": 0, "B": 0, "C": 0})
+                    if grade in bucket:
+                        bucket[grade] += 1
+        last_id = chunk[-1][0]
     out = []
     for info in list_collectors():
         r = stats_by_collector.get(info["name"])

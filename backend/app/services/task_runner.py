@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timezone
 
 from loguru import logger
@@ -26,6 +27,7 @@ class TaskRunner:
         self._workers: list[asyncio.Task] = []
         self._cancel_events: dict[int, asyncio.Event] = {}
         self._progress: dict[int, tuple[int, int]] = {}  # task_id -> (total, done)
+        self._progress_synced_at: dict[int, float] = {}  # task_id -> 上次落库时间戳
         self._stopping = False
 
     # ---------- 生命周期 ----------
@@ -177,6 +179,13 @@ class TaskRunner:
             total, done = self._progress.get(task_id, (0, 0))
             done += delta
             self._progress[task_id] = (total, done)
+            # 节流落库：进度只在收尾写库的话，长任务运行期间详情页恒 0；
+            # 每条写库又放大事务。折中——5 秒一次，重启最多丢 5 秒进度。
+            now = time.monotonic()
+            last = self._progress_synced_at.get(task_id, 0.0)
+            if now - last >= 5.0:
+                self._progress_synced_at[task_id] = now
+                asyncio.create_task(self._sync_progress(task_id, total, done))
 
         ctx = TaskContext(
             task_id=task_id,
@@ -203,8 +212,9 @@ class TaskRunner:
         finally:
             self._cancel_events.pop(task_id, None)
 
-        # 进度/计数落库（执行期间只写内存，收尾一次写）
+        # 进度/计数落库（执行期间节流写，收尾一次写终值）
         total, done = self._progress.pop(task_id, (0, 0))
+        self._progress_synced_at.pop(task_id, None)
         await self._finish(
             task_id,
             status,
@@ -216,6 +226,19 @@ class TaskRunner:
         )
         if status == "completed":
             await log("info", f"任务完成：新增 {counters['added']}，合并 {counters['merged']}")
+
+    async def _sync_progress(self, task_id: int, total: int, done: int) -> None:
+        """运行中节流落库进度（失败静默——进度展示不值得炸协程）。"""
+        try:
+            async with async_session() as s:
+                await s.execute(
+                    update(CollectTask)
+                    .where(CollectTask.id == task_id, CollectTask.status == "running")
+                    .values(progress_total=total, progress_done=done)
+                )
+                await s.commit()
+        except Exception:  # noqa: BLE001
+            logger.debug(f"任务 {task_id} 进度落库失败（忽略）")
 
     async def _finish(
         self,

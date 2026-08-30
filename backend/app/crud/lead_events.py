@@ -22,6 +22,7 @@ EVENT_TYPES: list[str] = [
     "source_added",  # 新来源进入（合并时新追加的 source）
     "manual_entry",  # 手工录入创建
     "whatsapp_found",  # 首次检测到 WhatsApp（官网插件/链接/FB 主页）
+    "fb_whatsapp_found",  # FB 主页出现 wa.me 按钮（CTWA/私域代理信号）
     "whatsapp_job_found",  # 首次发现在招 WhatsApp 相关岗位
     "email_found",  # 首次拿到公开邮箱
     "social_found",  # 新增社媒主页
@@ -39,6 +40,7 @@ EVENT_TYPE_LABELS_ZH: dict[str, str] = {
     "source_added": "新来源",
     "manual_entry": "手工录入",
     "whatsapp_found": "发现 WhatsApp",
+    "fb_whatsapp_found": "FB 主页挂 WA 按钮",
     "whatsapp_job_found": "在招 WhatsApp 岗位",
     "email_found": "发现邮箱",
     "social_found": "新增社媒",
@@ -53,7 +55,7 @@ EVENT_TYPE_LABELS_ZH: dict[str, str] = {
 }
 
 # 高价值预警事件类型（PRD §55）：等级升到 S/A、发现 WhatsApp、SaaS 信号出现
-ALERT_EVENT_TYPES: set[str] = {"whatsapp_found", "saas_signal_change"}
+ALERT_EVENT_TYPES: set[str] = {"whatsapp_found", "fb_whatsapp_found", "saas_signal_change"}
 # 哪些 grade_change 视为预警：新等级落入 S/A
 ALERT_GRADES: set[str] = {"S", "A"}
 
@@ -85,6 +87,7 @@ def snapshot_lead(lead: Lead) -> dict[str, Any]:
     """变更前的关键字段快照，供 diff 发射事件。"""
     return {
         "whatsapp_hit": bool(lead.whatsapp_hit),
+        "fb_whatsapp": bool(lead.fb_whatsapp),
         "whatsapp_job": bool(lead.whatsapp_job),
         "email": lead.email,
         "social_keys": set((lead.social or {}).keys()),
@@ -173,6 +176,17 @@ async def diff_lead_events(
             note=f"检测到 WhatsApp 入口：{lead.whatsapp_url or '官网'}",
             created_by=created_by,
             is_alert=True,  # 发现 WhatsApp = 高价值预警（§55）
+        )
+    if not before.get("fb_whatsapp") and lead.fb_whatsapp:
+        # FB 主页挂 wa.me = CTWA/私域获客证据（API 不暴露广告 CTA，这是代理信号）
+        add_event(
+            db,
+            lead,
+            "fb_whatsapp_found",
+            payload={"phone": lead.phone_raw},
+            note=f"FB 主页出现 WhatsApp 按钮（CTWA/私域代理信号）{('：' + lead.phone_raw) if lead.phone_raw else ''}",
+            created_by=created_by,
+            is_alert=True,  # CTWA 代理信号 = 高价值预警（§55）
         )
     if not before.get("whatsapp_job") and lead.whatsapp_job:
         add_event(

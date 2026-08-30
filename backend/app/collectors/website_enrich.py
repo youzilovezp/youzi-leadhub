@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
+from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -224,7 +225,10 @@ class WebsiteEnrichCollector(Collector):
                 nonlocal done
                 async with sem:
                     ctx.check_cancelled()
-                    await _enrich_one((client, loose), ctx, lead_id, website)
+                    try:
+                        await _enrich_one((client, loose), ctx, lead_id, website)
+                    except Exception:  # noqa: BLE001  单站点失败不放大为整任务失败
+                        logger.exception(f"[lead {lead_id}] 富化异常：{website}")
                 done += 1
                 ctx.inc_progress(1)
 

@@ -4,11 +4,13 @@ import { useRoute, useRouter } from 'vue-router'
 import { NTag } from 'naive-ui'
 import * as collectApi from '@/api/collect'
 import type { CollectTask, TaskLog } from '@/api/collect'
+import { useUserStore } from '@/stores/user'
 import { formatTime } from '@/utils/format'
 import { message } from '@/utils/feedback'
 
 const route = useRoute()
 const router = useRouter()
+const userStore = useUserStore()
 const taskId = Number(route.params.id)
 
 const task = ref<CollectTask | null>(null)
@@ -122,8 +124,9 @@ onUnmounted(() => {
           {{ statusTag[task.status]?.label || task.status }}
         </n-tag>
         <div class="flex-1" />
+        <!-- 取消/重跑是管理员操作，销售只读（与列表页门控一致） -->
         <n-button
-          v-if="active"
+          v-if="active && userStore.isSuperuser"
           type="warning"
           secondary
           size="small"
@@ -132,7 +135,7 @@ onUnmounted(() => {
           取消任务
         </n-button>
         <n-button
-          v-else
+          v-else-if="userStore.isSuperuser"
           type="primary"
           secondary
           size="small"

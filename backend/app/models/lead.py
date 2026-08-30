@@ -31,7 +31,7 @@ class Lead(Base, TimestampMixin):
     # ---------- 基础属性 ----------
     country: Mapped[str | None] = mapped_column(String(8), index=True)  # ISO2，如 MY / PH
     city: Mapped[str | None] = mapped_column(String(128))
-    industry: Mapped[str | None] = mapped_column(String(128))
+    industry: Mapped[str | None] = mapped_column(String(128), index=True)  # 列表/自动分配筛选用
     address: Mapped[str | None] = mapped_column(String(512))
     phone_raw: Mapped[str | None] = mapped_column(String(64))  # 采集原始电话
     phone_e164: Mapped[str | None] = mapped_column(String(32), index=True)  # 归一化 E.164
@@ -76,7 +76,9 @@ class Lead(Base, TimestampMixin):
     )  # 跟进人（最后操作的跟进人）
     follow_status: Mapped[str | None] = mapped_column(String(16), index=True)  # 见 FOLLOW_STATUS_OPTIONS，NULL=从未跟进
     last_followed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    next_follow_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # 下次回访时间
+    next_follow_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )  # 下次回访时间（「该回访了」筛选走索引）
 
     # ---------- 中国出海 ICP（meta_ads 链路） ----------
     is_cn: Mapped[bool] = mapped_column(Boolean, default=False, index=True)  # 中国出海企业特征

@@ -19,7 +19,7 @@ import {
   gradeTagType,
 } from '@/api/collect'
 import { useUserStore } from '@/stores/user'
-import { formatTime } from '@/utils/format'
+import { formatTime, parseUtc } from '@/utils/format'
 import { confirm, message } from '@/utils/feedback'
 import { downloadFile } from '@/utils/download'
 
@@ -204,7 +204,7 @@ function openOppModal(opp?: Opportunity) {
     name: opp?.name ?? '',
     amount: opp?.amount ?? null,
     stage: opp?.stage ?? 'opportunity',
-    expected_close: opp?.expected_close_at ? new Date(opp.expected_close_at).getTime() : null,
+    expected_close: opp?.expected_close_at ? parseUtc(opp.expected_close_at).getTime() : null,
     note: opp?.note ?? '',
   })
   oppModalShow.value = true
@@ -338,11 +338,17 @@ interface TimelineItem {
   type: 'success' | 'info' | 'warning' | 'error' | 'default'
 }
 
+/** 排序键：原始 ISO → 毫秒（解析失败按 0，避免 NaN 破坏 sort）；展示文本排序前再映射 */
+function timelineSortTs(iso: string): number {
+  const ms = parseUtc(iso).getTime()
+  return Number.isNaN(ms) ? 0 : ms
+}
+
 const timeline = computed<TimelineItem[]>(() => {
   if (!detail.value) return []
   const events: TimelineItem[] = detail.value.events.map((e) => ({
     key: `e-${e.id}`,
-    time: formatTime(e.created_at),
+    time: e.created_at,
     title: EVENT_TYPE_LABELS[e.event_type] ?? e.event_type,
     content: e.note ?? '',
     type:
@@ -356,12 +362,15 @@ const timeline = computed<TimelineItem[]>(() => {
   }))
   const follows: TimelineItem[] = detail.value.follow_ups.map((f) => ({
     key: `f-${f.id}`,
-    time: formatTime(f.created_at),
+    time: f.created_at,
     title: `跟进 · ${collectApi.followStatusLabel(f.status)}`,
     content: [f.note, f.next_follow_at ? `下次回访：${formatTime(f.next_follow_at)}` : ''].filter(Boolean).join('｜'),
     type: f.status === 'won' ? 'success' : f.status === 'invalid' ? 'error' : 'info',
   }))
-  return [...events, ...follows].sort((a, b) => (a.time < b.time ? 1 : -1))
+  // 按原始时间倒序（最新在前）。不能对 formatTime 后的本地化文本排序：非补零格式跨日/跨月必错
+  return [...events, ...follows]
+    .sort((a, b) => timelineSortTs(b.time) - timelineSortTs(a.time))
+    .map((x) => ({ ...x, time: formatTime(x.time) }))
 })
 
 // ---------- 导出单条 ----------

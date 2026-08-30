@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import httpx
@@ -76,16 +77,20 @@ class GoogleMapsCollector(Collector):
         ctx.set_total(len(cities) * len(keywords))
 
         async with httpx.AsyncClient(timeout=30) as client:
+            ok_queries = 0
             for keyword in keywords:
                 for city in cities:
                     ctx.check_cancelled()
                     query = f"{keyword} in {city}"
                     await ctx.log("info", f"搜索：{query}")
                     page_token: str | None = None
+                    query_ok = False
                     for _page in range(_MAX_PAGES):
                         body: dict[str, Any] = {"textQuery": query, "pageSize": 20}
                         if page_token:
                             body["pageToken"] = page_token
+                            # nextPageToken 生效需数秒（Google 文档），立即翻页必 400
+                            await asyncio.sleep(2.0)
                         resp = await client.post(
                             _API_URL,
                             json=body,
@@ -99,7 +104,12 @@ class GoogleMapsCollector(Collector):
                                 "error", f"API 错误 {resp.status_code}：{resp.text[:200]}"
                             )
                             break
-                        data = resp.json()
+                        query_ok = True
+                        try:
+                            data = resp.json()
+                        except ValueError:
+                            await ctx.log("error", f"响应非 JSON：{resp.text[:200]}")
+                            break
                         places = data.get("places", [])
                         for place in places:
                             ctx.check_cancelled()
@@ -108,7 +118,15 @@ class GoogleMapsCollector(Collector):
                         page_token = data.get("nextPageToken")
                         if not page_token:
                             break
+                    if query_ok:
+                        ok_queries += 1
                     ctx.inc_progress(1)
+            # API key 全程失效时不能「completed 0 产出」假成功（对齐 job_posting/osm）
+            if keywords and cities and ok_queries == 0:
+                raise BusinessError(
+                    code=50001,
+                    message="全部查询失败（检查 GOOGLE_MAPS_API_KEY 是否有效/配额是否耗尽）",
+                )
 
 
 def _to_draft(place: dict[str, Any], phone: str | None, country: str, keyword: str, city: str):

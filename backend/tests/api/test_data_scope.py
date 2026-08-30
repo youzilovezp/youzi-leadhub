@@ -103,7 +103,7 @@ async def test_followup_cannot_reassign_without_perm(client: AsyncClient, admin_
     """普通销售不能用 follow-up 把线索 owner 改派给他人（需 assign:lead）。"""
     admin = {"Authorization": f"Bearer {(await client.post('/api/v1/auth/login', json=admin_credentials)).json()['data']['access_token']}"}
     a = await _make_scoped_sales(client, admin, "scope-c")
-    b = await _make_scoped_sales(client, admin, "scope-d")
+    await _make_scoped_sales(client, admin, "scope-d")
 
     lead = await _create_manual_lead(client, admin, "ScopeAssign Co")
     # a 先认领

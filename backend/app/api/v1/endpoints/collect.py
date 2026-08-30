@@ -12,8 +12,9 @@ import io
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query, Response
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, Query
+from fastapi.responses import StreamingResponse
+from sqlalchemy import select, tuple_
 
 from app.api.deps import CurrentUser, SessionDep, SuperUser
 from app.api.perms import lead_visible, require_permission, scope_filter_params
@@ -252,105 +253,124 @@ async def export_leads(
         if include_unassigned:
             visible = or_(Lead.owner_id.is_(None), visible)
         conds.append(visible)
-    stmt = select(Lead)
+    stmt_base = select(Lead)
     for cond in conds:
-        stmt = stmt.where(cond)
-    items = list(
-        (
-            await db.execute(
-                stmt.order_by(Lead.score.desc(), Lead.id.desc()).limit(limit)
-            )
-        )
-        .scalars()
-        .all()
-    )
+        stmt_base = stmt_base.where(cond)
 
-    name_map = await _user_display_map(db, {i.owner_id for i in items})
-    # 联系人明细（批量）：lead_id → "姓名(职位)/邮箱" 串
-    contact_lines: dict[int, str] = {}
-    if items:
-        rows = (
-            await db.execute(
-                select(LeadContact).where(LeadContact.lead_id.in_([i.id for i in items]))
-            )
-        )
-        grouped: dict[int, list[str]] = {}
-        for c in rows.scalars():
-            label = c.name or c.email or "未命名"
-            if c.job_title:
-                label = f"{label}({c.job_title})"
-            if c.email and c.email != label:
-                label = f"{label}/{c.email}"
-            grouped.setdefault(c.lead_id, []).append(label)
-        contact_lines = {k: "; ".join(v) for k, v in grouped.items()}
+    async def _fetch_chunk(last_key: tuple[int, int] | None, size: int) -> list[Lead]:
+        """按 (score, id) 键集分页取数——流式导出不在内存物化全量。"""
+        stmt = stmt_base
+        if last_key is not None:
+            stmt = stmt.where(tuple_(Lead.score, Lead.id) < last_key)
+        stmt = stmt.order_by(Lead.score.desc(), Lead.id.desc()).limit(size)
+        return list((await db.execute(stmt)).scalars().all())
 
-    def _cell(lead: Lead, key: str) -> str:
-        value: Any
-        if key.startswith("dim_"):
-            value = describe_dimensions(lead.score_signals).get(key[4:], "")
-        elif key == "contacts_count":
-            value = len(contact_lines.get(lead.id, "").split("; ")) if contact_lines.get(lead.id) else 0
-        elif key == "contacts_summary":
-            value = contact_lines.get(lead.id, "")
-        elif key == "recommended_products":
-            value = "; ".join(
-                r["name"]
-                for r in recommend_products(
-                    whatsapp_hit=lead.whatsapp_hit,
-                    whatsapp_url=lead.whatsapp_url,
-                    whatsapp_job=lead.whatsapp_job,
-                    scenes=lead.scenes,
-                    saas_signals=lead.saas_signals,
-                    industry=lead.industry,
-                    dim_saas=describe_dimensions(lead.score_signals).get("saas", 0),
+    def _cell_factory(name_map: dict, contact_lines: dict):
+        def _cell(lead: Lead, key: str) -> str:
+            value: Any
+            if key.startswith("dim_"):
+                value = describe_dimensions(lead.score_signals).get(key[4:], "")
+            elif key == "contacts_count":
+                value = len(contact_lines.get(lead.id, "").split("; ")) if contact_lines.get(lead.id) else 0
+            elif key == "contacts_summary":
+                value = contact_lines.get(lead.id, "")
+            elif key == "recommended_products":
+                value = "; ".join(
+                    r["name"]
+                    for r in recommend_products(
+                        whatsapp_hit=lead.whatsapp_hit,
+                        whatsapp_url=lead.whatsapp_url,
+                        whatsapp_job=lead.whatsapp_job,
+                        scenes=lead.scenes,
+                        saas_signals=lead.saas_signals,
+                        industry=lead.industry,
+                        dim_saas=describe_dimensions(lead.score_signals).get("saas", 0),
+                    )
                 )
-            )
-        elif key == "owner_name":
-            value = name_map.get(lead.owner_id, "")
-        elif key == "scenes":
-            value = "; ".join(SCENE_LABELS_ZH.get(s, s) for s in (lead.scenes or []))
-        elif key == "saas_signals":
-            value = "; ".join(
-                f"{SAAS_LABELS_ZH.get(k, k)}×{v}" for k, v in (lead.saas_signals or {}).items()
-            )
-        elif key == "sources":
-            value = "; ".join(r.get("source", "") for r in (lead.sources or []))
-        elif key == "social":
-            value = "; ".join(f"{k}:{v}" for k, v in (lead.social or {}).items())
-        elif key == "job_urls":
-            value = "; ".join(lead.job_urls or [])
-        elif key == "whatsapp_numbers":
-            value = "; ".join((lead.whatsapp_numbers or [])[:8])
-        elif key == "need_types":
-            value = "; ".join(
-                n["label"]
-                for n in detect_need_types(
-                    whatsapp_hit=lead.whatsapp_hit,
-                    whatsapp_url=lead.whatsapp_url,
-                    whatsapp_numbers=lead.whatsapp_numbers,
-                    whatsapp_job=lead.whatsapp_job,
-                    scenes=lead.scenes,
-                    saas_signals=lead.saas_signals,
-                    sources=lead.sources,
+            elif key == "owner_name":
+                value = name_map.get(lead.owner_id, "")
+            elif key == "scenes":
+                value = "; ".join(SCENE_LABELS_ZH.get(s, s) for s in (lead.scenes or []))
+            elif key == "saas_signals":
+                value = "; ".join(
+                    f"{SAAS_LABELS_ZH.get(k, k)}×{v}" for k, v in (lead.saas_signals or {}).items()
                 )
-            )
-        elif isinstance(getattr(lead, key, None), bool):
-            value = "是" if getattr(lead, key) else "否"
-        else:
-            value = getattr(lead, key, "")
-        if value is None:
-            return ""
-        return str(value)
+            elif key == "sources":
+                value = "; ".join(r.get("source", "") for r in (lead.sources or []))
+            elif key == "social":
+                value = "; ".join(f"{k}:{v}" for k, v in (lead.social or {}).items())
+            elif key == "job_urls":
+                value = "; ".join(lead.job_urls or [])
+            elif key == "whatsapp_numbers":
+                value = "; ".join((lead.whatsapp_numbers or [])[:8])
+            elif key == "need_types":
+                value = "; ".join(
+                    n["label"]
+                    for n in detect_need_types(
+                        whatsapp_hit=lead.whatsapp_hit,
+                        whatsapp_url=lead.whatsapp_url,
+                        whatsapp_numbers=lead.whatsapp_numbers,
+                        whatsapp_job=lead.whatsapp_job,
+                        scenes=lead.scenes,
+                        saas_signals=lead.saas_signals,
+                        sources=lead.sources,
+                    )
+                )
+            elif isinstance(getattr(lead, key, None), bool):
+                value = "是" if getattr(lead, key) else "否"
+            else:
+                value = getattr(lead, key, "")
+            if value is None:
+                return ""
+            return str(value)
+        return _cell
 
-    buf = io.StringIO()
-    writer = csv.writer(buf)
     selected_set = set(selected)
-    writer.writerow([label for k, label in EXPORT_FIELDS if k in selected_set])
-    for lead in items:
-        writer.writerow([_cell(lead, k) for k in selected])
+
+    async def _csv_chunks():
+        """分批（1000 行/批）产出 CSV 字节流：单请求内存峰值 = 一批，不再是全量。"""
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow([label for k, label in EXPORT_FIELDS if k in selected_set])
+        yield b"\xef\xbb\xbf" + buf.getvalue().encode("utf-8")
+
+        _cell = None
+        last_key: tuple[int, int] | None = None
+        exported = 0
+        while exported < limit:
+            size = min(1000, limit - exported)
+            chunk = await _fetch_chunk(last_key, size)
+            if not chunk:
+                break
+            name_map = await _user_display_map(db, {i.owner_id for i in chunk})
+            contact_lines: dict[int, str] = {}
+            rows = (
+                await db.execute(
+                    select(LeadContact).where(LeadContact.lead_id.in_([i.id for i in chunk]))
+                )
+            )
+            grouped: dict[int, list[str]] = {}
+            for c in rows.scalars():
+                label = c.name or c.email or "未命名"
+                if c.job_title:
+                    label = f"{label}({c.job_title})"
+                if c.email and c.email != label:
+                    label = f"{label}/{c.email}"
+                grouped.setdefault(c.lead_id, []).append(label)
+            contact_lines = {k: "; ".join(v) for k, v in grouped.items()}
+            _cell = _cell_factory(name_map, contact_lines)
+
+            buf = io.StringIO()
+            writer = csv.writer(buf)
+            for lead in chunk:
+                writer.writerow([_cell(lead, k) for k in selected])
+            yield buf.getvalue().encode("utf-8")
+            exported += len(chunk)
+            last_key = (chunk[-1].score, chunk[-1].id)
+
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    return Response(
-        content=b"\xef\xbb\xbf" + buf.getvalue().encode("utf-8"),
+    return StreamingResponse(
+        _csv_chunks(),
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="leads_{ts}.csv"'},
     )
