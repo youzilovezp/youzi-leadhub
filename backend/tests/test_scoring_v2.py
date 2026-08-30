@@ -58,39 +58,49 @@ def test_default_weights_sum_to_100():
 
 
 def test_flagship_icp_profile():
-    """旗舰 ICP（meta_ads 全证据）：64/A；+CRM 信号 68/A；+决策联系人+更多岗位 82/S。"""
+    """旗舰 ICP（中国出海跨境电商全证据）：63/A；+CRM 信号 68/A；+决策联系人+更多岗位 81/S。
+
+    2026-08-31 口径修正后：is_cn 不再进出海维（资格由 ICP 二重门承担），
+    出海维=出海深度（FB私域30+官网10+≥3国10+信号类×7）。
+    """
     base: dict = dict(  # noqa: C408 - kwargs 语义直观
         is_cn=True,
         fb_whatsapp=True,
-        country="MY",
+        country="CN",
         website="https://acme.com",
         whatsapp_hit=True,
-        whatsapp_url="https://wa.me/60123456789",
+        whatsapp_url="https://wa.me/8613800138000",
         whatsapp_job=True,
         scenes=["customer_service"],
         social={"facebook": "f", "instagram": "i"},
         email="x@acme.com",
-        phone_e164="+60123456789",
-        sources=[{"source": "meta_ads"}, {"source": "google_maps"}],
+        phone_e164="+8613800138000",
+        sources=[{"source": "meta_ads"}, {"source": "web_search"}],
+        target_countries=["US", "GB", "AE"],
+        overseas_signals={
+            "currencies": ["USD"], "languages": ["EN"], "ecommerce": ["shopify"],
+            "markets": ["USA"], "shipping": ["worldwide"],
+        },
     )
     score, dims, grade = score_lead_inputs(**base)
-    assert (score, grade) == (67, "A")
-    assert dims == {"overseas": 100, "whatsapp": 100, "saas": 0, "scale": 50, "marketing": 65, "contact": 10}
+    assert (score, grade) == (63, "A")
+    assert dims == {"overseas": 85, "whatsapp": 100, "saas": 0, "scale": 50, "marketing": 65, "contact": 10}
 
-    # + CRM 信号 → SaaS 维 22 → 总分 67+4.4 → 71
+    # + CRM 信号 → SaaS 维 22 → 总分 63+4.4 → 68
     score, _, grade = score_lead_inputs(**base, saas_signals={"crm": 1})
-    assert (score, grade) == (71, "A")
+    assert (score, grade) == (68, "A")
 
-    # + helpdesk + tier1 联系人 + 4 个在招岗位 + 第三个来源 → 85/S
+    # + helpdesk + tier1 联系人 + 4 个在招岗位 + 第三个来源 → 81/S
+    # （SaaS 维 crm22+helpdesk22=44，未带 saas 场景）
     score, dims, grade = score_lead_inputs(
-        **{**base, "sources": [{"source": "meta_ads"}, {"source": "google_maps"},
+        **{**base, "sources": [{"source": "meta_ads"}, {"source": "web_search"},
                                {"source": "job_posting"}]},
         saas_signals={"crm": 1, "helpdesk": 1},
         job_urls=["j1", "j2", "j3", "j4"],
         contacts_count=1,
         has_tier1=True,
     )
-    assert (score, grade) == (85, "S")
+    assert (score, grade) == (81, "S")
     assert dims["scale"] == 100 and dims["marketing"] == 75 and dims["contact"] == 70
 
 

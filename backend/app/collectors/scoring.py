@@ -123,7 +123,9 @@ def bonus_breakdown(
     saas_keys = set(saas_signals or {})
     source_names = {r.get("source") for r in (sources or []) if r.get("source")}
     overseas_signals = overseas_signals or {}
-    tc_count = len({c.upper() for c in (target_countries or []) if c})
+    # 投放/提及国家合并计数（meta_ads target_countries + 官网 markets 提及）
+    bonus_market_set = {c.upper() for c in (target_countries or []) if c}
+    bonus_market_set |= {m.upper() for m in overseas_signals.get("markets", []) if m}
     social = social or {}
 
     matched: dict[str, bool] = {
@@ -138,7 +140,7 @@ def bonus_breakdown(
         "multi_numbers": len(whatsapp_numbers or []) >= 2,
         "overseas_site": bool(overseas_signals.get("languages")) or bool(overseas_signals.get("ecommerce")),
         "crm_job": "crm_ops" in job_keys,
-        "three_markets": tc_count >= 3,
+        "three_markets": len(bonus_market_set) >= 3,
         "social_active": len(social) >= 3,
     }
     items = [
@@ -152,7 +154,7 @@ def bonus_breakdown(
 
 def score_lead_inputs(
     *,
-    is_cn: bool = False,
+    is_cn: bool = False,  # noqa: ARG001 — 保留参数兼容旧迁移回填；资格判定已移交 ICP 门
     fb_whatsapp: bool = False,
     country: str | None = None,
     website: str | None = None,
@@ -192,7 +194,6 @@ def score_lead_inputs(
     job_urls = job_urls or []
     source_names = {r.get("source") for r in (sources or []) if r.get("source")}
     target_regions = {r.upper() for r in settings.TARGET_REGIONS}
-    tc_count = len({c.upper() for c in (target_countries or []) if c})
     ov_kinds = len(overseas_signals or {})
     job_sig_points = sum(
         int(v.get("points", 0))
@@ -200,27 +201,29 @@ def score_lead_inputs(
         if isinstance(v, dict)
     )
 
-    # D1 出海度：中国出海特征是最强证据，FB 私域/目标地区/官网次之；
-    # §4.2 规则：投放/提及 ≥3 国 +10；出海信号每命中一类 +4（最多 +20）
+    # D1 出海度（2026-08-31 口径修正）：中国资格由 ICP 二重门承担（collectors/icp.py），
+    # 维度内只量出海深度——FB 私域最强证据；投放/提及 ≥3 国 +10（官网 markets
+    # 提及与 meta_ads 投放国家合并计数）；出海信号每命中一类 +7（最多 +35）
+    market_set = {c.upper() for c in (target_countries or []) if c}
+    market_set |= {m.upper() for m in (overseas_signals or {}).get("markets", []) if m}
     overseas = (
-        (45 if is_cn else 0)
-        + (30 if fb_whatsapp else 0)
+        (30 if fb_whatsapp else 0)
         + (15 if country and country.upper() in target_regions else 0)
         + (10 if website else 0)
-        + (10 if tc_count >= 3 else 0)
-        + min(20, ov_kinds * 4)
+        + (10 if len(market_set) >= 3 else 0)
+        + min(35, ov_kinds * 7)
     )
 
     # D2 WhatsApp 意向强度（补充需求 §4.1：CTWA/私域是黄金意向信号，权重最高）
-    # §4.3 招聘细分：wa_ops（WhatsApp 运营/客服）是强意向岗位，在 whatsapp_job
-    # 基础分上按信号分值折半增强（+30×0.5=+15 封顶），其余岗位信号进规模维
+    # §4.3 招聘细分：只有 wa_ops（WhatsApp 运营/客服岗位）进 WhatsApp 维——
+    # whatsapp_job 与 wa_ops 是同一事实（job_posting 按标题分类置位），只计一次；
+    # 其余招聘信号（海外客服/CRM/海外销售）走规模维，不混入 WhatsApp 维
     wa_number_count = len(whatsapp_numbers or [])
     whatsapp = (
         (25 if fb_whatsapp else 0)  # FB 主页 wa.me（CTWA 代理信号）——意向最强
         + (35 if whatsapp_hit else 0)
         + (15 if whatsapp_url else 0)
-        + (15 if whatsapp_job else 0)
-        + (15 if "wa_ops" in (job_signals or {}) else 0)
+        + (15 if whatsapp_job else 0)  # 在招 WhatsApp 运营/客服岗（= wa_ops）
         + (15 if wa_business else 0)  # WhatsApp Business 业务号（§4.1 +15~20）
         + (10 if wa_number_count >= 2 else 0)  # 多分线 = 已规模化使用
         + (10 if "customer_service" in scene_set else 0)
