@@ -257,8 +257,11 @@ async def search_leads(
     whatsapp_hit: bool | None = None,
     has_website: bool | None = None,
     keyword: str | None = None,
+    follow_status: str | None = None,
+    owner_id: int | None = None,
+    due_follow: bool | None = None,
 ) -> tuple[list[Lead], int]:
-    """线索列表筛选：国家/行业/来源/评分下限/WhatsApp 检测/关键词。"""
+    """线索列表筛选：国家/行业/来源/评分下限/WhatsApp 检测/关键词/跟进维度。"""
     from sqlalchemy import func, or_
 
     stmt = select(Lead)
@@ -270,6 +273,17 @@ async def search_leads(
         conds.append(Lead.industry == industry)
     if min_score is not None:
         conds.append(Lead.score >= min_score)
+    if follow_status:
+        if follow_status == "pending":
+            # 「待跟进」= 显式置为 pending + 从未跟进（NULL）的共享池线索
+            conds.append((Lead.follow_status.is_(None)) | (Lead.follow_status == "pending"))
+        else:
+            conds.append(Lead.follow_status == follow_status)
+    if owner_id is not None:
+        conds.append(Lead.owner_id == owner_id)
+    if due_follow:
+        # 该回访了：约定了下次跟进时间且已到期
+        conds.append(Lead.next_follow_at.is_not(None) & (Lead.next_follow_at <= func.now()))
     if whatsapp_hit is not None:
         conds.append(Lead.whatsapp_hit.is_(whatsapp_hit))
     if has_website is not None:

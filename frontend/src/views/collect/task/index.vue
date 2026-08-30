@@ -5,10 +5,12 @@ import { NButton, NIcon, NProgress, NTag, NTooltip, type DataTableColumns } from
 import { HelpCircleOutline } from '@vicons/ionicons5'
 import * as collectApi from '@/api/collect'
 import type { CollectTask, CollectorInfo, CollectorParam, GeoOptions } from '@/api/collect'
+import { useUserStore } from '@/stores/user'
 import { formatTime } from '@/utils/format'
 import { message, confirm } from '@/utils/feedback'
 
 const router = useRouter()
+const userStore = useUserStore()
 const loading = ref(false)
 const tableData = ref<CollectTask[]>([])
 const total = ref(0)
@@ -219,6 +221,15 @@ const columns: DataTableColumns<CollectTask> = [
     },
   },
   {
+    title: '操作人',
+    key: 'created_by_name',
+    width: 100,
+    render: (row) =>
+      row.created_by_name
+        ? h('span', null, row.created_by_name)
+        : h('span', { style: 'color:#c2c5cc' }, '—'),
+  },
+  {
     title: '定时',
     key: 'cron_expr',
     width: 100,
@@ -290,18 +301,21 @@ const columns: DataTableColumns<CollectTask> = [
           { default: () => '详情' }
         ),
       ]
-      if (['pending', 'queued', 'running'].includes(row.status)) {
+      // 建任务/执行/取消/删除是管理员操作，销售只读（看进度）
+      if (userStore.isSuperuser) {
+        if (['pending', 'queued', 'running'].includes(row.status)) {
+          buttons.push(
+            h(NButton, { size: 'small', quaternary: true, type: 'warning', onClick: () => handleCancel(row) }, { default: () => '取消' })
+          )
+        } else {
+          buttons.push(
+            h(NButton, { size: 'small', quaternary: true, type: 'primary', onClick: () => handleRun(row) }, { default: () => '执行' })
+          )
+        }
         buttons.push(
-          h(NButton, { size: 'small', quaternary: true, type: 'warning', onClick: () => handleCancel(row) }, { default: () => '取消' })
-        )
-      } else {
-        buttons.push(
-          h(NButton, { size: 'small', quaternary: true, type: 'primary', onClick: () => handleRun(row) }, { default: () => '执行' })
+          h(NButton, { size: 'small', quaternary: true, type: 'error', onClick: () => handleDelete(row) }, { default: () => '删除' })
         )
       }
-      buttons.push(
-        h(NButton, { size: 'small', quaternary: true, type: 'error', onClick: () => handleDelete(row) }, { default: () => '删除' })
-      )
       return buttons
     },
   },
@@ -343,13 +357,13 @@ onUnmounted(() => {
         <n-select v-model:value="query.status" :options="statusOptions" placeholder="状态" clearable style="width: 120px" />
         <n-button type="primary" secondary @click="() => { query.page = 1; fetchData() }">查询</n-button>
         <div class="flex-1" />
-        <n-button type="primary" @click="openCreate">新建任务</n-button>
+        <n-button v-if="userStore.isSuperuser" type="primary" @click="openCreate">新建任务</n-button>
       </div>
     </n-card>
 
     <n-data-table
       remote
-      :scroll-x="1350"
+      :scroll-x="1450"
       :columns="columns"
       :data="tableData"
       :loading="loading"

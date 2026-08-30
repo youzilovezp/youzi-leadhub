@@ -1,18 +1,30 @@
-"""线索采集接口：线索列表/录入/删除/批量检测 WhatsApp + 任务管理。"""
+"""线索采集接口：线索列表/录入/删除/批量检测 WhatsApp + 跟进 + 任务管理。
+
+权限：线索与跟进对所有登录用户开放（销售工作台）；
+任务管控（建/改/删/执行/取消）与删线索仅管理员。
+"""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Query
+from datetime import datetime, timezone
 
-from app.api.deps import SessionDep, SuperUser
+from fastapi import APIRouter, Query
+from sqlalchemy import select
+
+from app.api.deps import CurrentUser, SessionDep, SuperUser
 from app.collectors import list_collectors
 from app.core.exceptions import BusinessError, NotFoundError
 from app.crud.lead import search_leads, upsert_lead
 from app.crud.task_crud import list_tasks as query_tasks
 from app.crud.task_crud import task_crud
 from app.models.collect_task import CollectTask, CollectTaskLog
+from app.models.lead import Lead, LeadFollowUp
+from app.models.user import User
 from app.schemas.collect import (
+    FOLLOW_STATUS_OPTIONS,
     CollectorInfo,
+    FollowUpCreate,
+    FollowUpOut,
     LeadCheckWhatsAppRequest,
     LeadCreate,
     LeadOut,
@@ -28,13 +40,24 @@ from app.services.task_runner import task_runner
 router = APIRouter()
 
 
+async def _user_display_map(db: SessionDep, user_ids: set[int | None]) -> dict[int | None, str]:
+    """批量取用户展示名（昵称优先）——列表页注入 owner_name / created_by_name，避免 N+1。"""
+    ids = {i for i in user_ids if i}
+    if not ids:
+        return {}
+    rows = (
+        await db.execute(select(User.id, User.nickname, User.username).where(User.id.in_(ids)))
+    ).all()
+    return {r.id: (r.nickname or r.username) for r in rows}
+
+
 # ---------- 线索 ----------
 
 
 @router.get("/leads", response_model=ResponseModel[PageResponse[LeadOut]], summary="线索列表")
 async def list_leads(
     db: SessionDep,
-    _user: SuperUser,
+    _user: CurrentUser,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=200),
     country: str | None = None,
@@ -44,6 +67,9 @@ async def list_leads(
     whatsapp_hit: bool | None = None,
     has_website: bool | None = None,
     keyword: str | None = None,
+    follow_status: str | None = None,
+    owner_id: int | None = Query(default=None, ge=1),
+    due_follow: bool | None = None,
 ):
     items, total = await search_leads(
         db,
@@ -56,10 +82,19 @@ async def list_leads(
         whatsapp_hit=whatsapp_hit,
         has_website=has_website,
         keyword=keyword,
+        follow_status=follow_status,
+        owner_id=owner_id,
+        due_follow=due_follow,
     )
+    name_map = await _user_display_map(db, {i.owner_id for i in items})
+    outs = []
+    for i in items:
+        o = LeadOut.model_validate(i)
+        o.owner_name = name_map.get(i.owner_id)
+        outs.append(o)
     return ResponseModel(
         data=PageResponse[LeadOut](
-            items=[LeadOut.model_validate(i) for i in items],
+            items=outs,
             total=total,
             page=page,
             page_size=page_size,
@@ -68,7 +103,7 @@ async def list_leads(
 
 
 @router.post("/leads", response_model=ResponseModel[LeadOut], summary="手工录入线索")
-async def create_lead(db: SessionDep, _user: SuperUser, payload: LeadCreate):
+async def create_lead(db: SessionDep, _user: CurrentUser, payload: LeadCreate):
     from app.collectors.base import LeadDraft
 
     draft = LeadDraft(
@@ -92,8 +127,6 @@ async def create_lead(db: SessionDep, _user: SuperUser, payload: LeadCreate):
 
 @router.delete("/leads/{lead_id}", response_model=ResponseModel[None], summary="删除线索")
 async def delete_lead(db: SessionDep, _user: SuperUser, lead_id: int):
-    from app.models.lead import Lead
-
     lead = await db.get(Lead, lead_id)
     if lead is None:
         raise NotFoundError("线索不存在")
@@ -107,7 +140,7 @@ async def delete_lead(db: SessionDep, _user: SuperUser, lead_id: int):
     response_model=ResponseModel[TaskOut],
     summary="勾选线索 → 创建隐式 website_enrich 任务（复用进度/取消/闸门）",
 )
-async def check_whatsapp(db: SessionDep, _user: SuperUser, payload: LeadCheckWhatsAppRequest):
+async def check_whatsapp(db: SessionDep, user: CurrentUser, payload: LeadCheckWhatsAppRequest):
     task = await task_crud.create(
         db,
         TaskCreate(
@@ -115,7 +148,7 @@ async def check_whatsapp(db: SessionDep, _user: SuperUser, payload: LeadCheckWha
             name=f"手动检测 WhatsApp - 选中 {len(payload.lead_ids)} 条",
             params={"lead_ids": payload.lead_ids},
         ).model_dump()
-        | {"is_implicit": True},
+        | {"is_implicit": True, "created_by": user.id},
     )
     await db.commit()
     await task_runner.enqueue(task.id)
@@ -123,33 +156,118 @@ async def check_whatsapp(db: SessionDep, _user: SuperUser, payload: LeadCheckWha
     return ResponseModel(data=TaskOut.model_validate(task))
 
 
+# ---------- 跟进（销售工作台） ----------
+
+
+@router.get(
+    "/follow-options",
+    response_model=ResponseModel[dict],
+    summary="跟进弹窗选项（状态词表 + 可选跟进人）",
+)
+async def follow_options(db: SessionDep, _user: CurrentUser):
+    rows = (
+        await db.execute(
+            select(User.id, User.nickname, User.username)
+            .where(User.is_active)
+            .order_by(User.id)
+        )
+    ).all()
+    return ResponseModel(
+        data={
+            "statuses": FOLLOW_STATUS_OPTIONS,
+            "users": [{"value": r.id, "label": r.nickname or r.username} for r in rows],
+        }
+    )
+
+
+@router.post(
+    "/leads/{lead_id}/follow-up",
+    response_model=ResponseModel[LeadOut],
+    summary="记录跟进：更新线索跟进人/状态/时间并写一条历史",
+)
+async def create_follow_up(
+    db: SessionDep, user: CurrentUser, lead_id: int, payload: FollowUpCreate
+):
+    lead = await db.get(Lead, lead_id)
+    if lead is None:
+        raise NotFoundError("线索不存在")
+
+    # 指派了跟进人时校验存在（FK 兜底，避免 commit 才炸 IntegrityError）
+    owner_id = payload.owner_id or user.id
+    if owner_id != user.id and await db.get(User, owner_id) is None:
+        raise BusinessError(code=40001, message=f"跟进人不存在：{owner_id}")
+
+    db.add(
+        LeadFollowUp(
+            lead_id=lead.id,
+            user_id=user.id,
+            status=payload.status,
+            note=payload.note,
+            next_follow_at=payload.next_follow_at,
+        )
+    )
+    lead.owner_id = owner_id
+    lead.follow_status = payload.status
+    lead.last_followed_at = datetime.now(timezone.utc)
+    lead.next_follow_at = payload.next_follow_at
+    await db.commit()
+    await db.refresh(lead)
+
+    out = LeadOut.model_validate(lead)
+    out.owner_name = (await _user_display_map(db, {owner_id})).get(owner_id)
+    return ResponseModel(data=out)
+
+
+@router.get(
+    "/leads/{lead_id}/follow-ups",
+    response_model=ResponseModel[list[FollowUpOut]],
+    summary="跟进历史（弹窗时间线，最近 50 条）",
+)
+async def list_follow_ups(db: SessionDep, _user: CurrentUser, lead_id: int):
+    if await db.get(Lead, lead_id) is None:
+        raise NotFoundError("线索不存在")
+    stmt = (
+        select(LeadFollowUp)
+        .where(LeadFollowUp.lead_id == lead_id)
+        .order_by(LeadFollowUp.id.desc())
+        .limit(50)
+    )
+    items = list((await db.execute(stmt)).scalars().all())
+    name_map = await _user_display_map(db, {x.user_id for x in items})
+    outs = []
+    for x in items:
+        o = FollowUpOut.model_validate(x)
+        o.user_name = name_map.get(x.user_id)
+        outs.append(o)
+    return ResponseModel(data=outs)
+
+
 # ---------- 任务 ----------
 
 
 @router.get("/collectors", response_model=ResponseModel[list[CollectorInfo]], summary="采集器列表")
-async def get_collectors(_user: SuperUser):
+async def get_collectors(_user: CurrentUser):
     return ResponseModel(data=[CollectorInfo(**c) for c in list_collectors()])
 
 
 @router.get("/geo-options", response_model=ResponseModel[dict], summary="国家/城市选项（表单联动数据源）")
-async def get_geo_options(_user: SuperUser):
+async def get_geo_options(_user: CurrentUser):
     from app.collectors.base import CITY_OPTIONS_BY_COUNTRY, COUNTRY_OPTIONS
 
     return ResponseModel(data={"countries": COUNTRY_OPTIONS, "cities_by_country": CITY_OPTIONS_BY_COUNTRY})
 
 
 @router.get("/industries", response_model=ResponseModel[list[dict]], summary="线索行业选项（库存 distinct，筛选数据源）")
-async def lead_industries(db: SessionDep, _user: SuperUser):
+async def lead_industries(db: SessionDep, _user: CurrentUser):
     """行业筛选下拉的数据源：直接取库里实际存在的 industry 值。
 
     不用预设词表——google_maps 存关键词、OSM 存标签值、手工录入任意填，
     distinct 才能保证「选项里有的就能查到」。label 是中文展示名
     （OSM 词表映射，未收录原样显示），value 保持原 token 保证筛选精确。
     """
-    from sqlalchemy import func, select
+    from sqlalchemy import func
 
     from app.collectors.osm_overpass import INDUSTRY_LABELS_ZH
-    from app.models.lead import Lead
 
     rows = (
         await db.execute(
@@ -170,7 +288,7 @@ async def lead_industries(db: SessionDep, _user: SuperUser):
 @router.get("/tasks", response_model=ResponseModel[PageResponse[TaskOut]], summary="任务列表")
 async def list_tasks(
     db: SessionDep,
-    _user: SuperUser,
+    _user: CurrentUser,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=200),
     collector: str | None = None,
@@ -179,9 +297,15 @@ async def list_tasks(
     items, total = await query_tasks(
         db, page=page, page_size=page_size, collector=collector, status=status
     )
+    name_map = await _user_display_map(db, {t.created_by for t in items})
+    outs = []
+    for t in items:
+        o = TaskOut.model_validate(t)
+        o.created_by_name = name_map.get(t.created_by)
+        outs.append(o)
     return ResponseModel(
         data=PageResponse[TaskOut](
-            items=[TaskOut.model_validate(t) for t in items],
+            items=outs,
             total=total,
             page=page,
             page_size=page_size,
@@ -190,7 +314,7 @@ async def list_tasks(
 
 
 @router.post("/tasks", response_model=ResponseModel[TaskOut], summary="创建任务")
-async def create_task(db: SessionDep, _user: SuperUser, payload: TaskCreate):
+async def create_task(db: SessionDep, user: SuperUser, payload: TaskCreate):
     from app.collectors import get_collector
 
     collector = get_collector(payload.collector)
@@ -205,6 +329,7 @@ async def create_task(db: SessionDep, _user: SuperUser, payload: TaskCreate):
             "params": payload.params,
             "cron_expr": payload.cron_expr,
             "is_implicit": False,
+            "created_by": user.id,
         },
     )
     await db.commit()
@@ -217,7 +342,7 @@ async def create_task(db: SessionDep, _user: SuperUser, payload: TaskCreate):
 
 
 @router.get("/tasks/{task_id}", response_model=ResponseModel[TaskOut], summary="任务详情")
-async def get_task(db: SessionDep, _user: SuperUser, task_id: int):
+async def get_task(db: SessionDep, _user: CurrentUser, task_id: int):
     task = await task_crud.get(db, task_id)
     if task is None:
         raise NotFoundError("任务不存在")
@@ -286,13 +411,11 @@ async def cancel_task(db: SessionDep, _user: SuperUser, task_id: int):
 )
 async def get_task_logs(
     db: SessionDep,
-    _user: SuperUser,
+    _user: CurrentUser,
     task_id: int,
     after_id: int = Query(default=0, ge=0),
     page_size: int = Query(default=100, ge=1, le=500),
 ):
-    from sqlalchemy import select
-
     stmt = (
         select(CollectTaskLog)
         .where(CollectTaskLog.task_id == task_id, CollectTaskLog.id > after_id)
@@ -312,10 +435,8 @@ async def get_task_logs(
 
 # ---------- 汇总（任务列表页快捷统计，避免前端拼多个请求）----------
 @router.get("/stats", response_model=ResponseModel[dict], summary="采集总览统计")
-async def collect_stats(db: SessionDep, _user: SuperUser):
-    from sqlalchemy import func, select
-
-    from app.models.lead import Lead
+async def collect_stats(db: SessionDep, _user: CurrentUser):
+    from sqlalchemy import func
 
     total = (await db.execute(select(func.count()).select_from(Lead))).scalar_one()
     whatsapp = (
@@ -331,11 +452,24 @@ async def collect_stats(db: SessionDep, _user: SuperUser):
             .where(CollectTask.status.in_(["queued", "running"]))
         )
     ).scalar_one()
+    # 跟进维度：从未跟进的（共享池待认领）+ 约定回访时间已到期的
+    pending_follow = (
+        await db.execute(
+            select(func.count()).select_from(Lead).where(Lead.follow_status.is_(None))
+        )
+    ).scalar_one()
+    due_follow = (
+        await db.execute(
+            select(func.count()).select_from(Lead).where(Lead.next_follow_at <= func.now())
+        )
+    ).scalar_one()
     return ResponseModel(
         data={
             "total_leads": total,
             "whatsapp_leads": whatsapp,
             "high_intent_leads": high_intent,
             "active_tasks": running,
+            "pending_leads": pending_follow,
+            "due_follow_leads": due_follow,
         }
     )
