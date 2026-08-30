@@ -161,16 +161,30 @@ function seniorityTagType(s: string | null): 'success' | 'info' | 'warning' | 'd
   return 'default'
 }
 
+/** 推荐联系人排序（PRD §七）：tier1 > tier2 > tier3 > unknown——仅前端展示排序，不改后端存储顺序 */
+const SENIORITY_ORDER: Record<string, number> = { tier1: 0, tier2: 1, tier3: 2, unknown: 3 }
+
+const sortedContacts = computed<Contact[]>(() =>
+  [...(detail.value?.contacts ?? [])].sort(
+    (a, b) =>
+      (SENIORITY_ORDER[a.seniority ?? 'unknown'] ?? 3) - (SENIORITY_ORDER[b.seniority ?? 'unknown'] ?? 3),
+  ),
+)
+
 const contactColumns: DataTableColumns<Contact> = [
   { title: '姓名', key: 'name', render: (r) => r.name || '—（待补全）' },
   { title: '职位', key: 'job_title', render: (r) => r.job_title || '待补全' },
   {
     title: '层级',
     key: 'seniority',
-    width: 130,
+    width: 170,
     render: (r) =>
       r.seniority
-        ? h(NTag, { size: 'small', type: seniorityTagType(r.seniority) }, () => SENIORITY_LABELS[r.seniority!] ?? r.seniority)
+        ? h('span', { class: 'flex items-center gap-1' }, [
+            h(NTag, { size: 'small', type: seniorityTagType(r.seniority) }, () => SENIORITY_LABELS[r.seniority!] ?? r.seniority),
+            // 决策层优先建联（推荐联系人），行内标注便于销售直读
+            r.seniority === 'tier1' ? h(NTag, { size: 'small', type: 'error' }, () => '推荐') : null,
+          ])
         : h('span', { style: 'color: var(--yz-text-secondary,#999)' }, '未分层'),
   },
   { title: '邮箱', key: 'email', render: (r) => r.email || '—' },
@@ -285,6 +299,8 @@ const oppColumns: DataTableColumns<Opportunity> = [
 const aiLoading = ref(false)
 const aiResult = ref<AiAnalysis | null>(null)
 const scriptLoading = ref(false)
+/** 卡内就地展示的最新话术（生成成功后不再强制跳页） */
+const generatedScript = ref('')
 
 async function runAiAnalysis() {
   aiLoading.value = true
@@ -299,13 +315,32 @@ async function generateScriptToQueue() {
   scriptLoading.value = true
   try {
     const msg = await salesApi.generateMessage(leadId)
+    // 话术就地在卡片内展示（PRD §七：不强制跳页），审核队列入口保留为小按钮
+    generatedScript.value = msg.content
     message.success(
       msg.generated_by === 'llm' ? 'AI 话术已生成并入审核队列' : '模板话术已生成并入审核队列（配置 LLM 后可用 AI）',
     )
-    router.push('/sales/messages')
   } finally {
     scriptLoading.value = false
   }
+}
+
+async function copyScript() {
+  try {
+    await navigator.clipboard.writeText(generatedScript.value)
+    message.success('话术已复制')
+  } catch {
+    message.warning('剪贴板不可用（需 https 环境），请手动选中文本复制')
+  }
+}
+
+// ---------- 加分明细（加分制 MVP 口径，§五） ----------
+
+/** 加分条目配色：分值越大越暖（≥30 红 / 15-29 橙 / <15 灰） */
+function bonusTagType(points: number): 'error' | 'warning' | 'default' {
+  if (points >= 30) return 'error'
+  if (points >= 15) return 'warning'
+  return 'default'
 }
 
 // ---------- 字段级数据质量（§32） ----------
@@ -515,6 +550,42 @@ onMounted(fetchDetail)
               </div>
             </n-card>
 
+            <!-- 加分明细（§五 MVP 口径：信号级可解释，与六维加权总分并存） -->
+            <n-card
+              size="small"
+              title="信号加分（MVP 口径）"
+            >
+              <template #header-extra>
+                <n-tag size="small">
+                  加分制参考分 {{ detail.score_breakdown?.total ?? 0 }}
+                </n-tag>
+              </template>
+              <template v-if="detail.score_breakdown?.items?.length">
+                <div
+                  v-for="item in detail.score_breakdown.items"
+                  :key="item.key"
+                  class="bonus-row"
+                >
+                  <span>{{ item.label }}</span>
+                  <n-tag
+                    size="small"
+                    :type="bonusTagType(item.points)"
+                  >
+                    +{{ item.points }}
+                  </n-tag>
+                </div>
+              </template>
+              <div
+                v-else
+                class="empty-hint"
+              >
+                暂无命中信号（跑一轮富化/采集后产生）
+              </div>
+              <div class="bonus-note">
+                与六维加权总分并存：六维为主分与分级依据，加分制为信号级可解释明细
+              </div>
+            </n-card>
+
             <n-card
               size="small"
               title="基础信息"
@@ -564,6 +635,18 @@ onMounted(fetchDetail)
               size="small"
               title="出海画像"
             >
+              <!-- CTWA 代理信号（FB 主页挂 WhatsApp 按钮 = 有私域转化预算，醒目置顶） -->
+              <div
+                v-if="detail.fb_whatsapp"
+                class="mb-2"
+              >
+                <n-tag
+                  type="error"
+                  size="small"
+                >
+                  🔥 CTWA 代理信号：FB 主页挂 WhatsApp 按钮
+                </n-tag>
+              </div>
               <div class="kv">
                 <span class="k">中国出海</span><span>{{ detail.is_cn ? '✓ 是' : '—' }}</span>
                 <span class="k">主要市场</span>
@@ -610,6 +693,7 @@ onMounted(fetchDetail)
             >
               <div class="kv">
                 <span class="k">已发现</span><span>{{ detail.whatsapp_hit || detail.whatsapp_url ? '✓ 是' : '✗ 否' }}</span>
+                <span class="k">WhatsApp Business</span><span>{{ detail.wa_business ? '✓ 业务号' : '—' }}</span>
                 <span class="k">入口链接</span>
                 <span>
                   <a
@@ -787,6 +871,30 @@ onMounted(fetchDetail)
                   生成话术入审核队列
                 </n-button>
               </div>
+              <!-- 话术就地在卡内展示（PRD §七），不再强制跳审核队列页 -->
+              <div
+                v-if="generatedScript"
+                class="script-block"
+              >
+                <div class="script-text">{{ generatedScript }}</div>
+                <div class="flex items-center gap-2 mt-2">
+                  <n-button
+                    size="tiny"
+                    secondary
+                    @click="copyScript"
+                  >
+                    复制话术
+                  </n-button>
+                  <n-button
+                    size="tiny"
+                    quaternary
+                    type="primary"
+                    @click="router.push('/sales/messages')"
+                  >
+                    查看审核队列
+                  </n-button>
+                </div>
+              </div>
               <template v-if="aiResult">
                 <div class="ai-block">
                   <span class="ai-k">企业概况</span>{{ aiResult.summary }}
@@ -878,7 +986,7 @@ onMounted(fetchDetail)
               </template>
               <n-data-table
                 :columns="contactColumns"
-                :data="detail.contacts"
+                :data="sortedContacts"
                 :row-key="(r: Contact) => r.id"
                 size="small"
                 :scroll-x="760"
@@ -1203,6 +1311,40 @@ onMounted(fetchDetail)
 .signal-value {
   flex: 1;
   min-width: 160px;
+  word-break: break-all;
+}
+
+/* 加分明细行：label 左、+分右（颜色按分值在模板里配） */
+.bonus-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 5px 0;
+  border-bottom: 1px dashed var(--yz-border, #eee);
+  font-size: 13px;
+}
+.bonus-row:last-of-type {
+  border-bottom: none;
+}
+.bonus-note {
+  margin-top: 8px;
+  color: var(--yz-text-secondary, #999);
+  font-size: 12px;
+}
+/* 话术引用块：白底 + 主色左边线，保留换行便于逐句复制 */
+.script-block {
+  margin-top: 4px;
+  padding: 10px 12px;
+  background: var(--yz-bg-card, #fff);
+  border: 1px solid var(--yz-border, #eee);
+  border-left: 3px solid var(--yz-primary, #2080f0);
+  border-radius: 4px;
+}
+.script-text {
+  font-size: 13px;
+  line-height: 1.8;
+  white-space: pre-wrap;
   word-break: break-all;
 }
 

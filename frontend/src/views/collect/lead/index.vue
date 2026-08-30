@@ -246,6 +246,57 @@ async function handleExport() {
   }
 }
 
+// ---------- 种子导入（Seed Pool，PRD §三 模块①） ----------
+const importVisible = ref(false)
+const importSubmitting = ref(false)
+const importCsvText = ref('')
+const importIsCn = ref(true)
+const importFileRef = ref<HTMLInputElement | null>(null)
+/** 与后端 LeadImportPayload.csv_text 上限一致（2MB），超限提前拦截不分发 */
+const IMPORT_MAX_BYTES = 2 * 1024 * 1024
+
+function openImport() {
+  importCsvText.value = ''
+  importIsCn.value = true
+  importVisible.value = true
+}
+
+function triggerImportFile() {
+  importFileRef.value?.click()
+}
+
+async function handleImportFile(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = '' // 清空让同一文件可重复选择
+  if (!file) return
+  if (file.size > IMPORT_MAX_BYTES) {
+    message.warning('文件超过 2MB 上限，请拆分后分批导入')
+    return
+  }
+  importCsvText.value = await file.text()
+}
+
+async function handleImportSubmit() {
+  const text = importCsvText.value.trim()
+  if (!text) {
+    message.warning('请粘贴 CSV 文本或选择 CSV 文件')
+    return
+  }
+  importSubmitting.value = true
+  try {
+    const result = await collectApi.importLeads(text, importIsCn.value)
+    message.success(`导入完成：新建 ${result.created}，合并 ${result.merged}，跳过 ${result.skipped}`)
+    if (result.errors.length) message.warning(result.errors.slice(0, 3).join('；'))
+    importVisible.value = false
+    fetchData()
+    fetchStats()
+    fetchIndustryOptions()
+  } finally {
+    importSubmitting.value = false
+  }
+}
+
 // ---------- 跟进 ----------
 /** 该回访了：约定了下次跟进时间且已到期（后端串无 Z 后缀，须按 UTC 解析） */
 function isDue(row: Lead): boolean {
@@ -877,6 +928,13 @@ onUnmounted(() => {
           导出 CSV
         </n-button>
         <n-button
+          secondary
+          type="success"
+          @click="openImport"
+        >
+          导入种子
+        </n-button>
+        <n-button
           v-if="userStore.isSuperuser"
           secondary
           type="info"
@@ -1113,6 +1171,61 @@ onUnmounted(() => {
       </template>
     </n-modal>
 
+    <!-- 种子导入弹窗：粘贴/选择 CSV → POST /collect/leads/import（去重合并） -->
+    <n-modal
+      v-model:show="importVisible"
+      preset="card"
+      title="导入企业种子（Seed Pool）"
+      style="width: 640px"
+    >
+      <p class="export-hint">
+        首行表头 name,website,phone,country,city,industry（可省略）；每行一家企业，单次上限 2MB。命中去重键（域名/电话/名称）的行会合并到已有线索。
+      </p>
+      <n-input
+        v-model:value="importCsvText"
+        type="textarea"
+        :rows="12"
+        placeholder="首行表头 name,website,phone,country,city,industry；每行一家企业，如：&#10;某某科技有限公司,https://example.com,+8675512345678,CN,深圳,电子商务"
+      />
+      <div class="flex items-center gap-3 import-actions">
+        <n-button
+          size="small"
+          secondary
+          @click="triggerImportFile"
+        >
+          选择 CSV 文件
+        </n-button>
+        <div class="flex items-center gap-2">
+          <n-switch
+            v-model:value="importIsCn"
+            size="small"
+          />
+          <span class="nl-hint">标记为中国出海企业</span>
+        </div>
+      </div>
+      <input
+        ref="importFileRef"
+        type="file"
+        accept=".csv,text/csv"
+        style="display: none"
+        @change="handleImportFile"
+      >
+      <template #footer>
+        <div class="flex justify-end gap-3">
+          <n-button @click="importVisible = false">
+            取消
+          </n-button>
+          <n-button
+            type="primary"
+            :loading="importSubmitting"
+            @click="handleImportSubmit"
+          >
+            开始导入
+          </n-button>
+        </div>
+      </template>
+    </n-modal>
+
     <!-- 自动分配（§24，主管操作） -->
     <n-modal
       v-model:show="autoAssignShow"
@@ -1240,5 +1353,8 @@ onUnmounted(() => {
   gap: 6px 10px;
   max-height: 320px;
   overflow-y: auto;
+}
+.import-actions {
+  margin-top: 12px;
 }
 </style>
