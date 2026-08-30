@@ -74,7 +74,10 @@ def parse_jobui_html(html: str, page_url: str) -> list[LeadDraft]:
                 country="CN",
                 city=(city_m.group(1).strip() if city_m else None),
                 is_cn=True,  # 中国招聘站 → 中国企业
-                whatsapp_job=bool(signals),
+                # whatsapp_job 只对 WhatsApp 语义岗位置位（=wa_ops）——语义与
+                # 「在招WA岗位」导出列/评分 WhatsApp 维一致；海外客服/CRM 等
+                # 其他招聘信号走 job_signals → 规模维，不冒充 WhatsApp 意向
+                whatsapp_job="wa_ops" in signals,
                 job_signals=signals,
                 job_urls=[job_url],
             )

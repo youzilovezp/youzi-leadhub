@@ -125,13 +125,15 @@ def test_scoring_overseas_signals_and_ad_count():
         is_cn=True,
         overseas_signals={"currencies": ["USD"], "ecommerce": ["shopify"], "markets": ["US"]},
     )
-    assert ov_dims["overseas"] - base_dims["overseas"] == 3 * 4  # 每类 +4
+    assert ov_dims["overseas"] - base_dims["overseas"] == 3 * 7  # 每类 +7（出海深度口径）
 
+    # 同事实不双计（2026-08-31 修正回归）：whatsapp_job 与 wa_ops 是同一招聘
+    # 事实（job_posting 按标题分类置位），WhatsApp 维只计一次 +15
     _, wa_dims, _ = score_lead_inputs(
         is_cn=True, whatsapp_job=True, job_signals={"wa_ops": {"label": "x", "points": 30}}
     )
     _, plain_dims, _ = score_lead_inputs(is_cn=True, whatsapp_job=True)
-    assert wa_dims["whatsapp"] - plain_dims["whatsapp"] == 15  # wa_ops 额外增强
+    assert wa_dims["whatsapp"] - plain_dims["whatsapp"] == 0
 
     _, ad_dims, _ = score_lead_inputs(is_cn=True, ad_count=6, sources=[{"source": "meta_ads"}])
     assert ad_dims["marketing"] == 55  # 40(meta_ads 来源) + 15(≥5 条广告)

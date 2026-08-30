@@ -81,12 +81,13 @@ def test_score_fb_whatsapp_signal():
         social={"facebook": "https://facebook.com/acme"},
         phone_raw="+8613800138000",
     )
-    # 出海100（CN45+FB私域30+目标区15+官网10） WA75（FB私域25+hit35+url15） 规模30
-    assert dims["overseas"] == 100
+    # 出海55（FB私域30+目标区15+官网10——CN 资格由 ICP 门承担，不进出海维）
+    # WA75（FB私域25+hit35+url15） 规模30
+    assert dims["overseas"] == 55
     assert dims["whatsapp"] == 75
     assert dims["scale"] == 30
-    # (100*25 + 75*30 + 30*10) / 100 = 50.5 → 50
-    assert total == 50 and grade == "B"
+    # (55*25 + 75*30 + 30*10) / 100 = 39.25 → 39
+    assert total == 39 and grade == "C"
 
 
 def test_score_fb_whatsapp_absent_by_default():
@@ -120,10 +121,11 @@ async def test_upsert_meta_ads_draft(db_session):
     assert lead.is_cn and lead.fb_whatsapp
     assert lead.phone_e164 == "+8613800138000"  # wa 号码直接可拨
     assert lead.domain == "anker.com"
-    # V2 六维：出海100 WA75 规模30 营销40 → (2500+2250+300+400)/100 = 54
-    assert lead.score == 54
+    # V2 六维：出海55（CN 资格移交 ICP 门）WA75 规模30 营销40
+    # → (1375+2250+300+400)/100 = 43.25 → 43（B 培育段）
+    assert lead.score == 43
     assert lead.grade == "B"
-    assert lead.score_signals["overseas"] == 100
+    assert lead.score_signals["overseas"] == 55
     assert lead.sources[0]["source"] == "meta_ads"
 
     # 再来一条无信号的同企业（同 domain 反查命中）→ 布尔保持 True，评分不回退
@@ -131,7 +133,7 @@ async def test_upsert_meta_ads_draft(db_session):
     lead2, created2 = await upsert_lead(db_session, d2)
     await db_session.commit()
     assert not created2 and lead2.id == lead.id
-    assert lead2.is_cn and lead2.fb_whatsapp and lead2.score == 54
+    assert lead2.is_cn and lead2.fb_whatsapp and lead2.score == 43
 
 
 # ---------- 失败路径：无 token 直接 failed（不产出空结果假成功） ----------
