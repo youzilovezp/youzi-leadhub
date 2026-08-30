@@ -26,6 +26,16 @@ PERMISSION_CODES: list[str] = [
     "stats:read",
 ]
 
+# PRD §42 角色种子（权限码的唯一样本源；init_db 与迁移 d2b1e98f091f 共同口径）。
+# 超管走 is_superuser 旁路，不依赖角色；admin 角色仍配全量权限以防降级误用。
+ROLE_SEEDS: list[tuple[str, str, list[str]]] = [
+    ("admin", "管理员", list(PERMISSION_CODES)),
+    ("sales_manager", "销售主管", ["lead:read", "lead:write", "assign:lead", "stats:read"]),
+    ("sales", "销售", ["lead:read", "lead:write"]),
+    ("operator", "运营", ["lead:read", "task:manage", "stats:read"]),
+    ("data_admin", "数据管理员", ["lead:read", "stats:read"]),
+]
+
 
 class Role(Base, TimestampMixin):
     __tablename__ = "roles"

@@ -98,11 +98,22 @@ async def client() -> AsyncGenerator[AsyncClient, None]:
 
 @pytest_asyncio.fixture(autouse=True)
 async def _cleanup_after_test() -> AsyncGenerator[None, None]:
-    """每个测试结束：dispose 引擎 + 关 redis，避免连接泄漏到下一个 test 的 loop。"""
+    """每个测试结束：清登录限流/token 黑名单 + dispose 引擎 + 关 redis。
+
+    测试库是全会话共享的单个 SQLite 文件（数据跨测试留存），登录限流与
+    token 黑名单若不清理会污染后续测试（锁定期 60s 内 admin 无法登录）。
+    """
     yield
     try:
-        from app.db.session import engine
+        from sqlalchemy import delete
 
+        from app.db.session import async_session, engine
+        from app.models.user import LoginThrottle, TokenBlacklist
+
+        async with async_session() as s:
+            await s.execute(delete(LoginThrottle))
+            await s.execute(delete(TokenBlacklist))
+            await s.commit()
         await engine.dispose()
         try:
             from app.db.redis_client import redis_client

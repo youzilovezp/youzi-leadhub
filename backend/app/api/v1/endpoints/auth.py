@@ -4,7 +4,8 @@
 - application/json          —— 前端 axios 默认走这个
 - application/x-www-form-urlencoded —— Swagger UI Authorize 用
 
-rate limit / blacklist / audit 都在 auth_service.login 与 logout 中实现。
+暴力破解限流在 auth_service.login（DB 计数 + 指数锁定）；
+token 撤销走 token_blacklist 表（logout 即失效）。
 """
 
 from fastapi import APIRouter, Request
@@ -42,7 +43,9 @@ async def _read_form(request: Request):
 
 @router.post("/login", response_model=ResponseModel[LoginResponse], summary="登录")
 async def login(db: SessionDep, request: Request):
-    """无 Redis 时不做限流；生产建议 ENABLE_REDIS=true 打开限流。"""
+    """登录（失败限流：同用户名+IP 连续 5 次失败锁定，指数退避封顶 1 小时）。"""
+    from app.services.auth_service import _client_ip
+
     content_type = (request.headers.get("content-type") or "").lower()
 
     if content_type.split(";")[0].strip() == "application/json":
@@ -61,7 +64,9 @@ async def login(db: SessionDep, request: Request):
     else:
         raise AuthError("不支持的 Content-Type")
 
-    data = await auth_service.login(db, payload)
+    data = await auth_service.login(
+        db, payload, client_ip=_client_ip(request.headers, request.client.host if request.client else None)
+    )
     return ResponseModel(data=data)
 
 @router.get("/me", response_model=ResponseModel[UserOut], summary="当前用户信息")
@@ -71,10 +76,9 @@ async def me(user: CurrentUser):
 
 @router.post("/logout", response_model=ResponseModel, summary="登出")
 async def logout(user: CurrentUser, request: Request):
-    """把当前 token 的 jti 写入 Redis 黑名单（剩余期内 401）。
+    """把当前 token 的 jti 写入 token_blacklist 表——剩余有效期内该 token 即刻 401。
 
-    无 Redis 或写失败时仍返回成功——本地 state 已清，但服务端 token 撤销未生效。
-    生产必须 ENABLE_REDIS=true。
+    DB 故障等极端情况下撤销可能失败，此时如实提示（不谎报已撤销）。
     """
     from app.core.security import blacklist_token
     token = request.headers.get("authorization", "")

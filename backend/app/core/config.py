@@ -63,7 +63,10 @@ class Settings(BaseSettings):
     # ---------- 服务监听 ----------
     HOST: str = "0.0.0.0"
     PORT: int = 8000
-    WORKERS: int = 4  # K8s / gunicorn 生产 worker 数
+    # 单进程 = API + 采集任务执行器 + 调度器同进程（DB 队列是单进程设计，
+    # WORKERS>1 会禁用任务执行——见 main.py lifespan）。吞吐不足时垂直扩容
+    # （加 CPU/连接池），或拆独立 worker 进程部署后再调大。
+    WORKERS: int = 1
 
     # ---------- 数据库 ----------
     # DB_TYPE: postgresql（默认，make start 复用本机/起 Docker）| sqlite（单文件零配置，适合纯本地体验）
@@ -152,9 +155,7 @@ class Settings(BaseSettings):
     COLLECT_MAX_CONCURRENT: int = 2   # 同时运行的采集任务数（满则排队）
     COLLECT_TASK_TIMEOUT: int = 3600  # 单任务超时（秒）
     ENRICH_CONCURRENCY: int = 5     # 富化并发站点数
-    SCHEDULER_ENABLED: bool = False  # 定时调度总开关（多 worker 只在一个进程开）
-    # 评分权重覆盖（JSON，键名见 collectors/scoring.py）
-    SCORING_WEIGHTS: dict[str, int] = {}
+    SCHEDULER_ENABLED: bool = False  # 定时调度总开关（WORKERS=1 的进程才会启动）
     # 六维评分权重覆盖（JSON，键 overseas/whatsapp/saas/scale/marketing/contact，按和归一化）
     SCORING_DIM_WEIGHTS: dict[str, int] = {}
     # LLM（OpenAI 兼容协议：智谱 GLM / DeepSeek / OpenAI 均可）。未配置时 AI 能力降级为规则模板
@@ -162,9 +163,9 @@ class Settings(BaseSettings):
     LLM_API_KEY: str = ""
     LLM_MODEL: str = "glm-4-flash"
     LLM_TIMEOUT: int = 30  # 单次调用超时（秒）
-    # website_enrich 定时全库扫描的刷新窗口（小时）。PRD §30 官网/WhatsApp 7 天 = 168；
-    # 列表勾选手动检测不受此限制
-    ENRICH_INTERVAL_HOURS: int = 168
+    # C 级线索富化兜底周期（小时）= 分级增量重爬的最低档（PRD §九：S 1 天 /
+    # A 3 天 / B 7 天由代码写死，C 档走此配置）。需求口径 C = 30 天 → 720
+    ENRICH_INTERVAL_HOURS: int = 720
     # 高渗透目标地区（ISO2），逗号分隔或 JSON 数组
     TARGET_REGIONS: Annotated[list[str], BeforeValidator(_parse_cors_origins)] = [
         "MY", "SG", "ID", "TH", "PH", "VN", "AE", "SA", "QA", "KW",

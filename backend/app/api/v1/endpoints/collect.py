@@ -21,7 +21,7 @@ from app.collectors import list_collectors
 from app.collectors.recommend import detect_need_types, recommend_products, sales_suggestion
 from app.collectors.scenes import SAAS_LABELS_ZH, SCENE_LABELS_ZH
 from app.collectors.scoring import effective_dim_weights
-from app.core.exceptions import BusinessError, NotFoundError
+from app.core.exceptions import BusinessError, NotFoundError, PermissionDeniedError
 from app.crud.contact import (
     create_contact,
     delete_contact,
@@ -457,15 +457,14 @@ async def get_lead_detail(db: SessionDep, user: CurrentUser, lead_id: int):
 )
 async def list_lead_events(
     db: SessionDep,
-    _user: CurrentUser,
+    user: CurrentUser,
     lead_id: int,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
 ):
     from sqlalchemy import func
 
-    if await db.get(Lead, lead_id) is None:
-        raise NotFoundError("线索不存在")
+    await _get_visible_lead(db, lead_id, user)
     base = select(LeadEvent).where(LeadEvent.lead_id == lead_id)
     total = (
         await db.execute(select(func.count()).select_from(LeadEvent).where(LeadEvent.lead_id == lead_id))
@@ -494,14 +493,24 @@ async def list_lead_events(
 # ---------- 联系人（销售工作台） ----------
 
 
+async def _get_visible_lead(db: SessionDep, lead_id: int, user: User) -> Lead:
+    """取线索并做数据权限校验（与列表/详情口径一致：受限范围外视为不存在）。"""
+    lead = await db.get(Lead, lead_id)
+    if lead is None:
+        raise NotFoundError("线索不存在")
+    scope_ids, _include = await scope_filter_params(db, user)
+    if not lead_visible(lead.owner_id, scope_ids):
+        raise NotFoundError("线索不存在")
+    return lead
+
+
 @router.get(
     "/leads/{lead_id}/contacts",
     response_model=ResponseModel[list[ContactOut]],
     summary="联系人列表",
 )
-async def list_lead_contacts(db: SessionDep, _user: CurrentUser, lead_id: int):
-    if await db.get(Lead, lead_id) is None:
-        raise NotFoundError("线索不存在")
+async def list_lead_contacts(db: SessionDep, user: CurrentUser, lead_id: int):
+    await _get_visible_lead(db, lead_id, user)
     return ResponseModel(data=[ContactOut.model_validate(c) for c in await list_contacts(db, lead_id)])
 
 
@@ -513,9 +522,7 @@ async def list_lead_contacts(db: SessionDep, _user: CurrentUser, lead_id: int):
 async def create_lead_contact(
     db: SessionDep, user: CurrentUser, lead_id: int, payload: ContactCreate
 ):
-    lead = await db.get(Lead, lead_id)
-    if lead is None:
-        raise NotFoundError("线索不存在")
+    lead = await _get_visible_lead(db, lead_id, user)
     contact = await create_contact(db, lead, payload, created_by=user.id)
     await db.commit()
     await db.refresh(contact)
@@ -530,9 +537,7 @@ async def create_lead_contact(
 async def update_lead_contact(
     db: SessionDep, user: CurrentUser, lead_id: int, contact_id: int, payload: ContactUpdate
 ):
-    lead = await db.get(Lead, lead_id)
-    if lead is None:
-        raise NotFoundError("线索不存在")
+    lead = await _get_visible_lead(db, lead_id, user)
     contact = await get_contact(db, lead_id, contact_id)
     if contact is None:
         raise NotFoundError("联系人不存在")
@@ -548,11 +553,9 @@ async def update_lead_contact(
     summary="删除联系人",
 )
 async def delete_lead_contact(
-    db: SessionDep, _user: CurrentUser, lead_id: int, contact_id: int
+    db: SessionDep, user: CurrentUser, lead_id: int, contact_id: int
 ):
-    lead = await db.get(Lead, lead_id)
-    if lead is None:
-        raise NotFoundError("线索不存在")
+    lead = await _get_visible_lead(db, lead_id, user)
     contact = await get_contact(db, lead_id, contact_id)
     if contact is None:
         raise NotFoundError("联系人不存在")
@@ -710,14 +713,22 @@ async def follow_options(db: SessionDep, _user: CurrentUser):
 async def create_follow_up(
     db: SessionDep, user: CurrentUser, lead_id: int, payload: FollowUpCreate
 ):
-    lead = await db.get(Lead, lead_id)
-    if lead is None:
-        raise NotFoundError("线索不存在")
+    lead = await _get_visible_lead(db, lead_id, user)
 
     # 指派了跟进人时校验存在（FK 兜底，避免 commit 才炸 IntegrityError）
     owner_id = payload.owner_id or user.id
     if owner_id != user.id and await db.get(User, owner_id) is None:
         raise BusinessError(code=40001, message=f"跟进人不存在：{owner_id}")
+
+    # 撞单锁定语义做实：把线索改派给他人需要 assign:lead 权限（主管），
+    # 普通销售只能跟进共享池/自己的线索（owner 落自己）——不能再越权抢改 owner
+    from app.api.perms import user_permission_codes
+
+    has_assign = "assign:lead" in user_permission_codes(user)
+    if owner_id != user.id and not has_assign:
+        raise PermissionDeniedError("只有主管可以指派跟进人（assign:lead）")
+    if lead.owner_id not in (None, user.id) and not has_assign:
+        raise PermissionDeniedError("该线索已由其他销售跟进，不能直接跟进")
 
     db.add(
         LeadFollowUp(
@@ -745,8 +756,8 @@ async def create_follow_up(
     response_model=ResponseModel[list[FollowUpOut]],
     summary="跟进历史（弹窗时间线，最近 50 条）",
 )
-async def list_follow_ups(db: SessionDep, _user: CurrentUser, lead_id: int):
-    if await db.get(Lead, lead_id) is None:
+async def list_follow_ups(db: SessionDep, user: CurrentUser, lead_id: int):
+    if await _get_visible_lead(db, lead_id, user) is None:
         raise NotFoundError("线索不存在")
     stmt = (
         select(LeadFollowUp)

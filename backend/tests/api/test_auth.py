@@ -107,11 +107,9 @@ async def test_me_with_valid_token_returns_user(
 async def test_logout_blacklists_token(
     client: AsyncClient, admin_credentials: dict[str, str]
 ):
-    """logout 行为按模式断言：
+    """logout 把 jti 写入 token_blacklist 表——旧 token 访问 /me 立即 401。
 
-    - Redis 模式：token 真正进黑名单，旧 token 访问 /me 返 401（核心安全机制）
-    - 无 Redis 模式：没有黑名单存储，logout 必须如实提示"撤销未生效"，
-      绝不能谎报"已撤销"（用户以为安全退出了实际没有——这是安全问题）
+    DB 存储的黑名单（无 Redis 依赖），这是登出安全语义的核心断言。
     """
     login_resp = await client.post(
         "/api/v1/auth/login",
@@ -120,42 +118,63 @@ async def test_logout_blacklists_token(
     token = login_resp.json()["data"]["access_token"]
     auth = {"Authorization": f"Bearer {token}"}
 
-    # logout 撤销 token
     logout_resp = await client.post("/api/v1/auth/logout", headers=auth)
     assert logout_resp.status_code == 200
-    msg = logout_resp.json()["message"]
+    assert "已撤销" in logout_resp.json()["message"]
 
-    redis_enabled = False
-    try:
-        from app.core.config import settings
+    # 旧 token 不应再能访问 /me
+    me_resp = await client.get("/api/v1/auth/me", headers=auth)
+    assert me_resp.status_code == 401
+    assert me_resp.json()["code"] == 40100
 
-        redis_enabled = bool(getattr(settings, "REDIS_ENABLED", False))
-    except Exception:
-        redis_enabled = False
+    # 新登录的 token 不受影响（jti 不同）
+    relogin = await client.post("/api/v1/auth/login", json=admin_credentials)
+    new_token = relogin.json()["data"]["access_token"]
+    me2 = await client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {new_token}"})
+    assert me2.status_code == 200
 
-    if redis_enabled:
-        # Redis 配置了但要确认真的可达（不可达时黑名单 fail-open，测不出撤销语义）
-        try:
-            from app.db.redis_client import redis_client
 
-            await redis_client.ping()
-            redis_reachable = True
-        except Exception:
-            redis_reachable = False
-        if not redis_reachable:
-            pytest.skip(
-                "REDIS_HOST 已配置但 Redis 不可达（黑名单 fail-open，无法测撤销）"
-            )
-        # 旧 token 不应再能访问 /me
-        me_resp = await client.get("/api/v1/auth/me", headers=auth)
-        assert me_resp.status_code == 401
-        assert me_resp.json()["code"] == 40100
-        assert "已撤销" in msg
-    else:
-        # 无 Redis：token 仍有效（文档已声明的限制），但提示必须诚实
-        me_resp = await client.get("/api/v1/auth/me", headers=auth)
-        assert me_resp.status_code == 200
-        assert "未生效" in msg, f"无 Redis 模式 logout 不能谎报已撤销：{msg}"
+@pytest.mark.asyncio
+async def test_login_lockout_after_repeated_failures(
+    client: AsyncClient, admin_credentials: dict[str, str]
+):
+    """暴力破解防护：同用户名+IP 连续 5 次失败后锁定，正确密码也被拒。"""
+    # 建独立测试用户（不动 admin——共享测试库里 admin 被锁会殃及后续测试）
+    login_resp = await client.post("/api/v1/auth/login", json=admin_credentials)
+    admin_auth = {"Authorization": f"Bearer {login_resp.json()['data']['access_token']}"}
+    create_resp = await client.post(
+        "/api/v1/users",
+        headers=admin_auth,
+        json={"username": "lockout-target", "password": "RightPass123!", "nickname": "锁定测试"},
+    )
+    assert create_resp.status_code == 200, create_resp.text
+
+    bad = {"username": "lockout-target", "password": "WrongPassword123!"}
+    for _ in range(5):
+        resp = await client.post("/api/v1/auth/login", json=bad)
+        assert resp.status_code == 401
+
+    # 第 6 次：即使密码正确也被锁（锁定期内不消耗 bcrypt、不给枚举信号）
+    ok_resp = await client.post(
+        "/api/v1/auth/login",
+        json={"username": "lockout-target", "password": "RightPass123!"},
+    )
+    assert ok_resp.status_code == 401
+    assert "频繁" in ok_resp.json()["message"]
+
+    # 锁定计数落库（可观测、跨进程）
+    from sqlalchemy import select
+
+    from app.db.session import async_session
+    from app.models.user import LoginThrottle
+
+    async with async_session() as s:
+        rows = (await s.execute(select(LoginThrottle))).scalars().all()
+    keys = {r.throttle_key for r in rows}
+    assert any(k.startswith("u:lockout-target|ip:") for k in keys)
+    assert any(k.startswith("ip:") for k in keys)
+    locked = [r for r in rows if r.throttle_key.startswith("u:lockout-target|ip:")]
+    assert locked and locked[0].locked_until is not None
 
 
 @pytest.mark.asyncio

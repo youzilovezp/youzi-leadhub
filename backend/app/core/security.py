@@ -1,7 +1,9 @@
 """
-安全相关：JWT（pyjwt）+ 密码哈希（bcrypt）+ Redis 黑名单。
+安全相关：JWT（pyjwt）+ 密码哈希（bcrypt）+ DB 黑名单。
 
 从 python-jose 迁移到 PyJWT（pyjwt 维护更活跃，规避 CVE-2024-33663 等已知漏洞）。
+token 撤销用 token_blacklist 表（jti 唯一索引点查）——不引入 Redis 依赖，
+跨进程（多 worker）语义一致。
 """
 
 import secrets
@@ -10,6 +12,7 @@ from typing import Any
 
 import bcrypt
 import jwt
+from sqlalchemy import delete, select
 
 from app.core.config import settings
 
@@ -57,14 +60,68 @@ def decode_token(token: str) -> dict[str, Any]:
 
 
 async def blacklist_token(token: str) -> bool:
-    """无 Redis：没有黑名单存储，实际无法撤销 token。
+    """撤销 token：解析出 jti/exp 写入 token_blacklist 表，剩余有效期内 401。
 
-    返回 False——让 logout 端点如实提示"撤销未生效"，而不是谎报已撤销。
-    生产必须启用 Redis（--with-redis + REDIS_HOST）。
+    - token 已过期/非法 → False（无需撤销，本来就会 401）
+    - jti 已在库 → 幂等成功
+    - 写入时顺带清理已过期行（行量与活跃 token 数同阶，不会膨胀）
     """
-    return False
+    from app.db.session import async_session
+    from app.models.user import TokenBlacklist
+
+    try:
+        payload = decode_token(token)
+    except ValueError:
+        return False
+    jti = payload.get("jti")
+    exp = payload.get("exp")
+    sub = payload.get("sub")
+    if not jti or not isinstance(exp, (int, float)):
+        return False
+    expires_at = datetime.fromtimestamp(exp, tz=timezone.utc)
+    if expires_at <= datetime.now(timezone.utc):
+        return False  # 已过期，撤销无意义
+
+    user_id: int | None = None
+    try:
+        user_id = int(sub) if sub is not None else None
+    except (TypeError, ValueError):
+        user_id = None
+
+    try:
+        async with async_session() as session:
+            # 清理过期行（点查索引扫描，行数有限）
+            await session.execute(
+                delete(TokenBlacklist).where(TokenBlacklist.expires_at <= datetime.now(timezone.utc))
+            )
+            existing = (
+                await session.execute(select(TokenBlacklist.id).where(TokenBlacklist.jti == jti))
+            ).scalar_one_or_none()
+            if existing is None:
+                session.add(
+                    TokenBlacklist(jti=jti, user_id=user_id, expires_at=expires_at)
+                )
+            await session.commit()
+        return True
+    except Exception:  # noqa: BLE001  DB 故障时如实返回未撤销，不阻断登出
+        return False
 
 
 async def is_token_blacklisted(jti: str) -> bool:
-    return False
+    """jti 是否已撤销（每请求一次点查；空 jti 的旧 token 直接放行由 exp 兜底）。"""
+    if not jti:
+        return False
+    from app.db.session import async_session
+    from app.models.user import TokenBlacklist
+
+    async with async_session() as session:
+        row = (
+            await session.execute(
+                select(TokenBlacklist.id).where(
+                    TokenBlacklist.jti == jti,
+                    TokenBlacklist.expires_at > datetime.now(timezone.utc),
+                )
+            )
+        ).scalar_one_or_none()
+    return row is not None
 
