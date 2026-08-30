@@ -18,10 +18,10 @@ def test_results_to_drafts_filters_platforms():
     drafts = results_to_drafts(items)
     assert len(drafts) == 2
     assert drafts[0].name == "Acme Trading"  # " - Premium Supplier" 已剥
-    assert drafts[0].website.startswith("https://www.acme-trading.com")
+    assert drafts[0].website == "https://acme-trading.com"  # 归一为站点根
     assert drafts[0].source == "web_search"
     assert drafts[1].name == "Shenzhen Glow Tech Co Ltd"
-    assert drafts[1].website == "https://glowtech.com.sg/"
+    assert drafts[1].website == "https://glowtech.com.sg"
 
 
 def test_bing_shape_items_supported():
@@ -74,3 +74,20 @@ def test_detect_domain_tld_overseas():
     assert detect_domain_tld("https://www.acme.com/") is None  # gTLD
     assert detect_domain_tld("https://cncompany.cn/") is None  # 中国域名
     assert detect_domain_tld(None) is None
+
+
+def test_article_pages_filtered():
+    """搜索词「whatsapp 客服」类的内容页结果（指南/测评/博客路径）不是企业种子。"""
+    from app.collectors.web_search import results_to_drafts
+
+    items = [
+        {"title": "跨境电商WhatsApp客服必备功能指南", "url": "https://www.zoho.com.cn/desk/articles/whatsapp-ticketing"},  # 标题+路径双中
+        {"title": "2026跨境电商必看：5款WhatsApp工具测评", "url": "https://www.163.com/dy/article/ABC.html"},  # 标题中
+        {"title": "WhatsApp运营指南", "url": "https://blog.respon.ai/zh/docs/whatsapp-guide"},  # 路径中
+        {"title": "Glow Tech Official Site", "url": "https://glowtech.com.sg/products/led-light"},  # 企业官网 ✓
+    ]
+    drafts = results_to_drafts(items)
+    assert len(drafts) == 1
+    assert drafts[0].name == "Glow Tech Official Site"
+    # 种子入口归一为站点根（富化从首页开始）
+    assert drafts[0].website == "https://glowtech.com.sg"

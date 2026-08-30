@@ -29,7 +29,7 @@ _SOCIAL_RE = re.compile(r"facebook|instagram|tiktok|social\s*media|社媒|新媒
 _MKT_OPS_RE = re.compile(r"marketing|growth|ecommerce|e-commerce|advert|投放|营销", re.I)
 _OVERSEAS_RE = re.compile(
     r"overseas|international|global|english[-\s]speaking|bilingual|cross[-\s]?border"
-    r"|abroad|海外|国际|英文|跨境|外贸",
+    r"|abroad|海外|国际|英文|英语|跨境|外贸|海运|货代|驻外",
     re.I,
 )
 _CRM_RE = re.compile(r"\bcrm\b|customer\s*success|hubspot|salesforce|客户成功", re.I)

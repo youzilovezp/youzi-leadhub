@@ -1,212 +1,211 @@
-"""job_posting 采集器：监控在招「WhatsApp 客服/私域运营」的公司。
+"""job_posting 采集器：监控中国招聘站「WhatsApp/海外客服/私域运营」在招的公司。
 
-主源 kalibrr（PH/ID，Next.js SSR，HTTP 直连可解析）——用 Crawlee
-BeautifulSoupCrawler（重试/并发/请求管理白拿，jobstreet 启用时换
-PlaywrightCrawler 只改一处）。
+需求口径（2026-08-31 补充）：主爬中国企业（做出海业务），招聘源全部改为
+中国招聘网站。
+
+主源 jobui（职友集，职位聚合）：**Playwright 无头浏览器渲染**——中国招聘站
+普遍 JS 验证挑战（jobui 的 valid.php 挑战在 HTTP 层走不通，实测 2026-08-31），
+渲染模式稳定且免费开源。
+
+依赖（免费开源）：
+    pip install '.[collect]'   # crawlee[beautifulsoup,playwright]
+    python -m playwright install chromium
+
+站点架构（渲染模式可扩展）：
+    SUPPORTED_SITES  当前 jobui（c-job-list 职位卡解析）
+    STUB_SITES       其余大站待逐个适配渲染解析器（zhipin/liepin/51job/zhilian）
 
 帖子 → 线索按公司映射：同一公司多个在招岗位合并为 1 条线索（dedupe_key
-兜底 namecity，有官网则 domain），whatsapp_job 信号只计一次，岗位帖 URL
-存 job_urls 数组。
+兜底 namecity，有官网则 domain）。招聘信号按岗位标题分类（§4.3 细分加分），
+岗位帖 URL 存 job_urls、写信号级证据。
 
-页面结构已实测校准（2026-08）：
-    GET /job-board?search={q}&page={n}
-    → <script id="__NEXT_DATA__"> → props.pageProps.jobs[]
-      字段：id / name / slug / companyName / company.code /
-            companyInfo.url（可能是社媒而非官网）/ googleLocation.addressComponents.city
-    页级：pageProps.geoCountry.country（如 PH）
+页面结构已实测校准（2026-08-31）：
+    GET https://www.jobui.com/jobs?jobKw={关键词}&page={n}
+    → <div class="c-job-list"> 职位卡（每页 ~23 个）
+      字段：<h3>职位名</h3> / class="job-company-name" 公司名 /
+            href="/job/{id}/" 职位链接 / class="job-city" 城市
 """
 
 from __future__ import annotations
 
-import json
 import re
+import urllib.parse
 from typing import Any
 
 from app.collectors.base import Collector, LeadDraft, TaskContext, split_csv
 from app.collectors.job_signals import classify_job_title
 from app.core.exceptions import BusinessError
 
-_KALIBRR = "https://kalibrr.com/job-board"
-_SOCIAL_HOSTS = ("facebook.com", "instagram.com", "linkedin.com", "t.me", "tiktok.com")
+_JOBUl_BASE = "https://www.jobui.com"
+_PAGE_GAP = 1.5  # 翻页礼貌间隔（秒）
+
+# ---------- 职位卡解析（jobui SSR 页，实测结构） ----------
+
+_CARD_SPLIT_RE = re.compile(r'class="c-job-list"')
+_TITLE_RE = re.compile(r"<h3[^>]*>\s*(?:<a[^>]*>)?\s*([^<\n]{2,60})", re.S)
+_COMPANY_RE = re.compile(r'job-company-name[^>]*>\s*(?:<a[^>]*>)?\s*([^<\n]{2,60})', re.S)
+_JOB_LINK_RE = re.compile(r'href="(/job/\d+/)"')
+_CITY_RE = re.compile(r'class="job-city"[^>]*>\s*([^<\n]{2,20})')
 
 
-def _classify_url(url: str | None) -> tuple[str | None, str | None, dict[str, str]]:
-    """companyInfo.url 可能是官网也可能是社媒主页——按 host 分类。
+def parse_jobui_html(html: str, page_url: str) -> list[LeadDraft]:
+    """jobui 搜索结果页 → LeadDraft 列表（每卡一岗；同公司多岗由 upsert 合并）。
 
-    返回 (website, country_unused, social)；country 占位恒 None，保持签名简单。
+    中国招聘站来源 → is_cn=True（需求补充：主爬做出海业务的中国企业）。
     """
-    if not url:
-        return None, None, {}
-    host = url.lower()
-    if any(s in host for s in _SOCIAL_HOSTS):
-        platform = next(s.split(".")[0] for s in _SOCIAL_HOSTS if s in host)
-        if platform == "t":
-            platform = "telegram"
-        return None, None, {platform: url}
-    return url, None, {}
+    drafts: list[LeadDraft] = []
+    for block in _CARD_SPLIT_RE.split(html or "")[1:]:
+        title_m = _TITLE_RE.search(block)
+        comp_m = _COMPANY_RE.search(block)
+        if not title_m or not comp_m:
+            continue
+        title = title_m.group(1).strip()
+        company = comp_m.group(1).strip()
+        if not title or not company:
+            continue
+        job_link = _JOB_LINK_RE.search(block)
+        job_url = urllib.parse.urljoin(_JOBUl_BASE, job_link.group(1)) if job_link else page_url
+        city_m = _CITY_RE.search(block)
+        signals = classify_job_title(title)
+        drafts.append(
+            LeadDraft(
+                source="job_posting",
+                name=company,
+                country="CN",
+                city=(city_m.group(1).strip() if city_m else None),
+                is_cn=True,  # 中国招聘站 → 中国企业
+                whatsapp_job=bool(signals),
+                job_signals=signals,
+                job_urls=[job_url],
+            )
+        )
+    return drafts
 
 
-# 岗位标题 → WhatsApp 相关性判定：搜索词是站点检索入口（用户可能搜
-# "customer service" 等非 WhatsApp 词），whatsapp_job 信号必须由岗位标题
-# 本身判定，否则全量误标（评分虚增 + 预警误报 + 需求类型误判）。
-_WA_TITLE_RE = re.compile(
-    r"whatsapp|wa\s*(?:agent|operator|admin|specialist|customer service"
-    r"|support|marketing|sales)|whats\s*app",
-    re.IGNORECASE,
-)
+async def _render_page(page, url: str, timeout_ms: int = 20000) -> str:
+    """Playwright 渲染搜索页：等职位卡出现（JS 验证挑战自动通过）后取 HTML。"""
+    import asyncio as _aio
 
-
-def is_whatsapp_job_title(title: str | None) -> bool:
-    """岗位标题是否 WhatsApp 相关（客服/运营/私域等 WA 岗）。"""
-    if not title:
-        return False
-    return bool(_WA_TITLE_RE.search(title))
+    await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+    try:
+        await page.wait_for_selector(".c-job-list", timeout=timeout_ms // 2)
+    except Exception:  # noqa: BLE001  无职位卡（空结果/风控页）也取页面交给解析层判
+        await _aio.sleep(1.5)
+    return await page.content()
 
 
 class JobPostingCollector(Collector):
     name = "job_posting"
-    title = "招聘网站监控"
+    title = "中国招聘网站监控（jobui）"
     param_schema = [
         {
             "key": "keywords",
             "label": "搜索关键词",
             "required": False,
             "type": "tags",
-            "placeholder": "输入关键词回车，如 whatsapp",
-            "default": "whatsapp",
+            "placeholder": "岗位关键词回车，如 whatsapp / 海外客服 / 跨境电商运营",
+            "default": "whatsapp,海外客服",
         },
         {
             "key": "max_pages",
             "label": "翻页数",
             "required": False,
             "type": "number",
-            "placeholder": "1-10",
-            "default": "3",
+            "placeholder": "1-5",
+            "default": "2",
         },
     ]
 
-    # jobstreet_* 有 Cloudflare 反爬，HTTP 直连 403。配置名保留，
-    # 启用需 `pip install '.[collect]'`（Playwright）后把解析器换成 PlaywrightCrawler。
-    SUPPORTED_SITES = ("kalibrr",)
-    STUB_SITES = ("jobstreet_my", "jobstreet_sg", "jobstreet_id", "jobstreet_ph", "jobstreet_th")
+    # 渲染模式下逐站适配（jobui 已适配；其余大站结构各异待加解析器）
+    SUPPORTED_SITES = ("jobui",)
+    STUB_SITES = ("zhipin", "liepin", "51job", "zhilian")
 
-    async def run(self, ctx: TaskContext) -> None:
-        site = str(ctx.params.get("site") or "kalibrr").strip()
+    def validate_params(self, params: dict[str, Any]) -> None:
+        site = str(params.get("site") or "jobui").strip()
         if site in self.STUB_SITES:
+            names = {"zhipin": "BOSS 直聘", "liepin": "猎聘", "51job": "前程无忧", "zhilian": "智联"}
             raise BusinessError(
                 code=40001,
-                message=f"{site} 暂未启用（Cloudflare 反爬）：pip install '.[collect]' 后支持",
-            )
-        if site not in self.SUPPORTED_SITES:
-            raise BusinessError(code=40001, message=f"不支持的站点：{site}")
-
-        keywords = split_csv(str(ctx.params.get("keywords") or "whatsapp")) or ["whatsapp"]
-        try:
-            max_pages = max(1, min(int(ctx.params.get("max_pages") or 3), 10))
-        except ValueError:
-            max_pages = 3
-
-        from crawlee.crawlers import BeautifulSoupCrawler, BeautifulSoupCrawlingContext
-
-        urls = [
-            f"{_KALIBRR}?search={keyword.replace(' ', '+')}&page={page}"
-            for keyword in keywords
-            for page in range(1, max_pages + 1)
-        ]
-        ctx.set_total(len(urls))
-
-        crawler = BeautifulSoupCrawler(
-            max_requests_per_crawl=len(urls),
-            max_request_retries=3,
-            keep_alive=False,
-        )
-
-        @crawler.router.default_handler  # type: ignore[misc]
-        async def handle(context: BeautifulSoupCrawlingContext) -> None:
-            # 逐页 emit：进度实时 + 取消在页粒度生效（等整个 crawl 结束才检查就废了）
-            ctx.check_cancelled()
-            ns = context.soup.find("script", id="__NEXT_DATA__")
-            if ns is None or not ns.string:
-                await ctx.log("warn", f"页面无 __NEXT_DATA__：{context.request.url}")
-                return
-            data = json.loads(ns.string)
-            page_props = (data.get("props") or {}).get("pageProps") or {}
-            geo_country = (page_props.get("geoCountry") or {}).get("country")
-            jobs = page_props.get("jobs") or []
-            for job in jobs:
-                draft = _job_to_draft(job, geo_country, str(context.request.url))
-                if draft is not None:
-                    lead_id, _created = await ctx.emit(draft)
-                    # 信号级证据（§4.1）：招聘信号带岗位帖 URL 作证据
-                    if draft.job_signals:
-                        from app.crud.lead_signals import upsert_signal
-                        from app.db.session import async_session
-
-                        async with async_session() as session:
-                            for sig_key, meta in draft.job_signals.items():
-                                await upsert_signal(
-                                    session, lead_id, "job_signal",
-                                    f"{sig_key}: {meta.get('label', sig_key)}（{job.get('name', '')[:80]}）",
-                                    source="job_posting",
-                                    evidence_url=(draft.job_urls or [None])[0],
-                                    evidence_raw=job.get("name", "")[:200],
-                                    confidence=85,
-                                )
-                            await session.commit()
-            await ctx.log("info", f"{context.request.url} → {len(jobs)} 个岗位（{geo_country}）")
-            ctx.inc_progress(1)
-
-        await crawler.run(urls)
-
-        # 抓取结果断言：crawlee 请求全挂时 run() 正常返回（重试耗尽只记统计），
-        # 不拦就「completed 0 产出」假成功。零成功请求 → 任务 failed 让用户重跑。
-        stats = crawler.statistics.state
-        if stats.requests_finished == 0:
-            raise BusinessError(
-                code=50001,
                 message=(
-                    f"全部 {len(urls)} 个页面抓取失败（站点限流/网络异常），"
-                    f"共重试 {stats.requests_failed} 次——稍后重跑或降低 max_pages"
+                    f"{names.get(site, site)} 的渲染解析器尚未适配（Playwright 已就绪，"
+                    f"补一个解析函数即可启用）；当前支持：jobui"
                 ),
             )
-        if stats.requests_failed:
-            await ctx.log(
-                "warn",
-                f"部分页面失败：成功 {stats.requests_finished} / 失败 {stats.requests_failed}",
+        if site not in self.SUPPORTED_SITES:
+            raise BusinessError(code=40001, message=f"不支持的站点：{site}（当前支持：jobui）")
+
+    async def run(self, ctx: TaskContext) -> None:
+        keywords = split_csv(str(ctx.params.get("keywords"))) or ["whatsapp"]
+        try:
+            max_pages = max(1, min(int(ctx.params.get("max_pages") or 2), 5))
+        except ValueError:
+            max_pages = 2
+        ctx.set_total(len(keywords) * max_pages)
+
+        import asyncio
+
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError as exc:
+            raise BusinessError(
+                code=40001,
+                message="job_posting 需要 Playwright 渲染（中国招聘站有 JS 验证挑战）："
+                "pip install '.[collect]' && python -m playwright install chromium",
+            ) from exc
+
+        ok_pages = 0
+        async with async_playwright() as pw:
+            # 国内站直连（代理Args留空）；无头 + zh-CN 贴近真实用户
+            browser = await pw.chromium.launch(headless=True, proxy=None)
+            # 不伪装 UA：jobui 风控对「伪装 Chrome UA × headless 指纹不一致」
+            # 打分触发挑战（实测 2026-08-31），Playwright 默认 UA 与浏览器指纹
+            # 自洽反而稳定通过
+            page = await browser.new_page(
+                locale="zh-CN", viewport={"width": 1440, "height": 900}
             )
+            try:
+                for kw in keywords:
+                    for pg in range(1, max_pages + 1):
+                        ctx.check_cancelled()
+                        url = f"{_JOBUl_BASE}/jobs?jobKw={urllib.parse.quote(kw)}&page={pg}"
+                        await ctx.log("info", f"搜索：「{kw}」第 {pg} 页")
+                        try:
+                            html = await _render_page(page, url)
+                        except Exception as exc:  # noqa: BLE001  渲染失败（挑战/超时）
+                            await ctx.log("error", f"「{kw}」第 {pg} 页渲染失败：{type(exc).__name__}: {str(exc)[:60]}")
+                            continue
+                        ok_pages += 1
+                        drafts = parse_jobui_html(html, url)
+                        for d in drafts:
+                            lead_id, _created = await ctx.emit(d)
+                            # 信号级证据（§4.1）：招聘信号带岗位帖 URL 作证据
+                            if d.job_signals:
+                                from app.crud.lead_signals import upsert_signal
+                                from app.db.session import async_session
 
+                                async with async_session() as session:
+                                    for sig_key, meta in d.job_signals.items():
+                                        await upsert_signal(
+                                            session, lead_id, "job_signal",
+                                            f"{sig_key}: {meta.get('label', sig_key)}（{d.name}）",
+                                            source="job_posting",
+                                            evidence_url=(d.job_urls or [None])[0],
+                                            evidence_raw=str(meta), confidence=85,
+                                        )
+                                    await session.commit()
+                        wa_n = sum(1 for d in drafts if d.whatsapp_job)
+                        await ctx.log(
+                            "info",
+                            f"「{kw}」第 {pg} 页 → {len(drafts)} 个在招岗位"
+                            + (f"，信号相关 {wa_n} 个" if drafts else ""),
+                        )
+                        ctx.inc_progress(1)
+                        await asyncio.sleep(_PAGE_GAP)
+            finally:
+                await browser.close()
 
-def _job_to_draft(
-    job: dict[str, Any], geo_country: str | None, page_url: str
-) -> LeadDraft | None:
-    company = job.get("company") or {}
-    company_name = job.get("companyName") or company.get("name")
-    if not company_name:
-        return None
-    company_code = company.get("code")
-    job_id, slug = job.get("id"), job.get("slug")
-    job_url = (
-        f"https://kalibrr.com/c/{company_code}/jobs/{job_id}/{slug}"
-        if company_code and job_id and slug
-        else page_url
-    )
-    address = job.get("googleLocation") or {}
-    city = (address.get("addressComponents") or {}).get("city")
-    website, _, social = _classify_url((job.get("companyInfo") or {}).get("url"))
-    # whatsapp_job 只认岗位标题本身含 WhatsApp 语义——搜索词仅是检索入口，
-    # 不能作为信号依据（搜 "customer service" 时命中岗位并非都是 WA 岗）
-    title = job.get("name")
-    wa_job = is_whatsapp_job_title(title)
-    # 招聘信号细分（PRD §4.3）：wa_ops+30 / overseas_cs+20 / social_ops+15 / crm+12 / 海外销售+10
-    job_signals = classify_job_title(title)
-    return LeadDraft(
-        source="job_posting",
-        name=company_name,
-        country=geo_country,
-        city=city,
-        whatsapp_job=wa_job,
-        job_signals=job_signals,
-        job_urls=[job_url],
-        website=website,
-        social=social,
-    )
+        if ok_pages == 0:
+            raise BusinessError(
+                code=50001,
+                message="全部页面抓取失败（jobui 限流或网络异常）——稍后重跑或降低翻页数",
+            )
