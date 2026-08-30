@@ -478,14 +478,16 @@ def _lead_conditions(
                 src_text.contains(f'"source":"{source}"'))
         )
     if keyword:
-        like = f"%{keyword}%"
+        # 转义 %/_ 通配符：用户输入 "%" 不应变成全匹配
+        escaped = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        like = f"%{escaped}%"
         conds.append(
             or_(
-                Lead.name.ilike(like),
-                Lead.email.ilike(like),
-                Lead.domain.ilike(like),
-                Lead.phone_e164.ilike(like),
-                Lead.city.ilike(like),
+                Lead.name.ilike(like, escape="\\"),
+                Lead.email.ilike(like, escape="\\"),
+                Lead.domain.ilike(like, escape="\\"),
+                Lead.phone_e164.ilike(like, escape="\\"),
+                Lead.city.ilike(like, escape="\\"),
             )
         )
     return conds

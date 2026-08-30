@@ -29,6 +29,15 @@ const baseURL = import.meta.env.VITE_API_BASE_URL || '/api/v1'
 // 401 弹窗单例化：避免并发请求触发多个弹窗堆叠
 let authDialogShown = false
 
+/**
+ * 跳登录页并携带当前位置（与路由守卫的 ?redirect= 语义对齐，登录成功后回到原页面）。
+ * sanitizeRedirect 只放行 / 开头的站内路径，encodeURIComponent 保证 query 串不被拆散。
+ */
+function gotoLoginWithRedirect(): void {
+  const current = window.location.pathname + window.location.search
+  window.location.href = `/login?redirect=${encodeURIComponent(current)}`
+}
+
 function showSessionExpiredDialog() {
   if (authDialogShown) return
   authDialogShown = true
@@ -41,7 +50,7 @@ function showSessionExpiredDialog() {
       negativeText: '取消',
       onPositive: () => {
         localStorage.removeItem(TOKEN_KEY)
-        window.location.href = '/login'
+        gotoLoginWithRedirect()
       },
       onClose: () => {
         authDialogShown = false
@@ -51,7 +60,7 @@ function showSessionExpiredDialog() {
     // 组件库未就绪等异常 → 直接走清 token + 跳登录
     authDialogShown = false
     localStorage.removeItem(TOKEN_KEY)
-    window.location.href = '/login'
+    gotoLoginWithRedirect()
   }
 }
 

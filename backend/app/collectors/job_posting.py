@@ -19,6 +19,7 @@ PlaywrightCrawler 只改一处）。
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from app.collectors.base import Collector, LeadDraft, TaskContext, split_csv
@@ -42,6 +43,23 @@ def _classify_url(url: str | None) -> tuple[str | None, str | None, dict[str, st
             platform = "telegram"
         return None, None, {platform: url}
     return url, None, {}
+
+
+# 岗位标题 → WhatsApp 相关性判定：搜索词是站点检索入口（用户可能搜
+# "customer service" 等非 WhatsApp 词），whatsapp_job 信号必须由岗位标题
+# 本身判定，否则全量误标（评分虚增 + 预警误报 + 需求类型误判）。
+_WA_TITLE_RE = re.compile(
+    r"whatsapp|wa\s*(?:agent|operator|admin|specialist|customer service"
+    r"|support|marketing|sales)|whats\s*app",
+    re.IGNORECASE,
+)
+
+
+def is_whatsapp_job_title(title: str | None) -> bool:
+    """岗位标题是否 WhatsApp 相关（客服/运营/私域等 WA 岗）。"""
+    if not title:
+        return False
+    return bool(_WA_TITLE_RE.search(title))
 
 
 class JobPostingCollector(Collector):
@@ -158,12 +176,15 @@ def _job_to_draft(
     address = job.get("googleLocation") or {}
     city = (address.get("addressComponents") or {}).get("city")
     website, _, social = _classify_url((job.get("companyInfo") or {}).get("url"))
+    # whatsapp_job 只认岗位标题本身含 WhatsApp 语义——搜索词仅是检索入口，
+    # 不能作为信号依据（搜 "customer service" 时命中岗位并非都是 WA 岗）
+    wa_job = is_whatsapp_job_title(job.get("name"))
     return LeadDraft(
         source="job_posting",
         name=company_name,
         country=geo_country,
         city=city,
-        whatsapp_job=True,
+        whatsapp_job=wa_job,
         job_urls=[job_url],
         website=website,
         social=social,

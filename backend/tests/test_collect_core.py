@@ -300,11 +300,15 @@ async def test_scheduler_sync_skips_bad_cron(db_session):
 
 
 def test_job_posting_company_level_mapping():
-    """岗位帖 → 公司级线索：社媒 URL 入 social、官网入 website、岗位 URL 入 job_urls。"""
+    """岗位帖 → 公司级线索：社媒 URL 入 social、官网入 website、岗位 URL 入 job_urls。
+
+    whatsapp_job 只认岗位标题本身含 WhatsApp 语义——搜索词是检索入口不是信号
+    （搜 "customer service" 时命中岗位并非都是 WA 岗）。
+    """
     from app.collectors.job_posting import _job_to_draft
 
     job = {
-        "id": 1, "slug": "cs-whatsapp", "companyName": "Acme",
+        "id": 1, "slug": "cs-whatsapp", "name": "WhatsApp Customer Service", "companyName": "Acme",
         "company": {"code": "acme"},
         "companyInfo": {"url": "https://facebook.com/acme"},
         "googleLocation": {"addressComponents": {"city": "Manila"}},
@@ -315,6 +319,10 @@ def test_job_posting_company_level_mapping():
     assert d.social == {"facebook": "https://facebook.com/acme"}
     assert d.job_urls == ["https://kalibrr.com/c/acme/jobs/1/cs-whatsapp"]
 
-    d2 = _job_to_draft({**job, "companyInfo": {"url": "https://acme.ph"}}, "PH", "u")
-    assert d2.website == "https://acme.ph" and d2.social == {}
+    # 非WhatsApp岗位标题：即使搜索词是 whatsapp 也不置信号（防误报）
+    d2 = _job_to_draft({**job, "name": "Retail Sales Associate"}, "PH", "u")
+    assert d2.whatsapp_job is False
+
+    d3 = _job_to_draft({**job, "companyInfo": {"url": "https://acme.ph"}}, "PH", "u")
+    assert d3.website == "https://acme.ph" and d3.social == {}
     assert _job_to_draft({"companyName": None}, "PH", "u") is None  # 无名丢弃

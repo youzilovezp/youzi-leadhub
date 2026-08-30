@@ -14,7 +14,7 @@ import type {
   Lead,
 } from '@/api/collect'
 import { useUserStore } from '@/stores/user'
-import { formatTime } from '@/utils/format'
+import { formatTime, parseUtc } from '@/utils/format'
 import { message, confirm } from '@/utils/feedback'
 import { downloadFile } from '@/utils/download'
 import { autoAssignLeads, searchNl } from '@/api/sales'
@@ -247,9 +247,9 @@ async function handleExport() {
 }
 
 // ---------- 跟进 ----------
-/** 该回访了：约定了下次跟进时间且已到期 */
+/** 该回访了：约定了下次跟进时间且已到期（后端串无 Z 后缀，须按 UTC 解析） */
 function isDue(row: Lead): boolean {
-  return !!row.next_follow_at && new Date(row.next_follow_at).getTime() <= Date.now()
+  return !!row.next_follow_at && parseUtc(row.next_follow_at).getTime() <= Date.now()
 }
 
 const followVisible = ref(false)
@@ -306,8 +306,8 @@ async function handleFollowSubmit() {
 // ---------- 自然语言搜索（PRD §27，需后端配置 LLM） ----------
 const nlText = ref('')
 const nlLoading = ref(false)
-/** NL 命中的条件（回填筛选后展示，便于确认/撤销） */
-const nlApplied = ref<Array<{ label: string; value: string }>>([])
+/** NL 命中的条件（回填筛选后展示，便于确认/撤销）；key 是回填到 query 的参数名 */
+const nlApplied = ref<Array<{ key: string; label: string; value: string }>>([])
 
 const NL_LABELS: Record<string, string> = {
   keyword: '关键词',
@@ -345,13 +345,47 @@ async function handleNlSearch() {
       else if (k === 'is_cn') query.is_cn = Boolean(v)
       else if (k === 'follow_status') query.follow_status = v as FollowStatus
     }
-    nlApplied.value = entries.map(([k, v]) => ({ label: NL_LABELS[k] ?? k, value: String(v) }))
+    nlApplied.value = entries.map(([k, v]) => ({ key: k, label: NL_LABELS[k] ?? k, value: String(v) }))
     query.page = 1
     fetchData()
     message.success(`已识别 ${entries.length} 个条件并应用`)
   } finally {
     nlLoading.value = false
   }
+}
+
+/** 关掉单个 NL 标签：同步清掉它回填的筛选参数再刷新，保证 UI 与实际过滤条件一致 */
+function removeNlTag(index: number) {
+  const [removed] = nlApplied.value.splice(index, 1)
+  if (!removed) return
+  switch (removed.key) {
+    case 'keyword':
+      query.keyword = ''
+      break
+    case 'country':
+      query.country = null
+      break
+    case 'industry':
+      query.industry = null
+      break
+    case 'grade':
+      query.grade = null
+      break
+    case 'min_score':
+      query.min_score = null
+      break
+    case 'whatsapp_hit':
+      query.whatsapp = null
+      break
+    case 'is_cn':
+      query.is_cn = false
+      break
+    case 'follow_status':
+      query.follow_status = null
+      break
+  }
+  query.page = 1
+  fetchData()
 }
 
 // ---------- 自动分配（PRD §24，主管操作） ----------
@@ -703,12 +737,12 @@ onUnmounted(() => {
         </n-button>
         <template v-if="nlApplied.length">
           <n-tag
-            v-for="item in nlApplied"
-            :key="item.label + item.value"
+            v-for="(item, i) in nlApplied"
+            :key="item.key + item.value"
             size="small"
             type="info"
             closable
-            @close="nlApplied = []"
+            @close="removeNlTag(i)"
           >
             {{ item.label }}:{{ item.value }}
           </n-tag>
