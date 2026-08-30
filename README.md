@@ -2,9 +2,9 @@
 
 <img src="frontend/public/youzi-logo.svg" width="110" alt="youzi logo"/>
 
-# 🎯 Youzi Leadhub · 线索采集服务控制台
+# 🎯 Youzi Leadhub · WhatsApp 商机获取系统
 
-**为销售获取「需要用 WhatsApp 做生意」的企业商机线索**
+**为 WhatsApp Business API 产品获客：挖「做海外生意的中国企业」——投 CTWA 类广告、主页挂 wa.me、在招 WA 客服的出海品牌/跨境大卖，销售直接跟进建联**
 
 ![License](https://img.shields.io/badge/License-MIT-orange.svg)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB.svg)

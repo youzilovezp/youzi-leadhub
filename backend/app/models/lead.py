@@ -58,6 +58,12 @@ class Lead(Base, TimestampMixin):
     last_followed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     next_follow_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # 下次回访时间
 
+    # ---------- 中国出海 ICP（meta_ads 链路） ----------
+    is_cn: Mapped[bool] = mapped_column(Boolean, default=False, index=True)  # 中国出海企业特征
+    fb_whatsapp: Mapped[bool] = mapped_column(
+        Boolean, default=False, index=True
+    )  # FB 主页带 wa.me 按钮（CTWA/私域运营证据）
+
     def __repr__(self) -> str:
         return f"<Lead id={self.id} name={self.name!r} score={self.score}>"
 

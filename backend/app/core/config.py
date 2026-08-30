@@ -145,6 +145,10 @@ class Settings(BaseSettings):
 
     # ---------- 线索采集 ----------
     GOOGLE_MAPS_API_KEY: str = ""   # google_maps 采集器必填，未配置任务直接 failed
+    # Meta 广告资料库（Ad Library API）访问令牌，meta_ads 采集器必填。
+    # 获取：https://www.facebook.com/ads/archive/api 创建应用申请 token（免费），
+    # 需要的权限很窄（ads_archive 只读公开广告数据）。
+    META_ADS_ACCESS_TOKEN: str = ""
     COLLECT_MAX_CONCURRENT: int = 2   # 同时运行的采集任务数（满则排队）
     COLLECT_TASK_TIMEOUT: int = 3600  # 单任务超时（秒）
     ENRICH_CONCURRENCY: int = 5     # 富化并发站点数
