@@ -273,17 +273,50 @@ class WebsiteEnrichCollector(Collector):
         lead_ids = _parse_lead_ids(ctx.params.get("lead_ids"))
         async with _session_factory()() as session:
             leads = await _load_scope(session, lead_ids)
-        if not leads:
-            await ctx.log("info", "没有待富化的线索（有网站 且 24h 内未成功富化）")
-            return
 
-        ctx.set_total(len(leads))
-        await ctx.log("info", f"待富化线索 {len(leads)} 条，并发 {settings.ENRICH_CONCURRENCY}")
-        sem = asyncio.Semaphore(settings.ENRICH_CONCURRENCY)
-        done = 0
-
-        # 两个 client：正常直连 + 宽松 SSL 兜底（证书过期的小站常见）
+        # 两个 client：正常（代理优先）+ 宽松 SSL 直连兜底（证书过期的小站常见）
         async with _make_client() as client, _make_client(**_SSL_LOOSE_CLIENT_ARGS) as loose:
+            # ---------- 官网发现（补全链）：无官网线索先搜官网再富化 ----------
+            # 招聘站（jobui）公司页无官网字段——缺官网的线索进不了富化/评分链路，
+            # cn_domestic 永远升不了 qualified。仅全库扫描模式做（手动勾选是精确富化）
+            discovered: list[tuple[int, str]] = []
+            if not lead_ids:
+                async with _session_factory()() as session:
+                    candidates = await _load_discoverable(session, _DISCOVER_LIMIT)
+                for lid, name in candidates:
+                    ctx.check_cancelled()
+                    ws = await _discover_website((client, loose), name)
+                    if ws:
+                        from app.crud.lead import touch_field_meta
+                        from app.models.lead import Lead
+
+                        async with _session_factory()() as session:
+                            lead = await session.get(Lead, lid)
+                            if lead and not lead.website:
+                                lead.website = ws
+                                lead.domain = extract_domain(ws) or lead.domain
+                                touch_field_meta(
+                                    lead, "website", "web_discovery",
+                                    confidence=60, now=datetime.now(timezone.utc),
+                                )
+                                await session.commit()
+                                discovered.append((lid, ws))
+                                await ctx.log("info", f"[lead {lid}] 🔍 官网发现：{name} → {ws}")
+                    await asyncio.sleep(_DISCOVER_GAP)  # 搜索礼貌间隔
+                if candidates:
+                    await ctx.log(
+                        "info", f"官网发现：{len(discovered)}/{len(candidates)} 条命中"
+                    )
+            leads = [*discovered, *leads]
+
+            if not leads:
+                await ctx.log("info", "没有待富化的线索（有网站 或 已尝试发现，且窗口内未成功富化）")
+                return
+
+            ctx.set_total(len(leads))
+            await ctx.log("info", f"待富化线索 {len(leads)} 条，并发 {settings.ENRICH_CONCURRENCY}")
+            sem = asyncio.Semaphore(settings.ENRICH_CONCURRENCY)
+            done = 0
 
             async def wrapped(lead_id: int, website: str) -> None:
                 nonlocal done
@@ -299,6 +332,40 @@ class WebsiteEnrichCollector(Collector):
             await asyncio.gather(*(wrapped(lid, ws) for lid, ws in leads))
 
         await ctx.log("info", f"富化完成：{done} 个站点")
+
+
+# ---------- 官网发现（补全链，2026-08-31） ----------
+# 招聘站（jobui）公司页无官网字段——缺官网的线索进不了富化/评分链路，
+# cn_domestic 永远升不了 qualified。用公司名走搜索引擎（默认引擎、零 key）
+# 找官网，复用 web_search 的平台/文章页过滤与根 URL 归一。
+_DISCOVER_GAP = 2.0  # 搜索礼貌间隔（秒）
+_DISCOVER_LIMIT = 30  # 每次任务最多发现的线索数（搜索配额友好）
+
+
+async def _discover_website(
+    clients: tuple[httpx.AsyncClient, httpx.AsyncClient], name: str
+) -> str | None:
+    """公司名 → 官网（第一个企业站结果，根 URL 归一）。找不到返回 None。"""
+    from app.collectors.web_search import _search, results_to_drafts
+
+    items, _err = await _search(clients, settings.SEARCH_ENGINE, f"{name} 官网", 5)
+    if not items:
+        return None
+    drafts = results_to_drafts(items, params_is_cn=True)
+    return drafts[0].website if drafts else None
+
+
+async def _load_discoverable(session: AsyncSession, limit: int) -> list[tuple[int, str]]:
+    """无官网且非 foreign 的线索（分数倒序——高分商机优先补全）。"""
+    from app.models.lead import Lead
+
+    stmt = (
+        select(Lead.id, Lead.name)
+        .where((Lead.website.is_(None)) | (Lead.website == ""), Lead.icp_status != "foreign")
+        .order_by(Lead.score.desc())
+        .limit(limit)
+    )
+    return [(r[0], r[1]) for r in (await session.execute(stmt)).all()]
 
 
 async def _load_scope(session: AsyncSession, lead_ids: list[Any]) -> list[tuple[int, str]]:
