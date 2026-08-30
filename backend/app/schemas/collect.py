@@ -241,6 +241,21 @@ class FollowUpOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class SignalEvidenceOut(BaseModel):
+    """信号级证据（PRD §4.1：系统为什么判定此客户有需求）。"""
+
+    id: int
+    signal_type: str
+    signal_type_label: str = ""
+    value: str
+    evidence_url: str | None = None
+    evidence_raw: str | None = None
+    confidence: int = 80
+    source: str = ""
+    first_seen: datetime | None = None
+    last_seen: datetime | None = None
+
+
 class LeadDetailOut(LeadOut):
     """企业画像详情：列表字段 + 六维分 + 联系人 + 事件 + 跟进 + 推荐 + 销售建议 + 商机。"""
 
@@ -254,6 +269,15 @@ class LeadDetailOut(LeadOut):
     opportunities: list[OpportunityOut] = []
     # 需求类型 A-E（补充需求 §4.4）：[{type, label, selling}]
     need_types: list[dict[str, str]] = []
+    # 出海信号（§4.2）：{currencies/languages/ecommerce/shipping/markets/export_words: [证据]}
+    overseas_signals: dict[str, list[str]] = {}
+    # 招聘信号细分（§4.3）：{wa_ops/overseas_cs/...: {label, points}}
+    job_signals: dict[str, dict[str, object]] = {}
+    # 广告信号（§4.1）
+    ad_count: int = 0
+    last_ad_at: datetime | None = None
+    # 信号级证据链（§4.1）
+    signals: list[SignalEvidenceOut] = []
 
 
 # ---------- 分配（PRD §24） ----------

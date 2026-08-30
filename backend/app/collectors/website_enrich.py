@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.collectors.base import Collector, TaskContext
 from app.collectors.normalize import extract_domain
+from app.collectors.overseas import detect_overseas_signals
 from app.collectors.scenes import (
     SAAS_LABELS_ZH,
     SCENE_LABELS_ZH,
@@ -55,6 +56,8 @@ _WHATSAPP_PATTERNS = [
 ]
 # 命中前 3 条之一的捕获组 → 拿到号码还原标准链接；插件指纹命中则只置标记
 _PHONE_PATTERNS = _WHATSAPP_PATTERNS[:3]
+# 插件特征（第 5 条）：ht-ctc/joinchat/getbutton/chaty/elfsight/click-to-chat
+_PLUGIN_PATTERNS = _WHATSAPP_PATTERNS[4:]
 
 _EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
 _SOCIAL_RES = [
@@ -64,9 +67,14 @@ _SOCIAL_RES = [
     ("telegram", re.compile(r"https?://(?:t\.me|telegram\.me)/[^\s\"'<>]+", re.I)),
     ("tiktok", re.compile(r"https?://(?:www\.)?tiktok\.com/@[^\s\"'<>]+", re.I)),
 ]
-_CONTACT_LINK_RE = re.compile(
-    r'href=["\']([^"\']*(?:contact|kontak|about|hubungi)[^"\']*)["\']', re.I
+# Contact/About/Products 三类内页（官网四层抓取：首页 + 联系/关于/产品页）。
+# Products 层是 B2B/B2C/品类与交易场景关键词的主要来源（跨境电商站尤其）
+_INNER_PAGE_LINK_RE = re.compile(
+    r'href=["\']([^"\']*(?:contact|kontak|about|hubungi|product|shop|store|catalog|collection)[^"\']*)["\']',
+    re.I,
 )
+# 内页抓取上限（首页 + 最多 3 个内页；原来只 2 个联系页）
+_MAX_INNER_PAGES = 3
 
 
 async def _fetch(client: httpx.AsyncClient, url: str) -> str | None:
@@ -302,20 +310,22 @@ async def _enrich_one(
         await ctx.log("warn", f"[lead {lead_id}] 首页抓取失败：{website}")
         return
 
-    # 首页里找联系页链接（最多 2 个，域名相同才跟）
+    # 首页里找内页链接（联系/关于/产品，最多 3 个，域名相同才跟）
     base_domain = extract_domain(base)
-    contact_urls: list[str] = []
-    for m in _CONTACT_LINK_RE.finditer(homepage):
+    inner_urls: list[str] = []
+    for m in _INNER_PAGE_LINK_RE.finditer(homepage):
         url = _resolve_url(base, m.group(1))
-        if url and url not in contact_urls and extract_domain(url) == base_domain:
-            contact_urls.append(url)
-        if len(contact_urls) >= 2:
+        if url and url not in inner_urls and extract_domain(url) == base_domain:
+            inner_urls.append(url)
+        if len(inner_urls) >= _MAX_INNER_PAGES:
             break
     pages = [homepage]
-    for url in contact_urls:
+    page_urls = [base]  # 与 pages 平行：每页 HTML 对应的 URL（证据链用）
+    for url in inner_urls:
         html = await _fetch(primary, url)
         if html:
             pages.append(html)
+            page_urls.append(url)
 
     whatsapp_hit, whatsapp_url = detect_whatsapp(pages)
     wa_numbers = detect_whatsapp_numbers(pages)
@@ -323,6 +333,8 @@ async def _enrich_one(
     social = detect_social(pages)
     scenes = detect_scenes(pages)
     saas_signals = detect_saas_signals(pages)
+    # 出海信号（PRD §4.2）：货币/多语言/电商栈/配送/市场/出海自述
+    overseas = detect_overseas_signals(pages)
 
     async with _session_factory()() as session:
         from app.crud.contact import auto_create_from_email
@@ -372,6 +384,60 @@ async def _enrich_one(
                 merged_saas[k] = max(merged_saas.get(k, 0), v)
             lead.saas_signals = merged_saas
             touch_field_meta(lead, "saas_signals", "website_enrich", confidence=75, now=now)
+        if overseas:
+            merged_ov = dict(lead.overseas_signals or {})
+            for k, vals in overseas.items():
+                bucket = list(merged_ov.get(k) or [])
+                for v in vals or []:
+                    if v not in bucket:
+                        bucket.append(v)
+                merged_ov[k] = bucket
+            lead.overseas_signals = merged_ov
+            touch_field_meta(lead, "overseas_signals", "website_enrich", confidence=85, now=now)
+        # ---------- 信号级证据链（§4.1：类型/值/来源页面/原文/置信度/时间） ----------
+        from app.crud.lead_signals import upsert_signal
+
+        for i, page_html in enumerate(pages):
+            page_url = page_urls[i] if i < len(page_urls) else base
+            for pat in _PHONE_PATTERNS:
+                for m in pat.finditer(page_html or ""):
+                    raw = (m.group(1) or "").lstrip("+")
+                    if raw:
+                        await upsert_signal(
+                            session, lead.id, "whatsapp_number", raw,
+                            source="website_enrich", evidence_url=page_url,
+                            evidence_raw=m.group(0), confidence=95,
+                        )
+            for pat in _PLUGIN_PATTERNS:
+                m = pat.search(page_html or "")
+                if m:
+                    await upsert_signal(
+                        session, lead.id, "whatsapp_plugin", "detected",
+                        source="website_enrich", evidence_url=page_url,
+                        evidence_raw=m.group(0)[:200], confidence=75,
+                    )
+        if whatsapp_url:
+            await upsert_signal(
+                session, lead.id, "whatsapp_link", whatsapp_url,
+                source="website_enrich", evidence_url=base,
+                evidence_raw=whatsapp_url, confidence=98,
+            )
+        _OV_TYPE_MAP = {
+            "currencies": ("overseas_currency", 85),
+            "languages": ("multilang", 80),
+            "ecommerce": ("ecommerce_stack", 90),
+            "shipping": ("intl_shipping", 80),
+            "markets": ("market_mention", 75),
+            "export_words": ("export_word", 75),
+        }
+        for ov_key, vals in (overseas or {}).items():
+            sig_type, conf = _OV_TYPE_MAP.get(ov_key, (ov_key, 75))
+            for v in vals or []:
+                await upsert_signal(
+                    session, lead.id, sig_type, str(v),
+                    source="website_enrich", evidence_url=base,
+                    evidence_raw=str(v)[:200], confidence=conf,
+                )
         if email:
             # 抓到公开邮箱 → 自动生成「待补全」联系人（同邮箱已存在则跳过）
             await auto_create_from_email(session, lead, email)

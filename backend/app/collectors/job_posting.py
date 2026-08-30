@@ -23,6 +23,7 @@ import re
 from typing import Any
 
 from app.collectors.base import Collector, LeadDraft, TaskContext, split_csv
+from app.collectors.job_signals import classify_job_title
 from app.core.exceptions import BusinessError
 
 _KALIBRR = "https://kalibrr.com/job-board"
@@ -135,7 +136,24 @@ class JobPostingCollector(Collector):
             for job in jobs:
                 draft = _job_to_draft(job, geo_country, str(context.request.url))
                 if draft is not None:
-                    await ctx.emit(draft)
+                    lead_id, _created = await ctx.emit(draft)
+                    # 信号级证据（§4.1）：招聘信号带岗位帖 URL 作证据
+                    if draft.job_signals:
+                        from app.crud.lead_signals import upsert_signal
+
+                        from app.db.session import async_session
+
+                        async with async_session() as session:
+                            for sig_key, meta in draft.job_signals.items():
+                                await upsert_signal(
+                                    session, lead_id, "job_signal",
+                                    f"{sig_key}: {meta.get('label', sig_key)}（{job.get('name', '')[:80]}）",
+                                    source="job_posting",
+                                    evidence_url=(draft.job_urls or [None])[0],
+                                    evidence_raw=job.get("name", "")[:200],
+                                    confidence=85,
+                                )
+                            await session.commit()
             await ctx.log("info", f"{context.request.url} → {len(jobs)} 个岗位（{geo_country}）")
             ctx.inc_progress(1)
 
@@ -178,13 +196,17 @@ def _job_to_draft(
     website, _, social = _classify_url((job.get("companyInfo") or {}).get("url"))
     # whatsapp_job 只认岗位标题本身含 WhatsApp 语义——搜索词仅是检索入口，
     # 不能作为信号依据（搜 "customer service" 时命中岗位并非都是 WA 岗）
-    wa_job = is_whatsapp_job_title(job.get("name"))
+    title = job.get("name")
+    wa_job = is_whatsapp_job_title(title)
+    # 招聘信号细分（PRD §4.3）：wa_ops+30 / overseas_cs+20 / social_ops+15 / crm+12 / 海外销售+10
+    job_signals = classify_job_title(title)
     return LeadDraft(
         source="job_posting",
         name=company_name,
         country=geo_country,
         city=city,
         whatsapp_job=wa_job,
+        job_signals=job_signals,
         job_urls=[job_url],
         website=website,
         social=social,

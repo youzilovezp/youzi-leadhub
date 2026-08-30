@@ -377,6 +377,8 @@ class MetaAdsCollector(Collector):
                     social={"facebook": profile_uri},
                     # 出海画像：该广告主实际投放的国家全量（country 只是第一个投放国）
                     target_countries=sorted(rec.get("countries") or []) or list(countries),
+                    # 广告信号（§4.1）：本次搜索命中的在投广告数（合并语义取 max）
+                    ad_count=int(rec.get("ad_count") or 0),
                 )
 
                 if probe and rec["page_profile_uri"]:
@@ -425,7 +427,34 @@ class MetaAdsCollector(Collector):
                     + (f" wa={draft.phone_raw}" if draft.phone_raw else "")
                     + (f" email={draft.email}" if draft.email else ""),
                 )
-                await ctx.emit(draft)
+                lead_id, _created = await ctx.emit(draft)
+
+                # 信号级证据链（§4.1）：广告在投 / FB WA 按钮 / 主页号码
+                from app.crud.lead_signals import upsert_signal
+
+                from app.db.session import async_session
+
+                async with async_session() as session:
+                    await upsert_signal(
+                        session, lead_id, "meta_ad",
+                        f"{rec['ad_count']} 条在投（{','.join(sorted(rec.get('countries') or []))}）",
+                        source="meta_ads", evidence_url=profile_uri,
+                        evidence_raw=(rec.get("bodies") or [""])[0][:200] or None,
+                        confidence=95,
+                    )
+                    if draft.fb_whatsapp:
+                        await upsert_signal(
+                            session, lead_id, "fb_whatsapp", draft.phone_raw or "button",
+                            source="meta_ads", evidence_url=profile_uri,
+                            evidence_raw=draft.whatsapp_url, confidence=90,
+                        )
+                        for n in draft.whatsapp_numbers or []:
+                            await upsert_signal(
+                                session, lead_id, "whatsapp_number", n,
+                                source="meta_ads", evidence_url=profile_uri,
+                                evidence_raw=f"https://wa.me/{n}", confidence=90,
+                            )
+                    await session.commit()
 
             if probe and probe_fail:
                 await ctx.log("warn", f"主页探测失败 {probe_fail} 个（登录墙/网络），线索已按无探测信息落库")

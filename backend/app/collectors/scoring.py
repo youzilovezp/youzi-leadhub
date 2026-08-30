@@ -98,10 +98,19 @@ def score_lead_inputs(
     contacts_count: int = 0,
     has_tier1: bool = False,
     has_tier2: bool = False,
+    target_countries: list[str] | None = None,
+    overseas_signals: dict[str, list[str]] | None = None,
+    job_signals: dict[str, dict[str, Any]] | None = None,
+    ad_count: int = 0,
 ) -> tuple[int, dict[str, int], str]:
     """六维评分纯函数：返回 (总分, {维度: 维度分}, 分级)。
 
     所有输入都是行属性，无 IO；迁移回填与 ORM 重评共用此函数。
+    新增输入（PRD §4.2/§4.3 信号体系补课，向后兼容默认空）：
+    - target_countries：投放国家列表（≥3 国加分，§4.2）
+    - overseas_signals：出海信号 {键: [证据]}（命中类数参与出海度）
+    - job_signals：招聘信号细分 {键: {label, points}}（§4.3 分值）
+    - ad_count：累计在投广告数（营销活跃度）
     """
     scene_set = set(scenes or [])
     saas_keys = set(saas_signals or {})
@@ -109,22 +118,35 @@ def score_lead_inputs(
     job_urls = job_urls or []
     source_names = {r.get("source") for r in (sources or []) if r.get("source")}
     target_regions = {r.upper() for r in settings.TARGET_REGIONS}
+    tc_count = len({c.upper() for c in (target_countries or []) if c})
+    ov_kinds = len(overseas_signals or {})
+    job_sig_points = sum(
+        int(v.get("points", 0))
+        for v in (job_signals or {}).values()
+        if isinstance(v, dict)
+    )
 
-    # D1 出海度：中国出海特征是最强证据，FB 私域/目标地区/官网次之
+    # D1 出海度：中国出海特征是最强证据，FB 私域/目标地区/官网次之；
+    # §4.2 规则：投放/提及 ≥3 国 +10；出海信号每命中一类 +4（最多 +20）
     overseas = (
         (45 if is_cn else 0)
         + (30 if fb_whatsapp else 0)
         + (15 if country and country.upper() in target_regions else 0)
         + (10 if website else 0)
+        + (10 if tc_count >= 3 else 0)
+        + min(20, ov_kinds * 4)
     )
 
     # D2 WhatsApp 意向强度（补充需求 §4.1：CTWA/私域是黄金意向信号，权重最高）
+    # §4.3 招聘细分：wa_ops（WhatsApp 运营/客服）是强意向岗位，在 whatsapp_job
+    # 基础分上按信号分值折半增强（+30×0.5=+15 封顶），其余岗位信号进规模维
     wa_number_count = len(whatsapp_numbers or [])
     whatsapp = (
         (25 if fb_whatsapp else 0)  # FB 主页 wa.me（CTWA 代理信号）——意向最强
         + (35 if whatsapp_hit else 0)
         + (15 if whatsapp_url else 0)
         + (15 if whatsapp_job else 0)
+        + (15 if "wa_ops" in (job_signals or {}) else 0)
         + (10 if wa_number_count >= 2 else 0)  # 多分线 = 已规模化使用
         + (10 if "customer_service" in scene_set else 0)
         + (10 if "marketing" in scene_set else 0)
@@ -152,6 +174,12 @@ def score_lead_inputs(
     scale += (10 if website else 0) + (10 if email else 0)
     if phone_e164 or phone_raw:
         scale += 5
+    # §4.3 招聘信号强度：overseas_cs/social_ops/crm_ops/overseas_sales 的
+    # 分值折半计入规模维（团队扩张代理）——wa_ops 已计入 WhatsApp 维不重复算
+    non_wa_points = job_sig_points - int(
+        (job_signals or {}).get("wa_ops", {}).get("points", 0)
+    )
+    scale += min(20, non_wa_points // 2)
 
     # D5 营销活跃度（代理）：在投广告 + 营销文案 + 多渠道曝光
     marketing = 0
@@ -167,6 +195,11 @@ def score_lead_inputs(
         marketing += 15
     elif len(social) == 2:
         marketing += 10
+    # 广告量分级（§4.1）：累计在投广告 ≥5 条 = 持续投放获客
+    if ad_count >= 5:
+        marketing += 15
+    elif ad_count >= 2:
+        marketing += 8
 
     # D6 联系人质量：数量 + 决策层深度（tier1 = CEO/Founder/GM）
     contact = 0
@@ -227,6 +260,10 @@ def apply_score(
         contacts_count=contacts_count,
         has_tier1=has_tier1,
         has_tier2=has_tier2,
+        target_countries=getattr(lead, "target_countries", None),
+        overseas_signals=getattr(lead, "overseas_signals", None),
+        job_signals=getattr(lead, "job_signals", None),
+        ad_count=getattr(lead, "ad_count", 0) or 0,
     )
     lead.score = total
     lead.score_signals = dims

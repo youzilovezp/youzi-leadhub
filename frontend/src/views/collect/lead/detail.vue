@@ -13,6 +13,7 @@ import {
   DIM_LABELS,
   EVENT_TYPE_LABELS,
   SAAS_LABELS,
+  OVERSEAS_LABELS,
   SCENE_LABELS,
   SENIORITY_LABELS,
   followStatusTagType,
@@ -580,6 +581,26 @@ onMounted(fetchDetail)
                 </span>
                 <span class="k">业务类型</span><span>{{ detail.export_type || '—' }}</span>
                 <span class="k">FB 私域</span><span>{{ detail.fb_whatsapp ? '✓ 主页带 wa.me' : '—' }}</span>
+                <span class="k">在投广告</span>
+                <span>
+                  <template v-if="detail.ad_count">
+                    ✓ {{ detail.ad_count }} 条（{{ detail.last_ad_at ? '最近 ' + formatTime(detail.last_ad_at) : '' }}）
+                  </template>
+                  <template v-else>—</template>
+                </span>
+                <template v-for="(vals, key) in detail.overseas_signals" :key="key">
+                  <span class="k">{{ OVERSEAS_LABELS[key] ?? key }}</span>
+                  <span>
+                    <n-tag
+                      v-for="v in vals.slice(0, 6)"
+                      :key="v"
+                      size="small"
+                      type="warning"
+                      class="mr-1"
+                    >{{ v }}</n-tag>
+                    <span v-if="vals.length > 6" class="dim-weight">等 {{ vals.length }} 项</span>
+                  </span>
+                </template>
               </div>
             </n-card>
 
@@ -620,6 +641,19 @@ onMounted(fetchDetail)
                   <template v-else>—</template>
                 </span>
                 <span class="k">在招岗位</span><span>{{ detail.whatsapp_job ? `✓ ${detail.job_urls.length} 个` : '✗ 无' }}</span>
+                <span class="k">招聘信号</span>
+                <span>
+                  <template v-if="Object.keys(detail.job_signals ?? {}).length">
+                    <n-tag
+                      v-for="(meta, key) in detail.job_signals"
+                      :key="key"
+                      size="small"
+                      :type="key === 'wa_ops' ? 'error' : 'warning'"
+                      class="mr-1"
+                    >{{ meta.label }} +{{ meta.points }}</n-tag>
+                  </template>
+                  <template v-else>—</template>
+                </span>
                 <span class="k">场景</span>
                 <span>
                   <template v-if="detail.scenes.length">
@@ -633,6 +667,38 @@ onMounted(fetchDetail)
                   </template>
                   <template v-else>未检测到（需富化）</template>
                 </span>
+              </div>
+            </n-card>
+
+            <!-- 信号证据链（§4.1：系统为什么判定此客户有需求） -->
+            <n-card
+              v-if="detail.signals?.length"
+              size="small"
+              title="信号证据链"
+            >
+              <template #header-extra>
+                <span class="dim-weight">{{ detail.signals.length }} 条证据</span>
+              </template>
+              <div
+                v-for="sig in detail.signals.slice(0, 12)"
+                :key="sig.id"
+                class="signal-row"
+              >
+                <n-tag size="small" :bordered="false" class="signal-type">{{ sig.signal_type_label || sig.signal_type }}</n-tag>
+                <span class="signal-value">
+                  {{ sig.value }}
+                  <a
+                    v-if="sig.evidence_url"
+                    :href="sig.evidence_url"
+                    target="_blank"
+                    rel="noopener"
+                    class="link"
+                  >来源页</a>
+                </span>
+                <span class="dim-weight">{{ sig.confidence }}% · {{ sig.source || '未知来源' }} · {{ formatTime(sig.first_seen) }}</span>
+              </div>
+              <div v-if="detail.signals.length > 12" class="dim-weight mt-2">
+                等 {{ detail.signals.length }} 条（按置信度排序，前 12 条）
               </div>
             </n-card>
 
@@ -1119,6 +1185,27 @@ onMounted(fetchDetail)
   font-size: 12px;
   margin-left: 4px;
 }
+.signal-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px dashed var(--n-border-color);
+  flex-wrap: wrap;
+}
+.signal-row:last-child {
+  border-bottom: none;
+}
+.signal-type {
+  min-width: 96px;
+  justify-content: center;
+}
+.signal-value {
+  flex: 1;
+  min-width: 160px;
+  word-break: break-all;
+}
+
 .saas-row {
   display: flex;
   align-items: center;
