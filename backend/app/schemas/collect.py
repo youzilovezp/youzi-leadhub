@@ -285,7 +285,6 @@ class LeadDetailOut(LeadOut):
     follow_ups: list[FollowUpOut] = []  # 最近 50 条
     recommendations: list[RecommendationOut] = []
     sales_suggestion: str = ""
-    opportunities: list[OpportunityOut] = []
     # 需求类型 A-E（补充需求 §4.4）：[{type, label, selling}]
     need_types: list[dict[str, str]] = []
     # 出海信号（§4.2）：{currencies/languages/ecommerce/shipping/markets/export_words: [证据]}
@@ -323,67 +322,7 @@ class AutoAssignPayload(BaseModel):
     limit: int = Field(default=100, ge=1, le=1000)
 
 
-# ---------- 商机（PRD §37） ----------
-
-
-class OpportunityCreate(BaseModel):
-    name: str = Field(min_length=1, max_length=255)
-    amount: int = Field(default=0, ge=0)  # 金额（元）
-    expected_close_at: datetime | None = None
-    note: str | None = Field(default=None, max_length=2000)
-
-
-class OpportunityUpdate(BaseModel):
-    name: str | None = Field(default=None, min_length=1, max_length=255)
-    amount: int | None = Field(default=None, ge=0)
-    stage: str | None = Field(default=None, max_length=16)  # opportunity/quote/negotiation/won/lost
-    expected_close_at: datetime | None = None
-    owner_id: int | None = Field(default=None, ge=1)
-    note: str | None = Field(default=None, max_length=2000)
-
-
-class OpportunityOut(BaseModel):
-    id: int
-    lead_id: int
-    name: str
-    amount: int
-    stage: str
-    expected_close_at: datetime | None
-    won_at: datetime | None
-    owner_id: int | None
-    owner_name: str | None = None
-    note: str | None
-    created_at: datetime
-    updated_at: datetime
-
-    model_config = {"from_attributes": True}
-
-
-# ---------- 话术审核队列（PRD §56） ----------
-
-
-class MessageOut(BaseModel):
-    id: int
-    lead_id: int
-    lead_name: str | None = None  # 列表接口注入
-    channel: str
-    content: str
-    status: str  # draft/approved/sent/rejected
-    generated_by: str  # llm / template
-    created_by: int | None
-    reviewed_by: int | None
-    sent_at: datetime | None
-    created_at: datetime
-    updated_at: datetime
-
-    model_config = {"from_attributes": True}
-
-
-class MessageReviewPayload(BaseModel):
-    action: str = Field(pattern="^(approve|reject|mark_sent)$")
-
-
-# ---------- AI / 自然语言搜索（PRD §25/§26/§27） ----------
+# ---------- AI（PRD §25/§26：§七 输出规格的「系统判断/AI 话术」） ----------
 
 
 class AiAnalysisOut(BaseModel):

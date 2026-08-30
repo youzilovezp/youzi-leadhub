@@ -125,7 +125,31 @@ OVERSEAS_LABELS_ZH: dict[str, str] = {
     "shipping": "海外配送",
     "markets": "海外市场提及",
     "export_words": "出海自述",
+    "domain_tld": "海外域名",
 }
+
+# 海外 ccTLD（§4.2「海外域名」）：官网注册在海外国家顶级域 = 出海经营证据
+_OVERSEAS_CCTLD = {
+    "sg", "my", "id", "th", "ph", "vn", "jp", "kr", "in", "pk", "bd",
+    "ae", "sa", "qa", "kw", "om", "bh", "tr", "ng", "ke", "gh", "za", "eg",
+    "ma", "br", "mx", "co", "ar", "cl", "pe", "gb", "de", "fr", "it", "nl",
+    "es", "pt", "pl", "au", "nz", "us", "ca",
+}
+
+
+def detect_domain_tld(website: str | None) -> str | None:
+    """官网域名的海外 ccTLD（返回如 'sg'/'my'；.com 等 gTLD 或 .cn 返回 None）。"""
+    if not website:
+        return None
+    from app.collectors.normalize import extract_domain
+
+    domain = (extract_domain(website) or "").lower()
+    if not domain or "." not in domain:
+        return None
+    tld = domain.rsplit(".", 1)[-1]
+    if tld in _OVERSEAS_CCTLD:
+        return tld
+    return None
 
 
 def _dedup_keep_order(items: list[str]) -> list[str]:

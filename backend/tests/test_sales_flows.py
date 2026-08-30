@@ -109,78 +109,6 @@ async def test_assign_release_and_auto_assign(client, admin_credentials):
         await client.delete(f"/api/v1/collect/leads/{lid}", headers=h)
 
 
-async def test_opportunity_lifecycle_and_funnel(client, admin_credentials):
-    """商机（§37）：创建 → 推进 → 成交联动线索状态 → 漏斗/排行统计。"""
-    h = await _login(client, admin_credentials)
-    lead = await _mk_lead(client, h, "Opp Co", country="MY", website="https://oppco.com")
-
-    r = await client.post(
-        f"/api/v1/sales/leads/{lead['id']}/opportunities",
-        headers=h,
-        json={"name": "WA 客服 SaaS 年单", "amount": 12000},
-    )
-    opp = r.json()["data"]
-    assert opp["stage"] == "opportunity" and opp["amount"] == 12000
-
-    # 创建商机联动线索状态
-    detail = (await client.get(f"/api/v1/collect/leads/{lead['id']}", headers=h)).json()["data"]
-    assert detail["follow_status"] == "opportunity"
-    assert len(detail["opportunities"]) == 1
-
-    # 非法阶段被拦
-    r = await client.put(
-        f"/api/v1/sales/leads/{lead['id']}/opportunities/{opp['id']}",
-        headers=h,
-        json={"stage": "whatever"},
-    )
-    assert r.json()["code"] == 40001
-
-    # 推进到成交：won_at 落库 + 线索状态联动
-    r = await client.put(
-        f"/api/v1/sales/leads/{lead['id']}/opportunities/{opp['id']}",
-        headers=h,
-        json={"stage": "won"},
-    )
-    assert r.json()["data"]["won_at"] is not None
-    detail = (await client.get(f"/api/v1/collect/leads/{lead['id']}", headers=h)).json()["data"]
-    assert detail["follow_status"] == "won"
-
-    # 漏斗（§38）与排行榜（§40）
-    funnel = (await client.get("/api/v1/sales/funnel", headers=h)).json()["data"]
-    assert funnel["stages"].get("won", 0) >= 1
-    assert funnel["won_amount"] >= 12000
-    board = (await client.get("/api/v1/sales/leaderboard", headers=h)).json()["data"]
-    assert any(row["won"] >= 1 and row["won_amount"] >= 12000 for row in board)
-
-    await client.delete(f"/api/v1/collect/leads/{lead['id']}", headers=h)
-
-
-async def test_message_queue_flow(client, admin_credentials):
-    """话术队列（§56）：生成（未配置 LLM → 模板降级）→ 通过 → 标记已发。"""
-    h = await _login(client, admin_credentials)
-    lead = await _mk_lead(client, h, "Msg Co", country="MY", website="https://msgco.com")
-
-    r = await client.post(f"/api/v1/sales/leads/{lead['id']}/messages/generate", headers=h)
-    msg = r.json()["data"]
-    assert msg["status"] == "draft" and msg["generated_by"] in ("llm", "template")
-    assert len(msg["content"]) > 30
-
-    # 未审核不能直接标记已发
-    r = await client.post(f"/api/v1/sales/messages/{msg['id']}/review", headers=h, json={"action": "mark_sent"})
-    assert r.json()["code"] == 40001
-    # 通过 → 标记已发
-    r = await client.post(f"/api/v1/sales/messages/{msg['id']}/review", headers=h, json={"action": "approve"})
-    assert r.json()["data"]["status"] == "approved"
-    r = await client.post(f"/api/v1/sales/messages/{msg['id']}/review", headers=h, json={"action": "mark_sent"})
-    assert r.json()["data"]["status"] == "sent" and r.json()["data"]["sent_at"]
-
-    # 队列筛选
-    msgs = (await client.get("/api/v1/sales/messages", headers=h, params={"status": "sent"})).json()["data"]
-    assert any(m["id"] == msg["id"] for m in msgs["items"])
-
-    await client.delete(f"/api/v1/collect/leads/{lead['id']}", headers=h)
-
-
 async def test_alerts_endpoint(client, admin_credentials):
     """预警中心（§55）：is_alert 事件可查（无预警时为空也成立）。"""
     h = await _login(client, admin_credentials)
@@ -190,8 +118,8 @@ async def test_alerts_endpoint(client, admin_credentials):
     assert "items" in body and "total" in body
 
 
-async def test_ai_analysis_fallback_and_nl_requires_llm(client, admin_credentials):
-    """AI 分析（§25）未配置 LLM → 规则模板降级；NL 搜索（§27）未配置 → 明确业务错误。"""
+async def test_ai_analysis_fallback(client, admin_credentials):
+    """AI 分析（§25）未配置 LLM → 规则模板降级。"""
     h = await _login(client, admin_credentials)
     lead = await _mk_lead(client, h, "AI Co", country="MY", website="https://aico.com")
 
@@ -199,14 +127,6 @@ async def test_ai_analysis_fallback_and_nl_requires_llm(client, admin_credential
     data = r.json()["data"]
     assert data["generated_by"] in ("llm", "template")
     assert data["summary"] and data["entry_point"]
-
-    r = await client.post(
-        "/api/v1/sales/leads/search-nl", headers=h, json={"text": "深圳跨境电商美国市场"}
-    )
-    # 未配置 LLM 的环境 → 40001 业务错误（配置了则返回 params）
-    assert r.json()["code"] in (0, 40001)
-    if r.json()["code"] == 0:
-        assert "params" in r.json()["data"]
 
     await client.delete(f"/api/v1/collect/leads/{lead['id']}", headers=h)
 

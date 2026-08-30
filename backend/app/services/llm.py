@@ -2,10 +2,9 @@
 
 兼容智谱 GLM（https://open.bigmodel.cn/api/paas/v4）/ DeepSeek / OpenAI 等：
     LLM_BASE_URL / LLM_API_KEY / LLM_MODEL
-三个能力：
+两个能力（PRD §七 输出规格 + §十一 三层架构的 LLM 层；NL 搜索已按需求边界移除）：
     ai_analysis    企业概况/WhatsApp 机会/潜在痛点/推荐产品/切入点（§25）
     sales_script   首触话术生成（§26）
-    parse_nl_query 自然语言 → 结构化筛选参数（§27/§28）
 降级策略：未配置 key 或调用失败 → 抛 LLMNotConfigured / 由调用方回退规则模板，
 响应带 generated_by: llm|template 标记，前端明示来源。
 """
@@ -18,7 +17,7 @@ from typing import Any
 import httpx
 from loguru import logger
 
-from app.collectors.recommend import recommend_products, sales_suggestion
+from app.collectors.recommend import recommend_products
 from app.collectors.scenes import SAAS_LABELS_ZH, SCENE_LABELS_ZH
 from app.collectors.scoring import DIM_LABELS_ZH
 from app.core.config import settings
@@ -153,50 +152,3 @@ async def sales_script(lead: Any) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         logger.warning("llm.sales_script 降级模板：{}: {}", type(exc).__name__, exc)
         return {"script": _script_fallback(lead), "generated_by": "template"}
-
-
-# ---------- §27/§28 自然语言搜索 ----------
-
-_NL_SYSTEM = """把销售的自然语言线索筛选请求转成 JSON 查询参数。可用键：
-keyword(关键词，企业名/邮箱/域名片段)、country(ISO2 两位码，如 US/MY/SG；中国=CN)、
-industry(行业词)、grade(S/A/B/C)、min_score(整数)、whatsapp_hit(true/false)、
-is_cn(true/false)、follow_status(unassigned/pending/contacted/replied/opportunity/quote/negotiation/won/invalid/paused)。
-推断规则：城市名放 keyword（如"深圳"）；"跨境电商/消费电子"等放 industry；
-"美国市场"→country=US；"用WhatsApp"→whatsapp_hit=true；"出海"→is_cn=true；"高分"→min_score=60。
-未提及的键不要输出。只输出 JSON。"""
-
-
-async def parse_nl_query(text: str) -> dict[str, Any]:
-    """自然语言 → 结构化筛选（§27）。需要 LLM，未配置抛 LLMNotConfigured。"""
-    result = await chat_json(_NL_SYSTEM, text)
-    # 白名单过滤，防模型输出非法键
-    allowed = {
-        "keyword", "country", "industry", "grade", "min_score",
-        "whatsapp_hit", "is_cn", "follow_status",
-    }
-    cleaned = {k: v for k, v in result.items() if k in allowed and v not in (None, "")}
-    if isinstance(cleaned.get("country"), str):
-        cleaned["country"] = cleaned["country"].upper()[:2]
-    if cleaned.get("grade") not in (None, "S", "A", "B", "C"):
-        cleaned.pop("grade", None)
-    return cleaned
-
-
-# 规则版建议（详情页旧字段沿用）
-def rule_suggestion(lead: Any, dims: dict[str, int], contacts: list[Any]) -> str:
-    return sales_suggestion(
-        grade=lead.grade,
-        whatsapp_url=lead.whatsapp_url,
-        whatsapp_job=lead.whatsapp_job,
-        saas_signals=lead.saas_signals,
-        has_tier1_contact=any(c.seniority == "tier1" for c in contacts),
-        products=recommend_products(
-            whatsapp_hit=lead.whatsapp_hit,
-            whatsapp_url=lead.whatsapp_url,
-            whatsapp_job=lead.whatsapp_job,
-            scenes=lead.scenes,
-            saas_signals=lead.saas_signals,
-            industry=lead.industry,
-            dim_saas=dims.get("saas", 0),
-        ),
-    )
