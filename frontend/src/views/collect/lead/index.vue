@@ -3,11 +3,21 @@ import { computed, h, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { NButton, NTag, type DataTableColumns, type FormInst, type FormRules } from 'naive-ui'
 import * as collectApi from '@/api/collect'
-import type { Lead, GeoOptions, IndustryOption } from '@/api/collect'
+import { FOLLOW_STATUS_OPTIONS, followStatusLabel } from '@/api/collect'
+import type {
+  FollowOptions,
+  FollowStatus,
+  FollowUpRecord,
+  GeoOptions,
+  IndustryOption,
+  Lead,
+} from '@/api/collect'
+import { useUserStore } from '@/stores/user'
 import { formatTime } from '@/utils/format'
 import { message, confirm } from '@/utils/feedback'
 
 const router = useRouter()
+const userStore = useUserStore()
 const loading = ref(false)
 const tableData = ref<Lead[]>([])
 const total = ref(0)
@@ -47,7 +57,13 @@ const query = reactive({
   min_score: null as number | null,
   // naive-ui select 的 boolean 值类型不兼容，用字符串承载
   whatsapp: null as 'hit' | 'miss' | null,
+  follow_status: null as FollowStatus | null,
+  owner_id: null as number | null,
+  due_follow: false,
 })
+
+/** 跟进弹窗选项（状态词表 + 跟进人下拉），onMounted 拉一次 */
+const followOptions = ref<FollowOptions>({ statuses: FOLLOW_STATUS_OPTIONS, users: [] })
 
 function whatsappFilter(): boolean | undefined {
   return !query.whatsapp ? undefined : query.whatsapp === 'hit'
@@ -83,7 +99,14 @@ const cityOptions = computed(() =>
   (geo.value.cities_by_country[form.country] || []).map((c) => ({ label: c, value: c }))
 )
 
-const stats = ref({ total_leads: 0, whatsapp_leads: 0, high_intent_leads: 0, active_tasks: 0 })
+const stats = ref({
+  total_leads: 0,
+  whatsapp_leads: 0,
+  high_intent_leads: 0,
+  active_tasks: 0,
+  pending_leads: 0,
+  due_follow_leads: 0,
+})
 
 async function fetchData() {
   loading.value = true
@@ -97,6 +120,9 @@ async function fetchData() {
       source: query.source || undefined,
       min_score: query.min_score ?? undefined,
       whatsapp_hit: whatsappFilter(),
+      follow_status: query.follow_status || undefined,
+      owner_id: query.owner_id ?? undefined,
+      due_follow: query.due_follow || undefined,
     })
     tableData.value = data.items
     total.value = data.total
@@ -160,6 +186,72 @@ async function handleCheckWhatsApp() {
   const task = await collectApi.checkWhatsApp(ids)
   message.success(`已创建检测任务 #${task.id}，进度在任务详情页查看`)
   router.push(`/collect/task/${task.id}`)
+}
+
+// ---------- 跟进 ----------
+const FOLLOW_TAG_TYPES: Record<string, 'default' | 'info' | 'success' | 'error' | 'warning'> = {
+  pending: 'default',
+  following: 'info',
+  interested: 'success',
+  not_interested: 'error',
+  unreachable: 'warning',
+  converted: 'success',
+}
+
+/** 该回访了：约定了下次跟进时间且已到期 */
+function isDue(row: Lead): boolean {
+  return !!row.next_follow_at && new Date(row.next_follow_at).getTime() <= Date.now()
+}
+
+const followVisible = ref(false)
+const followSubmitting = ref(false)
+const followHistory = ref<FollowUpRecord[]>([])
+const followTarget = ref<Lead | null>(null)
+const followForm = reactive({
+  status: 'following' as FollowStatus,
+  owner_id: null as number | null,
+  note: '',
+  /** n-date-picker 的值是时间戳（毫秒），提交时转 ISO */
+  next_follow: null as number | null,
+})
+
+async function openFollowUp(row: Lead) {
+  followTarget.value = row
+  followForm.status = row.follow_status ?? 'following'
+  followForm.owner_id = row.owner_id ?? userStore.userInfo?.id ?? null
+  followForm.note = ''
+  followForm.next_follow = null
+  followVisible.value = true
+  // 历史时间线独立加载，不阻塞弹窗打开
+  followHistory.value = []
+  try {
+    followHistory.value = await collectApi.getFollowUps(row.id)
+  } catch {
+    /* 历史加载失败不挡跟进 */
+  }
+}
+
+/** 时间线节点配色与状态词表一致 */
+function timelineType(s: string): 'default' | 'info' | 'success' | 'error' | 'warning' {
+  return FOLLOW_TAG_TYPES[s] ?? 'default'
+}
+
+async function handleFollowSubmit() {
+  if (!followTarget.value) return
+  followSubmitting.value = true
+  try {
+    await collectApi.followUpLead(followTarget.value.id, {
+      status: followForm.status,
+      owner_id: followForm.owner_id ?? undefined,
+      note: followForm.note.trim() || undefined,
+      next_follow_at: followForm.next_follow ? new Date(followForm.next_follow).toISOString() : undefined,
+    })
+    message.success('跟进已记录')
+    followVisible.value = false
+    fetchData()
+  } finally {
+    followSubmitting.value = false
+  }
 }
 
 // ---------- 表格 ----------
@@ -274,6 +366,35 @@ const columns: DataTableColumns<Lead> = [
     },
   },
   {
+    title: '跟进人',
+    key: 'owner_name',
+    width: 100,
+    render: (row) =>
+      row.owner_name
+        ? h('span', { style: 'font-weight:500' }, row.owner_name)
+        : h('span', { style: `color:${PLACEHOLDER_GRAY}` }, '—'),
+  },
+  {
+    title: '跟进状态',
+    key: 'follow_status',
+    width: 120,
+    render: (row) =>
+      h('div', { style: 'display:flex;align-items:center;gap:4px' }, [
+        h(
+          NTag,
+          {
+            size: 'small',
+            bordered: false,
+            type: row.follow_status ? FOLLOW_TAG_TYPES[row.follow_status] || 'default' : 'default',
+          },
+          { default: () => followStatusLabel(row.follow_status) }
+        ),
+        isDue(row)
+          ? h('span', { style: 'font-size:12px;color:#d03050;font-weight:600' }, '该回访')
+          : null,
+      ]),
+  },
+  {
     title: '采集时间',
     key: 'created_at',
     width: 160,
@@ -283,14 +404,27 @@ const columns: DataTableColumns<Lead> = [
   {
     title: '操作',
     key: 'actions',
-    width: 80,
+    width: 140,
     fixed: 'right', // 列多时固定右侧，横向滚动也不丢操作按钮
     render(row) {
-      return h(
-        NButton,
-        { size: 'small', quaternary: true, type: 'error', onClick: () => handleDelete(row) },
-        { default: () => '删除' }
-      )
+      const buttons = [
+        h(
+          NButton,
+          { size: 'small', quaternary: true, type: 'primary', onClick: () => openFollowUp(row) },
+          { default: () => '跟进' }
+        ),
+      ]
+      // 删线索是管理员操作，销售不可见
+      if (userStore.isSuperuser) {
+        buttons.push(
+          h(
+            NButton,
+            { size: 'small', quaternary: true, type: 'error', onClick: () => handleDelete(row) },
+            { default: () => '删除' }
+          )
+        )
+      }
+      return buttons
     },
   },
 ]
@@ -307,7 +441,18 @@ function handlePageSizeChange(s: number) {
 }
 
 function resetQuery() {
-  Object.assign(query, { page: 1, keyword: '', country: null, industry: null, source: null, min_score: null, whatsapp: null })
+  Object.assign(query, {
+    page: 1,
+    keyword: '',
+    country: null,
+    industry: null,
+    source: null,
+    min_score: null,
+    whatsapp: null,
+    follow_status: null,
+    owner_id: null,
+    due_follow: false,
+  })
   fetchData()
 }
 
@@ -317,6 +462,10 @@ onMounted(async () => {
   statsTimer = setInterval(fetchStats, 15000)
   geo.value = await collectApi.getGeoOptions()
   fetchIndustryOptions()
+  collectApi
+    .getFollowOptions()
+    .then((o) => (followOptions.value = o))
+    .catch(() => {}) // 拉不到就先只按状态筛，不阻塞页面
 })
 onUnmounted(() => {
   if (statsTimer) clearInterval(statsTimer)
@@ -334,6 +483,10 @@ onUnmounted(() => {
           <span>检测到 WhatsApp <b class="stat-wa">{{ stats.whatsapp_leads }}</b></span>
           <n-divider vertical />
           <span>高意向（≥40 分） <b>{{ stats.high_intent_leads }}</b></span>
+          <n-divider vertical />
+          <span>待跟进 <b class="stat-pending">{{ stats.pending_leads }}</b></span>
+          <n-divider vertical />
+          <span>该回访 <b class="stat-due">{{ stats.due_follow_leads }}</b></span>
           <n-divider vertical />
           <span>进行中任务 <b>{{ stats.active_tasks }}</b></span>
         </div>
@@ -373,6 +526,22 @@ onUnmounted(() => {
           clearable
           style="width: 130px"
         />
+        <n-select
+          v-model:value="query.follow_status"
+          :options="followOptions.statuses"
+          placeholder="跟进状态"
+          clearable
+          style="width: 120px"
+        />
+        <n-select
+          v-model:value="query.owner_id"
+          :options="followOptions.users"
+          placeholder="跟进人"
+          clearable
+          filterable
+          style="width: 120px"
+        />
+        <n-checkbox v-model:checked="query.due_follow" size="small">该回访了</n-checkbox>
         <n-button type="primary" secondary @click="() => { query.page = 1; fetchData() }">查询</n-button>
         <n-button quaternary @click="resetQuery">重置</n-button>
         <div class="flex-1" />
@@ -386,7 +555,7 @@ onUnmounted(() => {
     <n-data-table
       v-model:checked-row-keys="checkedKeys"
       remote
-      :scroll-x="1330"
+      :scroll-x="1610"
       :columns="columns"
       :data="tableData"
       :loading="loading"
@@ -452,6 +621,70 @@ onUnmounted(() => {
         </div>
       </template>
     </n-modal>
+
+    <!-- 跟进弹窗：上半历史时间线，下半本次跟进表单 -->
+    <n-modal
+      v-model:show="followVisible"
+      preset="card"
+      :title="followTarget ? `跟进 · ${followTarget.name}` : '跟进线索'"
+      style="width: 560px"
+    >
+      <div class="follow-history">
+        <n-timeline v-if="followHistory.length">
+          <n-timeline-item
+            v-for="rec in followHistory"
+            :key="rec.id"
+            :type="timelineType(rec.status)"
+            :title="`${rec.user_name || '—'} · ${followStatusLabel(rec.status)}`"
+            :content="rec.note || ''"
+            :time="formatTime(rec.created_at)"
+          >
+            <template v-if="rec.next_follow_at" #footer>
+              下次跟进：{{ formatTime(rec.next_follow_at) }}
+            </template>
+          </n-timeline-item>
+        </n-timeline>
+        <n-empty v-else description="暂无跟进记录" size="small" />
+      </div>
+      <n-form label-placement="left" label-width="90" style="margin-top: 12px">
+        <n-form-item label="跟进状态" required>
+          <n-select v-model:value="followForm.status" :options="followOptions.statuses" />
+        </n-form-item>
+        <n-form-item label="跟进人">
+          <n-select
+            v-model:value="followForm.owner_id"
+            :options="followOptions.users"
+            placeholder="留空默认本人"
+            clearable
+            filterable
+          />
+        </n-form-item>
+        <n-form-item label="跟进备注">
+          <n-input
+            v-model:value="followForm.note"
+            type="textarea"
+            :rows="3"
+            maxlength="2000"
+            show-count
+            placeholder="本次沟通情况，如：已发 WhatsApp，对方明天回复"
+          />
+        </n-form-item>
+        <n-form-item label="下次跟进">
+          <n-date-picker
+            v-model:value="followForm.next_follow"
+            type="datetime"
+            clearable
+            style="width: 100%"
+          />
+        </n-form-item>
+      </n-form>
+      <template #footer>
+        <div class="flex justify-end gap-3">
+          <n-button @click="followVisible = false">取消</n-button>
+          <n-button type="primary" :loading="followSubmitting" @click="handleFollowSubmit">保存跟进</n-button>
+        </div>
+      </template>
+    </n-modal>
   </div>
 </template>
 
@@ -468,5 +701,18 @@ onUnmounted(() => {
 }
 .stat-wa {
   color: #18a058;
+}
+.stat-pending {
+  color: #f0a020;
+}
+.stat-due {
+  color: #d03050;
+}
+/* 跟进历史时间线：限制高度内部滚动，弹窗不至于被长历史撑爆 */
+.follow-history {
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 4px 4px 0;
+  border-bottom: 1px dashed var(--yz-border-color, #e0e0e6);
 }
 </style>

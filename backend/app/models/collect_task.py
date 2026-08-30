@@ -24,6 +24,10 @@ class CollectTask(Base, TimestampMixin):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     # 隐式任务：线索列表勾选「检测 WhatsApp」自动创建，不在任务列表默认展示噪音
     is_implicit: Mapped[bool] = mapped_column(Boolean, default=False)
+    # 操作人：谁创建的任务（显式建任务 / 勾选检测的当前用户）
+    created_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
 
     # pending（已建未排队）/ queued（排队中）/ running / completed / failed / cancelled
     status: Mapped[str] = mapped_column(String(16), default="pending", index=True)

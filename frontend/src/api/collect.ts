@@ -24,8 +24,62 @@ export interface Lead {
   score: number
   score_signals: Record<string, number>
   sources: Array<{ source: string; first_seen: string; last_seen: string }>
+  owner_id: number | null
+  owner_name: string | null
+  follow_status: FollowStatus | null
+  last_followed_at: string | null
+  next_follow_at: string | null
   created_at: string
   updated_at: string
+}
+
+/** 跟进状态（后端 FOLLOW_STATUS_OPTIONS 同词表） */
+export type FollowStatus =
+  | 'pending'
+  | 'following'
+  | 'interested'
+  | 'not_interested'
+  | 'unreachable'
+  | 'converted'
+
+export const FOLLOW_STATUS_OPTIONS: Array<{ value: FollowStatus; label: string }> = [
+  { value: 'pending', label: '待跟进' },
+  { value: 'following', label: '跟进中' },
+  { value: 'interested', label: '有意向' },
+  { value: 'not_interested', label: '无意向' },
+  { value: 'unreachable', label: '联系不上' },
+  { value: 'converted', label: '已成交' },
+]
+
+/** 状态 → 中文（null/未知值兜底「待跟进」） */
+export function followStatusLabel(v: string | null): string {
+  return FOLLOW_STATUS_OPTIONS.find((s) => s.value === v)?.label ?? '待跟进'
+}
+
+/** 跟进历史记录（弹窗时间线） */
+export interface FollowUpRecord {
+  id: number
+  lead_id: number
+  user_id: number | null
+  user_name: string | null
+  status: FollowStatus
+  note: string | null
+  next_follow_at: string | null
+  created_at: string
+}
+
+export interface FollowUpPayload {
+  status: FollowStatus
+  owner_id?: number
+  note?: string
+  /** ISO 字符串（UTC） */
+  next_follow_at?: string
+}
+
+/** 跟进弹窗下拉选项（/collect/follow-options 一次拉全） */
+export interface FollowOptions {
+  statuses: Array<{ value: FollowStatus; label: string }>
+  users: Array<{ value: number; label: string }>
 }
 
 export interface LeadPage {
@@ -45,6 +99,10 @@ export interface LeadQuery {
   whatsapp_hit?: boolean
   has_website?: boolean
   keyword?: string
+  follow_status?: FollowStatus
+  owner_id?: number
+  /** 只看「该回访了」（下次跟进时间已到期） */
+  due_follow?: boolean
 }
 
 export interface LeadCreatePayload {
@@ -66,6 +124,8 @@ export interface CollectTask {
   cron_expr: string | null
   enabled: boolean
   is_implicit: boolean
+  created_by: number | null
+  created_by_name: string | null
   status: 'pending' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
   progress_total: number
   progress_done: number
@@ -154,6 +214,23 @@ export function checkWhatsApp(leadIds: number[]) {
   return request.post<CollectTask, CollectTask>('/collect/leads/check-whatsapp', { lead_ids: leadIds })
 }
 
+// ---------- 跟进 ----------
+
+/** 跟进弹窗选项（状态词表 + 可选跟进人） */
+export function getFollowOptions() {
+  return request.get<FollowOptions, FollowOptions>('/collect/follow-options')
+}
+
+/** 记录跟进：更新线索跟进人/状态并写一条历史，返回更新后的线索 */
+export function followUpLead(id: number, payload: FollowUpPayload) {
+  return request.post<Lead, Lead>(`/collect/leads/${id}/follow-up`, payload)
+}
+
+/** 跟进历史（最近 50 条，最新在前） */
+export function getFollowUps(id: number) {
+  return request.get<FollowUpRecord[], FollowUpRecord[]>(`/collect/leads/${id}/follow-ups`)
+}
+
 // ---------- 任务 ----------
 
 export function getGeoOptions() {
@@ -211,7 +288,21 @@ export function getTaskLogs(id: number, afterId = 0, pageSize = 200) {
 
 export function getStats() {
   return request.get<
-    { total_leads: number; whatsapp_leads: number; high_intent_leads: number; active_tasks: number },
-    { total_leads: number; whatsapp_leads: number; high_intent_leads: number; active_tasks: number }
+    {
+      total_leads: number
+      whatsapp_leads: number
+      high_intent_leads: number
+      active_tasks: number
+      pending_leads: number
+      due_follow_leads: number
+    },
+    {
+      total_leads: number
+      whatsapp_leads: number
+      high_intent_leads: number
+      active_tasks: number
+      pending_leads: number
+      due_follow_leads: number
+    }
   >('/collect/stats')
 }
