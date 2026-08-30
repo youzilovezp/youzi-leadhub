@@ -54,19 +54,13 @@ const routes: RouteRecordRaw[] = [
         path: 'sales',
         name: 'SalesCockpit',
         component: () => import('@/views/sales/index.vue'),
-        meta: { title: '销售驾驶舱' },
+        meta: { title: '数据源管理' },
       },
       {
         path: 'sales/alerts',
         name: 'SalesAlerts',
         component: () => import('@/views/sales/alerts.vue'),
         meta: { title: '高价值预警' },
-      },
-      {
-        path: 'sales/messages',
-        name: 'SalesMessages',
-        component: () => import('@/views/sales/messages.vue'),
-        meta: { title: '话术审核' },
       },
       {
         path: 'collect/lead/:id',

@@ -14,7 +14,7 @@
 | 用户管理 | `/api/v1/users` | ✅ 超管 | CRUD + 重置密码 |
 | 角色管理 | `/api/v1/roles` | ✅ 超管 | CRUD（RBAC 权限码） |
 | 线索采集 | `/api/v1/collect` | ✅ 登录 | 线索 / 联系人 / 事件 / 分配 / 跟进 / 任务 / 统计 |
-| 销售工作台 | `/api/v1/sales` | ✅ 登录 | 商机 / 话术 / 预警 / AI / 漏斗排行 |
+| 销售域 | `/api/v1/sales` | ✅ 登录 | 预警 / AI 分析与话术 / 数据源管理 |
 
 ## 2. 统一响应格式
 
@@ -140,8 +140,8 @@ Authorization: Bearer <access_token>
 | `GET /collect/leads` | 线索列表（筛选：国家/行业/来源/最低分/`grade` S·A·B·C/WhatsApp 检测/关键词/跟进状态/跟进人/`due_follow` 该回访/是否中国出海；行含 `contacts_count`、`recommended_products`、`owner_name`） | CurrentUser ＋ 数据权限 ✅ |
 | `POST /collect/leads` | 手工录入线索（同样走去重合并） | CurrentUser |
 | `GET /collect/leads/export` | 导出 CSV（当前筛选口径，`fields` 指定列、`limit`≤50000，UTF-8 BOM 兼容 Excel，流式分批产出） | CurrentUser ＋ 数据权限 ✅ |
-| `GET /collect/leads/{lead_id}` | 线索详情（企业画像：六维分+权重、联系人、事件/跟进各 50 条、产品推荐、销售建议、信号证据链、商机） | CurrentUser ＋ 数据权限 ✅（范围外 404） |
-| `DELETE /collect/leads/{lead_id}` | 删除线索（级联删联系人/事件/跟进，PG 下信号/话术/商机外键级联） | SuperUser |
+| `GET /collect/leads/{lead_id}` | 线索详情（企业画像：六维分+权重、加分明细、联系人、事件/跟进各 50 条、产品推荐、销售建议、信号证据链） | CurrentUser ＋ 数据权限 ✅（范围外 404） |
+| `DELETE /collect/leads/{lead_id}` | 删除线索（级联删联系人/事件/跟进/信号证据） | SuperUser |
 | `POST /collect/leads/check-whatsapp` | 勾选线索 → 创建隐式 `website_enrich` 任务（复用进度/取消/闸门） | CurrentUser |
 | `GET /collect/collectors` | 采集器列表（含 param_schema，前端动态表单） | CurrentUser |
 | `GET /collect/geo-options` | 国家/城市选项（表单联动数据源） | CurrentUser |
@@ -197,44 +197,28 @@ Authorization: Bearer <access_token>
 
 > 任务执行依赖**单进程**后端（`WORKERS=1`），多 worker 部署时任务会卡 queued——见 docs/运维部署.md §1.1/§4.1。
 
-### 5.11 商机 `/api/v1/sales`
+### 5.11 话术审核队列 `/api/v1/sales`
 
 | 端点 | 说明 | 权限 |
 |---|---|---|
-| `GET /sales/leads/{lead_id}/opportunities` | 商机列表 | CurrentUser ＋ 数据权限 ✅ |
-| `POST /sales/leads/{lead_id}/opportunities` | 新增商机（线索状态联动推进到有效商机） | CurrentUser ＋ 数据权限 ✅ |
-| `PUT /sales/leads/{lead_id}/opportunities/{opp_id}` | 推进阶段/改金额（成交联动线索状态 `won`） | CurrentUser ＋ 数据权限 ✅ |
-| `DELETE /sales/leads/{lead_id}/opportunities/{opp_id}` | 删除商机 | CurrentUser ＋ 数据权限 ✅ |
-| `GET /sales/stage-options` | 商机阶段词表 | CurrentUser |
 
-### 5.12 话术审核队列 `/api/v1/sales`
-
-| 端点 | 说明 | 权限 |
-|---|---|---|
-| `GET /sales/messages` | 话术队列（`status` / `lead_id` 筛选，分页） | CurrentUser ＋ 数据权限 ✅ |
-| `POST /sales/leads/{lead_id}/messages/generate` | 生成首触话术（LLM，未配置自动降级模板）并进入待审核队列 | CurrentUser ＋ 数据权限 ✅ |
-| `POST /sales/messages/{message_id}/review` | 审核话术（`approve`/`reject`）或标记已发送（`mark_sent`，人工复制发送后回填；**系统不自动外发**） | CurrentUser ＋ 数据权限 ✅ |
-
-### 5.13 高价值预警 `/api/v1/sales`
+### 5.12 高价值预警 `/api/v1/sales`
 
 | 端点 | 说明 | 权限 |
 |---|---|---|
 | `GET /sales/alerts` | 高价值客户预警（发现 WhatsApp / SaaS 信号 / 等级升 S·A 等标记 `is_alert` 的事件，分页） | CurrentUser ＋ 数据权限 ✅ |
 
-### 5.14 AI 能力 `/api/v1/sales`
+### 5.13 AI 能力 `/api/v1/sales`
 
 | 端点 | 说明 | 权限 |
 |---|---|---|
 | `GET /sales/leads/{lead_id}/ai-analysis` | AI 分析客户（企业概况/机会/痛点/推荐/切入点；LLM 未配置降级规则模板，`generated_by` 标记来源） | CurrentUser ＋ 数据权限 ✅ |
-| `POST /sales/leads/{lead_id}/sales-script` | 生成销售话术（不落库，预览用；入队列走 messages/generate） | CurrentUser ＋ 数据权限 ✅ |
-| `POST /sales/leads/search-nl` | 自然语言 → 结构化筛选参数（**需配置 LLM**，未配置返回 40001 提示） | **`lead:read`** |
+| `POST /sales/leads/{lead_id}/sales-script` | 生成销售话术（§七「AI 话术：已生成」；LLM 未配置降级模板） | CurrentUser ＋ 数据权限 ✅ |
 
-### 5.15 统计（漏斗/排行/数据源） `/api/v1/sales`
+### 5.14 统计（漏斗/排行/数据源） `/api/v1/sales`
 
 | 端点 | 说明 | 权限 |
 |---|---|---|
-| `GET /sales/funnel` | 销售漏斗（各阶段线索数 + 商机金额口径） | **`stats:read`** |
-| `GET /sales/leaderboard` | 销售排行榜（线索数/商机数/成交数/成交金额） | **`stats:read`** |
 | `GET /sales/data-sources` | 数据源管理（per-collector 任务数/成功率/数据量/最后运行 + 渠道×等级产出） | **`stats:read`** |
 
 ## 6. 调用示例
