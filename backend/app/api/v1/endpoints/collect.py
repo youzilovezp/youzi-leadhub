@@ -465,6 +465,112 @@ async def export_leads(
 
 
 @router.get(
+    "/leads/daily-batch",
+    response_model=ResponseModel[dict],
+    summary="今日商机批次（销售每天直接收到一批值得联系的客户）",
+)
+async def daily_batch_endpoint(db: SessionDep, user: CurrentUser):
+    """当日口径（UTC 日界）：只看 ICP qualified 且 ≥60 分（S/A）。
+
+    三组内容：
+    - promoted：今日新晋 S/A（grade_change 事件 old 非 S/A → new S/A）
+    - new_leads：今日新增的高分商机（排除已进 promoted 的）
+    - alerts：今日高价值预警事件（is_alert，预警中心当日切片）
+
+    注意：路由须声明在 /leads/{lead_id} 之前（同 export）。
+    """
+    from datetime import datetime, timezone
+
+    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # 今日等级变化事件 → 新晋 S/A（内存过滤 payload，事件量级小）
+    ev_rows = (
+        await db.execute(
+            select(LeadEvent)
+            .where(LeadEvent.event_type == "grade_change", LeadEvent.created_at >= today)
+            .order_by(LeadEvent.created_at.desc())
+            .limit(500)
+        )
+    ).scalars().all()
+    promoted_ids: list[int] = []
+    for ev in ev_rows:
+        new_g = (ev.payload or {}).get("new")
+        old_g = (ev.payload or {}).get("old")
+        if new_g in ("S", "A") and old_g not in ("S", "A"):
+            promoted_ids.append(ev.lead_id)
+
+    # qualified + ≥60 分 + 数据权限（与列表同口径，§43）
+    scope_ids, include_unassigned = await scope_filter_params(db, user)
+
+    def _base_conds() -> list:
+        conds = [Lead.icp_status == "qualified", Lead.score >= 60]
+        if scope_ids is not None:
+            from sqlalchemy import or_
+
+            visible = Lead.owner_id.in_(scope_ids)
+            if include_unassigned:
+                visible = or_(Lead.owner_id.is_(None), visible)
+            conds.append(visible)
+        return conds
+
+    promoted: list[Lead] = []
+    if promoted_ids:
+        stmt = select(Lead).where(Lead.id.in_(promoted_ids), *_base_conds())
+        promoted = list((await db.execute(stmt.order_by(Lead.score.desc()))).scalars().all())
+    promoted_set = {i.id for i in promoted}
+
+    new_conds = _base_conds() + [Lead.created_at >= today]
+    if promoted_set:
+        new_conds.append(Lead.id.notin_(promoted_set))
+    new_leads = list(
+        (
+            await db.execute(
+                select(Lead).where(*new_conds).order_by(Lead.score.desc()).limit(200)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    alert_rows = (
+        await db.execute(
+            select(LeadEvent)
+            .where(LeadEvent.is_alert, LeadEvent.created_at >= today)
+            .order_by(LeadEvent.created_at.desc())
+            .limit(100)
+        )
+    ).scalars().all()
+    name_map = {i.id: i.name for i in [*promoted, *new_leads]}
+    missing = {ev.lead_id for ev in alert_rows} - set(name_map)
+    if missing:
+        for row in (await db.execute(select(Lead.id, Lead.name).where(Lead.id.in_(missing)))).all():
+            name_map[row.id] = row.name
+
+    outs_promoted = [LeadOut.model_validate(i) for i in promoted]
+    outs_new = [LeadOut.model_validate(i) for i in new_leads]
+    await _fill_lead_list_fields(db, promoted, outs_promoted)
+    await _fill_lead_list_fields(db, new_leads, outs_new)
+
+    return ResponseModel(
+        data={
+            "date": today.date().isoformat(),
+            "promoted": [o.model_dump(mode="json") for o in outs_promoted],
+            "new_leads": [o.model_dump(mode="json") for o in outs_new],
+            "alerts": [
+                {
+                    "lead_id": ev.lead_id,
+                    "lead_name": name_map.get(ev.lead_id, f"#{ev.lead_id}"),
+                    "event_type": ev.event_type,
+                    "note": ev.note,
+                    "created_at": ev.created_at.isoformat(),
+                }
+                for ev in alert_rows
+            ],
+        }
+    )
+
+
+@router.get(
     "/leads/{lead_id}",
     response_model=ResponseModel[LeadDetailOut],
     summary="线索详情（企业画像：六维分/联系人/事件/推荐/销售建议）",
@@ -735,6 +841,38 @@ async def release_lead_endpoint(
     await db.commit()
     await db.refresh(lead)
     return ResponseModel(data=LeadOut.model_validate(lead))
+
+
+@router.post(
+    "/leads/{lead_id}/claim",
+    response_model=ResponseModel[LeadOut],
+    summary="领取线索（销售自助认领共享池商机，无需主管权限）",
+)
+async def claim_lead_endpoint(
+    db: SessionDep,
+    lead_id: int,
+    user: CurrentUser,
+):
+    """§七 输出规格的「领取线索」：销售看到商机一键认领。
+
+    撞单保护：已被他人跟进的线索报错（改派走 assign，需主管权限）；
+    自己已持有则幂等返回。
+    """
+    lead = await db.get(Lead, lead_id)
+    if lead is None:
+        raise NotFoundError("线索不存在")
+    if lead.owner_id is not None and lead.owner_id != user.id:
+        other = (await _user_display_map(db, {lead.owner_id})).get(lead.owner_id) or f"#{lead.owner_id}"
+        raise BusinessError(code=40001, message=f"该线索已由 {other} 跟进（撞单保护）")
+    try:
+        await assign_lead(db, lead, user.id, assigned_by=user.id)
+    except ValueError as exc:
+        raise BusinessError(code=40001, message=str(exc)) from exc
+    await db.commit()
+    await db.refresh(lead)
+    out = LeadOut.model_validate(lead)
+    out.owner_name = (await _user_display_map(db, {lead.owner_id})).get(lead.owner_id)
+    return ResponseModel(data=out)
 
 
 @router.post(

@@ -468,6 +468,35 @@ export function deleteLead(id: number) {
   return request.delete<unknown, unknown>(`/collect/leads/${id}`)
 }
 
+/** 领取线索（销售自助认领共享池商机，撞单 40001 由拦截器提示） */
+export function claimLead(id: number) {
+  return request.post<Lead, Lead>(`/collect/leads/${id}/claim`)
+}
+
+/** 今日高价值预警事件切片（daily-batch 附带） */
+export interface DailyAlertItem {
+  lead_id: number
+  lead_name: string
+  event_type: string
+  note: string | null
+  created_at: string
+}
+
+/** 今日商机批次（业务主线：销售每天直接收到一批值得联系的客户） */
+export interface DailyBatch {
+  date: string
+  /** 今日新晋 S/A（grade_change 事件触发） */
+  promoted: Lead[]
+  /** 今日新增高分商机（qualified 且 ≥60 分，与 promoted 不重叠） */
+  new_leads: Lead[]
+  /** 今日高价值预警事件 */
+  alerts: DailyAlertItem[]
+}
+
+export function getDailyBatch() {
+  return request.get<DailyBatch, DailyBatch>('/collect/leads/daily-batch')
+}
+
 /** 勾选线索 → 创建隐式 website_enrich 任务，返回任务（跳转详情轮询进度） */
 export function checkWhatsApp(leadIds: number[]) {
   return request.post<CollectTask, CollectTask>('/collect/leads/check-whatsapp', { lead_ids: leadIds })

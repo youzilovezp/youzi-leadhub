@@ -202,6 +202,13 @@ async function handleDelete(row: Lead) {
   fetchIndustryOptions()
 }
 
+// ---------- 领取线索（共享池一键认领，撞单由后端 40001 兜底） ----------
+async function handleClaim(row: Lead) {
+  const lead = await collectApi.claimLead(row.id)
+  message.success(`已领取「${lead.name}」，请尽快跟进`)
+  fetchData()
+}
+
 // ---------- 批量检测 WhatsApp（隐式任务） ----------
 async function handleCheckWhatsApp() {
   const ids = checkedKeys.value
@@ -614,6 +621,16 @@ const columns: DataTableColumns<Lead> = [
           { default: () => '跟进' }
         ),
       ]
+      // 共享池商机一键领取（§七「领取线索」）；已有人跟进则不显示（撞单保护在后端）
+      if (!row.owner_id) {
+        buttons.push(
+          h(
+            NButton,
+            { size: 'small', quaternary: true, type: 'success', onClick: () => handleClaim(row) },
+            { default: () => '领取' }
+          )
+        )
+      }
       // 删线索是管理员操作，销售不可见
       if (userStore.isSuperuser) {
         buttons.push(
