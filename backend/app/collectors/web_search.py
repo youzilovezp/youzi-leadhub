@@ -53,6 +53,29 @@ _DDGTAG_RE = re.compile(r"<[^>]+>")
 _DDGUDDG_RE = re.compile(r"[?&]uddg=([^&]+)")
 
 
+# 文章/内容页启发词（标题或 URL 路径命中即弃——搜索「whatsapp 客服」类词
+# 首页结果大量是内容平台文章，不是要找的企业官网）
+_ARTICLE_TITLE_WORDS = (
+    "指南", "测评", "手册", "必看", "攻略", "如何", "怎么办", "完整", "清单",
+    "排行", "对比", "top 10", "top10", "best ", "how to", "guide", "review", "tutorial",
+    "vs ", "tips", "checklist", "解密", "深度", "解析", "入门", "实战",
+)
+_ARTICLE_PATH_WORDS = (
+    "/blog", "/article", "/articles", "/news", "/docs", "/doc/", "/archives",
+    "/zh_cn/", "/zh-cn/", "/support/", "/help/", "/learn/", "/resources",
+    "/post/", "/dy/article", "/p/", ".html", ".htm", ".php",
+)
+
+
+def _looks_like_article(title: str, url: str) -> bool:
+    """标题/URL 是否内容页（文章/文档/博客）而非企业官网页面。"""
+    t = title.lower()
+    if any(w in t for w in _ARTICLE_TITLE_WORDS):
+        return True
+    path = urllib.parse.urlparse(url).path.lower()
+    return any(w in path for w in _ARTICLE_PATH_WORDS)
+
+
 def _is_company_site(url: str) -> bool:
     """搜索结果 URL 是否企业官网（滤平台/社媒/文档站）。"""
     domain = extract_domain(url) or ""
@@ -82,7 +105,7 @@ def parse_ddg_html(html: str) -> list[dict[str, Any]]:
     return items
 
 
-def results_to_drafts(items: list[dict[str, Any]]) -> list[LeadDraft]:
+def results_to_drafts(items: list[dict[str, Any]], params_is_cn: Any = True) -> list[LeadDraft]:
     """搜索结果项（{title|name, url|link}）→ 企业官网种子 Draft。
 
     公司名取标题主体（剥 " - 后缀" / " | 后缀"），官网取 URL——
@@ -90,41 +113,60 @@ def results_to_drafts(items: list[dict[str, Any]]) -> list[LeadDraft]:
     """
     drafts: list[LeadDraft] = []
     seen_domains: set[str] = set()
+    is_cn = str(params_is_cn).lower() != "false" if isinstance(params_is_cn, str) else bool(params_is_cn)
     for it in items:
         url = (it.get("url") or it.get("link") or "").strip()
         title = (it.get("name") or it.get("title") or "").strip()
         if not url or not title or not _is_company_site(url):
             continue
+        if _looks_like_article(title, url):
+            continue  # 内容页（指南/测评/博客）不是企业官网种子
         domain = extract_domain(url) or ""
         if not domain or domain in seen_domains:
             continue
         seen_domains.add(domain)
+        # 种子入口归一为站点根：富化从首页开始，内页由链接发现逻辑自己找
+        url = f"https://{domain}"
         for sep in (" - ", " | ", " – ", " — "):
             if sep in title:
                 title = title.split(sep)[0].strip() or title
                 break
-        drafts.append(LeadDraft(source="web_search", name=title[:255], website=url))
+        d = LeadDraft(source="web_search", name=title[:255], website=url)
+        d.is_cn = is_cn
+        drafts.append(d)
     return drafts
 
 
 async def _search(
-    client: httpx.AsyncClient, engine: str, kw: str, limit: int
+    clients: tuple[httpx.AsyncClient, httpx.AsyncClient], engine: str, kw: str, limit: int
 ) -> tuple[list[dict[str, Any]], str | None]:
-    """按引擎执行搜索，返回 (归一结果, 错误信息)。"""
+    """按引擎执行搜索，返回 (归一结果, 错误信息)。
+
+    双通道（与 meta_ads 同策略）：代理优先（国内网络访问 DDG/Google 域被墙），
+    连接失败/软拦截切直连兜底（海外部署）。
+    """
     if engine == "duckduckgo":
-        resp = await client.post(
-            "https://html.duckduckgo.com/html/",
-            data={"q": kw, "kl": "wt-wt"},
-            headers={"User-Agent": _UA, "Referer": "https://duckduckgo.com/"},
-        )
-        if resp.status_code != 200:
-            return [], f"DDG {resp.status_code}"
-        return parse_ddg_html(resp.text)[:limit], None
+        err: str | None = None
+        for client in clients:
+            try:
+                resp = await client.post(
+                    "https://html.duckduckgo.com/html/",
+                    data={"q": kw, "kl": "wt-wt"},
+                    headers={"User-Agent": _UA, "Referer": "https://duckduckgo.com/"},
+                )
+            except httpx.HTTPError as exc:
+                err = f"DDG 连接失败 {type(exc).__name__}"
+                continue
+            if resp.status_code != 200:
+                err = f"DDG {resp.status_code}"
+                continue
+            return parse_ddg_html(resp.text)[:limit], None
+        return [], err or "DDG 不可达"
 
     if engine == "searxng":
         if not settings.SEARXNG_URL:
             return [], "未配置 SEARXNG_URL"
-        resp = await client.get(
+        resp = await clients[0].get(
             f"{settings.SEARXNG_URL.rstrip('/')}/search",
             params={"q": kw, "format": "json"},
         )
@@ -135,7 +177,7 @@ async def _search(
     if engine == "google_cse":
         if not (settings.GOOGLE_CSE_KEY and settings.GOOGLE_CSE_CX):
             return [], "未配置 GOOGLE_CSE_KEY/CX"
-        resp = await client.get(
+        resp = await clients[0].get(
             "https://www.googleapis.com/customsearch/v1",
             params={
                 "key": settings.GOOGLE_CSE_KEY,
@@ -151,7 +193,7 @@ async def _search(
     if engine == "bing":
         if not settings.BING_SEARCH_KEY:
             return [], "未配置 BING_SEARCH_KEY"
-        resp = await client.get(
+        resp = await clients[0].get(
             "https://api.bing.microsoft.com/v7.0/search",
             headers={"Ocp-Apim-Subscription-Key": settings.BING_SEARCH_KEY},
             params={"q": kw, "count": limit, "responseFilter": "Webpages"},
@@ -183,6 +225,14 @@ class WebSearchCollector(Collector):
             "placeholder": "1-50",
             "default": "20",
         },
+        {
+            "key": "is_cn",
+            "label": "标记为中国企业（出海 ICP）",
+            "required": False,
+            "type": "switch",
+            "placeholder": "主爬中国企业（默认开）；关掉则采集海外本地企业",
+            "default": "true",
+        },
     ]
 
     def validate_params(self, params: dict[str, Any]) -> None:
@@ -205,16 +255,20 @@ class WebSearchCollector(Collector):
         ctx.set_total(len(keywords))
         ok_queries = 0
 
-        async with httpx.AsyncClient(timeout=_TIMEOUT, trust_env=False) as client:
+        async with (
+            httpx.AsyncClient(timeout=_TIMEOUT) as via_proxy,
+            httpx.AsyncClient(timeout=_TIMEOUT, trust_env=False) as direct,
+        ):
+            clients = (via_proxy, direct)
             for kw in keywords:
                 ctx.check_cancelled()
                 await ctx.log("info", f"搜索（{engine}）：「{kw}」")
-                items, err = await _search(client, engine, kw, max_results)
+                items, err = await _search(clients, engine, kw, max_results)
                 if err:
                     await ctx.log("error", f"「{kw}」搜索失败：{err}")
                 else:
                     ok_queries += 1
-                    drafts = results_to_drafts(items)
+                    drafts = results_to_drafts(items, ctx.params.get("is_cn", True))
                     for d in drafts:
                         await ctx.emit(d)
                     if items:

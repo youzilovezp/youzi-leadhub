@@ -299,30 +299,51 @@ async def test_scheduler_sync_skips_bad_cron(db_session):
         scheduler._scheduler = None
 
 
-def test_job_posting_company_level_mapping():
-    """岗位帖 → 公司级线索：社媒 URL 入 social、官网入 website、岗位 URL 入 job_urls。
+def test_job_posting_jobui_parsing():
+    """jobui 职位卡解析：公司名/职位名/链接提取 + 招聘信号按标题分类 + is_cn 标记。
 
-    whatsapp_job 只认岗位标题本身含 WhatsApp 语义——搜索词是检索入口不是信号
-    （搜 "customer service" 时命中岗位并非都是 WA 岗）。
+    whatsapp_job 只认岗位标题本身含 WhatsApp 语义——搜索词仅是检索入口。
     """
-    from app.collectors.job_posting import _job_to_draft
+    from app.collectors.job_posting import parse_jobui_html
 
-    job = {
-        "id": 1, "slug": "cs-whatsapp", "name": "WhatsApp Customer Service", "companyName": "Acme",
-        "company": {"code": "acme"},
-        "companyInfo": {"url": "https://facebook.com/acme"},
-        "googleLocation": {"addressComponents": {"city": "Manila"}},
-    }
-    d = _job_to_draft(job, "PH", "https://kalibrr.com/job-board?search=whatsapp")
-    assert d.name == "Acme" and d.country == "PH" and d.city == "Manila"
-    assert d.whatsapp_job is True and d.website is None
-    assert d.social == {"facebook": "https://facebook.com/acme"}
-    assert d.job_urls == ["https://kalibrr.com/c/acme/jobs/1/cs-whatsapp"]
+    html = """
+    <div class="c-job-list">
+      <h3><a href="/job/315174730/">WhatsApp 海外客服专员</a></h3>
+      <a href="/company/22833319/" class="job-company-logo-link"><img src="x.png"></a>
+      <span class="job-company-name">上海派能能源科技股份有限公司</span>
+      <span class="job-city">上海</span>
+      <a href="/job/315174730/">查看</a>
+    </div>
+    <div class="c-job-list">
+      <h3>行政前台</h3>
+      <span class="job-company-name">某中国公司</span>
+      <a href="/job/332284665/">查看</a>
+    </div>
+    """
+    drafts = parse_jobui_html(html, "https://www.jobui.com/jobs?jobKw=whatsapp")
+    assert len(drafts) == 2
+    d1, d2 = drafts
+    assert d1.name == "上海派能能源科技股份有限公司"
+    assert d1.country == "CN" and d1.is_cn is True  # 中国招聘站 → 中国企业
+    assert d1.city == "上海"
+    assert d1.job_urls == ["https://www.jobui.com/job/315174730/"]
+    assert d1.whatsapp_job is True  # 标题含 WhatsApp 海外客服
+    assert "wa_ops" in d1.job_signals and "overseas_cs" in d1.job_signals
+    assert d2.whatsapp_job is False and d2.job_signals == {}  # 普通岗不误标
 
-    # 非WhatsApp岗位标题：即使搜索词是 whatsapp 也不置信号（防误报）
-    d2 = _job_to_draft({**job, "name": "Retail Sales Associate"}, "PH", "u")
-    assert d2.whatsapp_job is False
-
-    d3 = _job_to_draft({**job, "companyInfo": {"url": "https://acme.ph"}}, "PH", "u")
-    assert d3.website == "https://acme.ph" and d3.social == {}
-    assert _job_to_draft({"companyName": None}, "PH", "u") is None  # 无名丢弃
+async def test_source_filter_regression(client, admin_credentials):
+    """source 筛选回归：JSON 列 cast(Text) 写法在 SQLAlchemy 2.x 下构造即抛
+    TypeError（存量 bug——cast(func.text()) 非法），此前是无测试盲区。"""
+    h = {"Authorization": f"Bearer {(await client.post('/api/v1/auth/login', json=admin_credentials)).json()['data']['access_token']}"}
+    for name, web in (("SrcFilterA Co", "https://srcfiltera.com"), ("SrcFilterB Co", "https://srcfilterb.com")):
+        await client.post("/api/v1/collect/leads", headers=h, json={"name": name, "country": "MY", "website": web})
+    # 不带 source：两条都在
+    all_items = (await client.get("/api/v1/collect/leads?keyword=SrcFilter", headers=h)).json()["data"]["items"]
+    assert len(all_items) == 2
+    # 带 source=manual：筛选不炸且命中（此前 500）
+    r = await client.get("/api/v1/collect/leads?keyword=SrcFilter&source=manual", headers=h)
+    assert r.status_code == 200, r.text
+    assert len(r.json()["data"]["items"]) == 2
+    # 不存在的 source：空集
+    r2 = await client.get("/api/v1/collect/leads?keyword=SrcFilter&source=web_search", headers=h)
+    assert r2.status_code == 200 and r2.json()["data"]["items"] == []

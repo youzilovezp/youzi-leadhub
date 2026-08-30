@@ -470,7 +470,7 @@ def _lead_conditions(
     is_cn: bool | None = None,
 ) -> list:
     """线索筛选条件构造（列表与导出共用，保证两边口径一致）。"""
-    from sqlalchemy import func, or_
+    from sqlalchemy import Text, func, or_
 
     conds = []
     if country:
@@ -505,7 +505,7 @@ def _lead_conditions(
         # sources 是 JSON 数组，用 LIKE 匹配。序列化格式有两种：
         # Python json.dumps 默认带空格（"source": "x"），PG jsonb / 部分驱动是紧凑格式
         # （"source":"x"）——两种都匹配，否则 PG 下筛选直接失灵。
-        src_text = Lead.sources.cast(func.text())
+        src_text = Lead.sources.cast(Text)
         conds.append(
             or_(src_text.contains(f'"source": "{source}"'),
                 src_text.contains(f'"source":"{source}"'))

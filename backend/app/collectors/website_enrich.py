@@ -34,6 +34,7 @@ from app.collectors.scenes import (
     SCENE_LABELS_ZH,
     detect_saas_signals,
     detect_scenes,
+    page_text,
 )
 from app.core.config import settings
 
@@ -68,6 +69,15 @@ _WA_BUSINESS_RES = [
     re.compile(r"wa\s+business\s+(?:account|number|api)", re.I),
     re.compile(r"whatsapp\s*商业号|whatsapp\s*企业号", re.I),
 ]
+
+
+def detect_cn_content(html_list: list[str | None]) -> bool:
+    """页面是否以中文为主（中国企业官网特征）：可见文本 CJK 占比 ≥ 30%。"""
+    joined = page_text(html_list)
+    if not joined:
+        return False
+    cjk = sum(1 for ch in joined if "一" <= ch <= "鿿")
+    return cjk / len(joined) >= 0.30
 
 
 def detect_wa_business(html_list: list[str | None]) -> bool:
@@ -118,18 +128,18 @@ async def _fetch(client: httpx.AsyncClient, url: str) -> str | None:
         return None
 
 
-# 采集 client 必须 trust_env=False：后端进程常继承系统代理（all_proxy），
-# 代理对目标站点可能软拦截（实测返回 202），导致「首页抓取失败」误报。
-# 采集目标站一律直连；未来需要走代理时显式加 COLLECT_PROXY 配置。
-# ponytail: verify=False 仅作为末级兜底 client，只用于读公开页面，可接受
-_SSL_LOOSE_CLIENT_ARGS = {"verify": False}
+# 采集 client 双通道（与 meta_ads / web_search 同策略）：
+# - 主通道走系统代理（出海官网多在海外/CDN 后，国内直连不可达——实测
+#   shein.com/banggood.com 直连超时）；未配代理环境 = 等效直连
+# - 兜底通道强制直连 + 宽松 SSL（防代理对目标站软拦截返回 202 的误报，
+#   primal.com.ph 案例；证书过期的小站也能抓）
+_SSL_LOOSE_CLIENT_ARGS = {"verify": False, "trust_env": False}
 
 
 def _make_client(**kwargs: Any) -> httpx.AsyncClient:
     return httpx.AsyncClient(
         headers={"User-Agent": _UA, "Accept-Language": "en"},
         timeout=_TIMEOUT,
-        trust_env=False,
         **kwargs,
     )
 
@@ -423,6 +433,10 @@ async def _enrich_one(
         if wa_business and not lead.wa_business:
             lead.wa_business = True
             touch_field_meta(lead, "wa_business", "website_enrich", confidence=75, now=now)
+        if not lead.is_cn and detect_cn_content(pages):
+            # 中国企业特征（§ICP）：官网含显著中文内容——中文站服务海外市场 = 出海企业
+            lead.is_cn = True
+            touch_field_meta(lead, "is_cn", "website_enrich", confidence=85, now=now)
         if overseas:
             merged_ov = dict(lead.overseas_signals or {})
             for k, vals in overseas.items():
