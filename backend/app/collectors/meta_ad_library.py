@@ -431,7 +431,6 @@ class MetaAdsCollector(Collector):
 
                 # 信号级证据链（§4.1）：广告在投 / FB WA 按钮 / 主页号码
                 from app.crud.lead_signals import upsert_signal
-
                 from app.db.session import async_session
 
                 async with async_session() as session:

@@ -140,7 +140,6 @@ class JobPostingCollector(Collector):
                     # 信号级证据（§4.1）：招聘信号带岗位帖 URL 作证据
                     if draft.job_signals:
                         from app.crud.lead_signals import upsert_signal
-
                         from app.db.session import async_session
 
                         async with async_session() as session:

@@ -22,9 +22,15 @@ services:
         condition: service_healthy
 
     restart: unless-stopped
+    # 容器日志轮转：stdout 日志不设上限会撑满磁盘（json-file 默认无限）
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     healthcheck:
-      # /readyz 含 DB ping，503 表示未就绪。slim 镜像无 wget，用 python urllib 替代。
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/readyz', timeout=3).status == 200 else 1)"]
+      # /readyz 含 DB ping，503 表示未就绪。镜像已装 curl（比 fork python 省资源）。
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/readyz"]
       interval: 30s
       timeout: 10s
       retries: 3
