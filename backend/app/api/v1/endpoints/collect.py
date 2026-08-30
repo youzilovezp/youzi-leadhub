@@ -123,6 +123,7 @@ async def _fill_lead_list_fields(db: SessionDep, items: list[Lead], outs: list[L
                 saas_signals=i.saas_signals,
                 industry=i.industry,
                 dim_saas=describe_dimensions(i.score_signals).get("saas", 0),
+                sources=i.sources,
             )
         ]
 
@@ -371,6 +372,7 @@ async def export_leads(
                         saas_signals=lead.saas_signals,
                         industry=lead.industry,
                         dim_saas=describe_dimensions(lead.score_signals).get("saas", 0),
+                        sources=lead.sources,
                     )
                 )
             elif key == "owner_name":
@@ -619,6 +621,7 @@ async def get_lead_detail(db: SessionDep, user: CurrentUser, lead_id: int):
         saas_signals=lead.saas_signals,
         industry=lead.industry,
         dim_saas=dims.get("saas", 0),
+        sources=lead.sources,
     )
     suggestion = sales_suggestion(
         grade=lead.grade,

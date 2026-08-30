@@ -99,6 +99,7 @@ async def ai_analysis(lead: Any, dims: dict[str, int], contacts: list[Any]) -> d
         saas_signals=lead.saas_signals,
         industry=lead.industry,
         dim_saas=dims.get("saas", 0),
+        sources=lead.sources,
     )
     fallback = {
         "summary": f"{lead.name}（{lead.industry or '行业未知'}，{lead.country or '地区未知'}），等级 {lead.grade}",
@@ -132,6 +133,7 @@ def _script_fallback(lead: Any) -> str:
         scenes=lead.scenes,
         saas_signals=lead.saas_signals,
         industry=lead.industry,
+        sources=lead.sources,
     )
     top = recs[0]["name"] if recs else "WhatsApp 商业化解决方案"
     return (
