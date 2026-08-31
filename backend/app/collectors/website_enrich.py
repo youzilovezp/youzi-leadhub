@@ -50,18 +50,20 @@ _WHATSAPP_PATTERNS = [
     re.compile(p, re.IGNORECASE)
     for p in (
         r"(?:https?://)?wa\.me/(\+?\d{6,15})",
-        r"(?:https?://)?api\.whatsapp\.com/send[^\s\"'<>]*?phone=(\+?\d{6,15})",
-        r"wp\.whatsapp\.com/send[^\s\"'<>]*?phone=(\+?\d{6,15})",
+        # send 链接的三个子域形态：api（插件标准）/ wp（短链跳转）/ web（人工从
+        # WhatsApp 里复制的分享链接——2026-09-01 实测 mugroup.com 漏检根因：
+        # web 子域没覆盖，导致 hit=True 却捕获不到号码，wa_url/号码/自动联系人全空）
+        r"(?:https?://)?(?:api|web|wp)\.whatsapp\.com/send[^\s\"'<>]*?phone=(\+?\d{6,15})",
         r"whatsapp[^a-z0-9]{0,20}(?:send|chat|message)",
         r"(?:ht-ctc|joinchat|getbutton|chaty|elfsight|click-to-chat|whatsapp-chat)",
     )
 ]
 # 群组邀请链接（PRD §4.1）：chat.whatsapp.com/xxx = 已在运营 WhatsApp 社群（私域证据）
 _GROUP_LINK_RE = re.compile(r"https?://chat\.whatsapp\.com/[A-Za-z0-9_-]{5,}")
-# 命中前 3 条之一的捕获组 → 拿到号码还原标准链接；插件指纹命中则只置标记
-_PHONE_PATTERNS = _WHATSAPP_PATTERNS[:3]
-# 插件特征（第 5 条）：ht-ctc/joinchat/getbutton/chaty/elfsight/click-to-chat
-_PLUGIN_PATTERNS = _WHATSAPP_PATTERNS[4:]
+# 命中前 2 条之一的捕获组 → 拿到号码还原标准链接；插件指纹命中则只置标记
+_PHONE_PATTERNS = _WHATSAPP_PATTERNS[:2]
+# 插件特征（末条）：ht-ctc/joinchat/getbutton/chaty/elfsight/click-to-chat
+_PLUGIN_PATTERNS = _WHATSAPP_PATTERNS[3:]
 
 # WhatsApp Business 使用代理判定（§4.1「号码类型/入口形态」）：页面自述在用
 # WhatsApp Business（业务号而非个人号）——文本或类属性出现即认为命中
@@ -88,6 +90,21 @@ def detect_icp_license(html_list: list[str] | list[str | None] | None) -> str | 
         return None
     m = _ICP_LICENSE_RE.search(joined)
     return m.group(0) if m else None
+
+
+_TEXT_PHONE_RE = re.compile(r"\+\d{1,3}[\s\-]?(?:\d[\s\-]?){7,12}\d")
+
+
+def detect_text_phones(html_list: list[str]) -> list[str]:
+    """页面明文国际格式电话（如「+86 137 3602 8159」）→ 候选串列表。
+
+    只认带国际区号前缀的明文（+86/+65/+91…）——裸座机号误报面大不碰；
+    候选串先抓宽（分隔符随意），有效性交给 phonenumbers（libphonenumber
+    官方移植，号码合法性业界标准）在调用侧校验归一。
+    """
+    from app.collectors.scenes import page_text
+
+    return [m.group(0).strip() for m in _TEXT_PHONE_RE.finditer(page_text(html_list, keep_case=True))]
 
 
 def backfill_profile_fields(
@@ -126,9 +143,9 @@ def backfill_profile_fields(
             touched = True
     if not lead.address:
         m = re.search(
-            r"(?:地\s*址|address|addr)\s*[：:\s]\s*"
-            r"([一-鿿a-zA-Z0-9.,·\-（）()\s]{4,60}?)"
-            r"(?=\s*(?:电话|邮箱|传真|邮编|地图|tel|fax|email|map|$))",
+            r"(?:地\s*址|address\s*\d|address|adress\s*\d|adress|addr)\s*[：:.]?\s*"
+            r"([一-鿿a-zA-Z0-9.,·\-（）()#/&\s]{8,120}?)"
+            r"(?=\s*(?:address|adress|地址|电话|邮箱|传真|邮编|地图|tel|fax|email|map|$))",
             page_text(pages, keep_case=True),
             re.IGNORECASE,
         )
@@ -1059,15 +1076,19 @@ async def _enrich_one(
         from app.collectors.normalize import normalize_phone
 
         tel_phones = detect_tel_phones(pages)
-        if tel_phones and not lead.phone_e164:
+        # 明文国际格式电话（「CONTACT US +86 137 3602 8159」类——2026-09-01 实测
+        # mugroup.com：多数联系页不写 tel: 链接，电话就是正文文本）
+        text_phones = detect_text_phones(pages)
+        for raw in [*tel_phones, *text_phones]:
+            if lead.phone_e164:
+                break
             region = "CN" if (lead.is_cn or (lead.country or "").upper() == "CN") else None
-            for raw in tel_phones:
-                e164 = normalize_phone(raw, region)
-                if e164:
-                    lead.phone_raw = lead.phone_raw or raw
-                    lead.phone_e164 = e164
-                    touch_field_meta(lead, "phone_e164", "website_enrich", confidence=85, now=now)
-                    break
+            e164 = normalize_phone(raw, region)
+            if e164:
+                lead.phone_raw = lead.phone_raw or raw
+                lead.phone_e164 = e164
+                touch_field_meta(lead, "phone_e164", "website_enrich", confidence=85, now=now)
+                break
         # WhatsApp 号码 → 自动联系人（name 待补全、电话即号码——销售的直接建联对象）
         from app.crud.contact import auto_create_from_phone
 
