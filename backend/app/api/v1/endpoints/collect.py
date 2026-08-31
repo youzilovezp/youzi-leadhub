@@ -244,6 +244,12 @@ async def import_leads(db: SessionDep, user: CurrentUser, payload: LeadImportPay
     rows = [r for r in reader if any(c.strip() for c in r)]
     if not rows:
         raise BusinessError(code=40001, message="CSV 内容为空")
+    # 行数上限（2026-08-31 审计）：登录用户即可调用本接口，无上限 = 一次灌库
+    if len(rows) > 5000:
+        raise BusinessError(
+            code=40001,
+            message=f"单次导入最多 5000 行（收到 {len(rows)} 行），请分批导入",
+        )
 
     # 首行是表头（含 name 字样）则跳过
     first = [c.strip().lower() for c in rows[0]]
@@ -556,11 +562,18 @@ async def daily_batch_endpoint(db: SessionDep, user: CurrentUser):
 
     def _base_conds() -> list:
         # 终态排除（2026-08-31 审计）：已成交/已无效线索不回流今日商机——
-        # 销售不该再被推去联系已成交或已判无效的客户
+        # 销售不该再被推去联系已成交或已判无效的客户。
+        # NULL 必须显式放行：SQL 里 NULL NOT IN (...) 为假值，直接 notin_
+        # 会把「从未跟进」的共享池线索全部滤掉（存量 bug，promoted 恒空）
+        from sqlalchemy import or_
+
         conds = [
             Lead.icp_status == "qualified",
             Lead.score >= 60,
-            Lead.follow_status.notin_(["won", "invalid"]),
+            or_(
+                Lead.follow_status.is_(None),
+                Lead.follow_status.notin_(["won", "invalid"]),
+            ),
         ]
         if scope_ids is not None:
             from sqlalchemy import or_
@@ -715,6 +728,7 @@ async def get_lead_detail(db: SessionDep, user: CurrentUser, lead_id: int):
         sources=lead.sources,
     )
     # 信号体系（§4.2/§4.3/§4.1）：出海/招聘/广告信号 + 证据链
+    from app.collectors.icp import cn_evidence_of_lead
     from app.crud.lead_signals import SIGNAL_TYPE_LABELS_ZH, list_signals
 
     out.overseas_signals = dict(lead.overseas_signals or {})
@@ -723,7 +737,16 @@ async def get_lead_detail(db: SessionDep, user: CurrentUser, lead_id: int):
     out.job_signals = dict(lead.job_signals or {})
     out.ad_count = lead.ad_count or 0
     out.last_ad_at = lead.last_ad_at
+    out.cn_evidence = cn_evidence_of_lead(lead)
     signal_rows = await list_signals(db, lead_id)
+
+    def _stale_days(last_seen: datetime | None) -> int | None:
+        """距最近复现天数（SQLite naive datetime 按 UTC 补齐）。"""
+        if last_seen is None:
+            return None
+        seen = last_seen if last_seen.tzinfo else last_seen.replace(tzinfo=timezone.utc)
+        return max(0, (datetime.now(timezone.utc) - seen).days)
+
     out.signals = [
         SignalEvidenceOut(
             id=r.id,
@@ -736,6 +759,7 @@ async def get_lead_detail(db: SessionDep, user: CurrentUser, lead_id: int):
             source=r.source,
             first_seen=r.first_seen,
             last_seen=r.last_seen,
+            stale_days=_stale_days(r.last_seen),
         )
         for r in signal_rows
     ]

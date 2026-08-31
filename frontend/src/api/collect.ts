@@ -282,15 +282,20 @@ export const EVENT_TYPE_LABELS: Record<string, string> = {
   source_added: '新来源',
   manual_entry: '手工录入',
   whatsapp_found: '发现 WhatsApp',
+  whatsapp_gone: 'WhatsApp 入口消失',
+  fb_whatsapp_found: 'FB 主页挂 WA 按钮',
   whatsapp_job_found: '在招 WhatsApp 岗位',
   email_found: '发现邮箱',
   social_found: '新增社媒',
   scene_change: '场景变化',
   saas_signal_change: 'SaaS 需求信号',
+  overseas_signal_found: '出海信号',
+  job_signal_found: '招聘信号',
   score_change: '评分变化',
   grade_change: '等级变化',
   contact_added: '新增联系人',
   assigned: '分配变动',
+  status_change: '跟进状态变化',
   opportunity_created: '新增商机',
   opportunity_stage: '商机推进',
 }
@@ -315,9 +320,13 @@ export interface SignalEvidence {
   source: string
   first_seen: string | null
   last_seen: string | null
+  /** 距最近一次复现天数（null=无法判定）；≥90 视为信号可能过期 */
+  stale_days: number | null
 }
 
 export interface LeadDetail extends Lead {
+  /** CN 证据强度：strong=硬证据 / weak=仅 CJK 启发式（待核验）/ 空=非 CN */
+  cn_evidence: string
   dimensions: Record<string, number>
   dimension_weights: Record<string, number>
   contacts: Contact[]

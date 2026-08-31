@@ -63,12 +63,16 @@ async def test_quality_loop(client, admin_credentials, db_session):
     ids = [i["lead_id"] for i in r.json()["data"]["items"]]
     assert lead1.id in ids and lead2.id in ids
 
-    # 3) contact 队列：只有带邮箱联系人的 lead1 出队
+    # 3) contact 队列：带邮箱或电话联系人的线索出队（2026-08-31 审计扩展：
+    # WA 号码联系人是建联第一入口，纯电话联系人的 lead2 也必须可抽检）
     r = await client.get("/api/v1/quality/queue?field=contact&size=50", headers=h)
-    ids = [i["lead_id"] for i in r.json()["data"]["items"]]
-    assert lead1.id in ids and lead2.id not in ids
-    row = next(i for i in r.json()["data"]["items"] if i["lead_id"] == lead1.id)
-    assert any(c["email"] == "ops@qualx-one.com" for c in row["evidence"]["contacts"])
+    items = r.json()["data"]["items"]
+    ids = [i["lead_id"] for i in items]
+    assert lead1.id in ids and lead2.id in ids
+    row1 = next(i for i in items if i["lead_id"] == lead1.id)
+    assert any(c["email"] == "ops@qualx-one.com" for c in row1["evidence"]["contacts"])
+    row2 = next(i for i in items if i["lead_id"] == lead2.id)
+    assert any(c.get("phone") for c in row2["evidence"]["contacts"])
 
     # 4) 标注：lead1 whatsapp 判对、overseas 判对；lead2 overseas 判错
     for payload in (

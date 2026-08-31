@@ -188,17 +188,19 @@ def _extract_site(html: str) -> str | None:
 
 
 _KANA_RE = re.compile(r"[\u3040-\u30FF]")  # 平假名/片假名（日文判定用）
+_HANGUL_RE = re.compile(r"[\uAC00-\uD7A3]")  # 谚文（韩文判定用，KR 在目标市场下拉里）
 
 
 def _looks_cn(texts: list[str | None]) -> bool:
     """中国出海特征：品牌名或广告文案含中文（跨境大卖的素材普遍双语）。
 
-    同段文本含假名 → 日文（「山田商事」全汉字名会撞 CJK 区间），
-    判非中文（2026-08-31 审计：JP/KR 在目标市场下拉里，该场景真实可达）。
+    同段文本含假名 → 日文、含谚文 → 韩文（「山田商事」「삼성무역」类全汉字/
+    混汉字名会撞 CJK 区间），判非中文（2026-08-31 审计：JP/KR 在目标市场
+    下拉里，该场景真实可达）。
     """
     for t in texts:
         if t and _CJK_RE.search(t):
-            if not _KANA_RE.search(t):
+            if not _KANA_RE.search(t) and not _HANGUL_RE.search(t):
                 return True
     return False
 
@@ -441,6 +443,9 @@ class MetaAdsCollector(Collector):
 
                 if probe and rec["page_profile_uri"]:
                     html = await _fetch_page(clients, rec["page_profile_uri"])
+                    # 节流对成败一致（2026-08-31 审计：此前只在成功分支 sleep，
+                    # 失败探测无间隔连发，违背自述「探测间隔 ≥1.5s」纪律）
+                    await asyncio.sleep(_PROBE_DELAY)
                     if html is None:
                         probe_fail += 1
                         await ctx.log("warn", f"主页抓取失败：{name}")
@@ -474,7 +479,6 @@ class MetaAdsCollector(Collector):
                         site = _extract_site(html)
                         if site:
                             draft.website = site
-                        await asyncio.sleep(_PROBE_DELAY)
                 # 中文特征：品牌名 / 广告文案任一含 CJK
                 draft.is_cn = _looks_cn([rec["page_name"], *rec["bodies"]])
 

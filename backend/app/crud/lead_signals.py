@@ -26,6 +26,7 @@ SIGNAL_TYPE_LABELS_ZH: dict[str, str] = {
     "intl_shipping": "海外配送",
     "market_mention": "海外市场提及",
     "export_word": "出海自述",
+    "domain_tld": "海外域名",
     "job_signal": "招聘信号",
 }
 

@@ -10,12 +10,14 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
     false,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -24,6 +26,18 @@ from app.models.base_class import Base, TimestampMixin
 
 class Lead(Base, TimestampMixin):
     __tablename__ = "leads"
+    # domain 去重不变量下沉 DB（迁移 f7c2a91d4e21）：部分唯一索引，
+    # NULL 不受约束（多行无域正常）。并发双写同域 → IntegrityError，
+    # upsert/发现链按 savepoint 兜底退化为合并/负缓存
+    __table_args__ = (
+        Index(
+            "uq_leads_domain",
+            "domain",
+            unique=True,
+            sqlite_where=text("domain IS NOT NULL"),
+            postgresql_where=text("domain IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(255), index=True, nullable=False)

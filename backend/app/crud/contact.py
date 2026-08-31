@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from sqlalchemy import select
@@ -27,7 +28,7 @@ _TIER_KEYWORDS: list[tuple[str, list[str]]] = [
         [
             "cmo", "chief marketing", "marketing director", "marketing manager",
             "head of marketing", "growth", "customer service", "customer support",
-            "customer success", "crm",
+            "customer success", "crm", "vice president",
             "市场总监", "营销总监", "市场负责人", "客服负责人", "客服经理", "客服主管", "运营总监",
         ],
     ),
@@ -42,13 +43,31 @@ _TIER_KEYWORDS: list[tuple[str, list[str]]] = [
 ]
 
 
+# tier1 命中的排除词（2026-08-31 审计）：子串匹配下 "owner" 误吃 "Product
+# Owner"（中层敏捷角色）、"president" 误吃 "Vice President"——命中关键词且
+# 不含排除词才算 tier1；VP 归 tier2（仍是有分量的市场/客服决策人）
+_TIER1_NEGATIONS: dict[str, tuple[str, ...]] = {
+    "owner": ("product owner",),
+    "president": ("vice president", "vice-president", "vp "),
+}
+
+
+def _title_keyword_hit(title_lower: str, keyword: str) -> bool:
+    """关键词命中：中文子串 / ASCII 整词（\\b 词边界）+ 排除词守卫。"""
+    if any("一" <= ch <= "鿿" for ch in keyword):
+        return keyword in title_lower
+    if not re.search(rf"\b{re.escape(keyword)}\b", title_lower):
+        return False
+    return not any(neg in title_lower for neg in _TIER1_NEGATIONS.get(keyword, ()))
+
+
 def derive_seniority(job_title: str | None) -> str | None:
     """job_title → tier1/tier2/tier3/unknown；无 job_title 返回 None（未分层）。"""
     if not job_title or not job_title.strip():
         return None
     title = job_title.lower()
     for tier, keywords in _TIER_KEYWORDS:
-        if any(kw in title for kw in keywords):
+        if any(_title_keyword_hit(title, kw) for kw in keywords):
             return tier
     return "unknown"
 

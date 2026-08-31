@@ -624,7 +624,16 @@ onMounted(fetchDetail)
               </div>
               <div class="kv">
                 <span class="k">中国出海</span><span>{{ detail.is_cn ? '✓ 是' : '—' }}</span>
-                <span class="k">ICP 资格</span><span>{{ ICP_STATUS_LABELS[detail.icp_status] ?? detail.icp_status }}</span>
+                <span class="k">ICP 资格</span><span>
+                  {{ ICP_STATUS_LABELS[detail.icp_status] ?? detail.icp_status }}
+                  <n-tag
+                    v-if="detail.icp_status === 'qualified' && detail.cn_evidence === 'weak'"
+                    size="small"
+                    type="warning"
+                    :bordered="false"
+                    class="ml-1"
+                  >CN 待核验</n-tag>
+                </span>
                 <span class="k">主要市场</span>
                 <span>
                   <template v-if="detail.target_countries?.length">
@@ -756,6 +765,14 @@ onMounted(fetchDetail)
                   class="signal-type"
                 >
                   {{ sig.signal_type_label || sig.signal_type }}
+                </n-tag>
+                <n-tag
+                  v-if="sig.stale_days !== null && sig.stale_days >= 90"
+                  size="small"
+                  type="warning"
+                  :bordered="false"
+                >
+                  {{ sig.stale_days }} 天未复现
                 </n-tag>
                 <span class="signal-value">
                   {{ sig.value }}

@@ -75,7 +75,10 @@ _SHIPPING_RES = [
 ]
 
 # ---------- 海外市场国家提及（需求 §4.2 点名市场 + WA 高渗透区） ----------
-# (ISO2, 英文名/别名正则)；命中记英文国名展示
+# (ISO2, 英文名/别名正则)；命中记英文国名展示。
+# US/GB 刻意**不加** re.I（2026-08-31 审计教训）：小写 "us" 是代词
+# （"contact us"），混进正文匹配即误报「美国市场」——国名在文案里通常
+# 大写（USA/UK），市场检测跑保留大小写的正文（page_text keep_case）
 _MARKET_RES: list[tuple[str, re.Pattern[str]]] = [
     ("US", re.compile(r"\b(?:USA?|United States|America(?:n)?)\b")),
     ("GB", re.compile(r"\b(?:UK|United Kingdom|Britain|British)\b")),
@@ -163,19 +166,33 @@ def _dedup_keep_order(items: list[str]) -> list[str]:
     return out
 
 
-def detect_overseas_signals(html_list: list[str | None]) -> dict[str, list[str]]:
+def detect_overseas_signals(html_list: list[str] | list[str | None] | None) -> dict[str, list[str]]:
     """页面集合 → 出海信号（{键: [证据串]}，空命中键省略）。
 
-    纯函数无 IO； Markets 只数英文国名（中文语境的「美国」等由 zhCN 词表
-    覆盖会引入误报——中文站提「美国」多为资讯而非市场，暂不检测中文国名）。
+    两层匹配（2026-08-31 审计：此前全部跑在原始 HTML 上，script/样式里的
+    JS 变量名如 ``international_shipping`` 会触发误报）：
+    - 可见正文（page_text：剥 script/style/标签、小写）——货币/配送/市场/自述
+      这类「文案证据」只在正文算
+    - 原始 HTML——hreflang/语言切换链接/电商建站栈指纹靠属性与资源 URL，
+      剥标签就丢了，必须在 raw 里扫（品牌指纹思路同 scenes 的 wa_bsp）
+
+    Markets 只数英文国名（中文语境的「美国」等由 zhCN 词表覆盖会引入误报
+    ——中文站提「美国」多为资讯而非市场，暂不检测中文国名）。
     """
+    from app.collectors.scenes import page_text
+
+    if not html_list:
+        return {}
     joined = "\n".join(h for h in html_list if h)
     if not joined:
         return {}
+    text = page_text(html_list)
+    # 市场国名检测用保留大小写的正文（US/UK 大写才是国名，小写 us 是代词）
+    text_keepcase = page_text(html_list, keep_case=True)
 
     out: dict[str, list[str]] = {}
 
-    currencies = [code for code, rx in _CURRENCY_RES if rx.search(joined)]
+    currencies = [code for code, rx in _CURRENCY_RES if rx.search(text)]
     if currencies:
         out["currencies"] = currencies
 
@@ -192,20 +209,20 @@ def detect_overseas_signals(html_list: list[str | None]) -> dict[str, list[str]]
     shipping = [
         m.group(0)[:60].strip()
         for rx in _SHIPPING_RES
-        for m in [rx.search(joined)]
+        for m in [rx.search(text)]
         if m
     ]
     if shipping:
         out["shipping"] = _dedup_keep_order(shipping)
 
-    markets = [iso for iso, rx in _MARKET_RES if rx.search(joined)]
+    markets = [iso for iso, rx in _MARKET_RES if rx.search(text_keepcase)]
     if markets:
         out["markets"] = markets
 
     export_words = [
         m.group(0)[:60].strip()
         for rx in _EXPORT_WORDS_RES
-        for m in [rx.search(joined)]
+        for m in [rx.search(text)]
         if m
     ]
     if export_words:

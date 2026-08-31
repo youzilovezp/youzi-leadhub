@@ -274,6 +274,9 @@ class SignalEvidenceOut(BaseModel):
     source: str = ""
     first_seen: datetime | None = None
     last_seen: datetime | None = None
+    # 距最近一次复现有多少天（负证据口径：长期未复现 = 信号可能过期）。
+    # None = last_seen 缺失无法判定。SQLite 存 naive datetime，按 UTC 补齐再算。
+    stale_days: int | None = None
 
 
 class LeadDetailOut(LeadOut):
@@ -300,6 +303,10 @@ class LeadDetailOut(LeadOut):
     last_ad_at: datetime | None = None
     # 信号级证据链（§4.1）
     signals: list[SignalEvidenceOut] = []
+    # CN 证据强度（2026-08-31 审计）：strong=硬证据（CN 国家/+86/中国招聘站/人工）/
+    # weak=仅 CJK 启发式（东南亚华人本地企业易误判，建联/统计时留意）/
+    # 空=非 CN。qualified + weak = 中国出海判定待核验。
+    cn_evidence: str = ""
 
 
 # ---------- 分配（PRD §24） ----------

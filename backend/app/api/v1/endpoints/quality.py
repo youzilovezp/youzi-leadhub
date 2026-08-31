@@ -56,8 +56,14 @@ def _pool_conditions(field: str) -> list:
     elif field == "overseas":
         conds.append(Lead.icp_status == "qualified")
     elif field == "contact":
+        # 池含邮箱或电话联系人（2026-08-31 审计：WA 号码联系人是建联第一
+        # 入口、confidence 85，此前只抽邮箱联系人——最该核验的渠道不在池里）
         conds.append(
-            Lead.id.in_(select(LeadContact.lead_id).where(LeadContact.email.is_not(None)))
+            Lead.id.in_(
+                select(LeadContact.lead_id).where(
+                    (LeadContact.email.is_not(None)) | (LeadContact.phone.is_not(None))
+                )
+            )
         )
     return conds
 
@@ -70,14 +76,22 @@ async def review_queue(
     size: int = Query(default=10, ge=1, le=50),
 ):
     reviewed = await _reviewed_lead_ids(db, field)
+    # overseas 维多取 3 倍候选：CJK 启发式（弱 CN 证据）是 qualified 误判的
+    # 主要入口（2026-08-31 审计），弱证据优先出队——先量化误判率再谈收紧
+    factor = 3 if field == "overseas" else 1
     stmt = (
         select(Lead)
         .where(*_pool_conditions(field))
         .order_by(func.random())
-        .limit(size + len(reviewed))
+        .limit(min((size + len(reviewed)) * factor, 400))
     )
     rows = list((await db.execute(stmt)).scalars().all())
-    items = [r for r in rows if r.id not in reviewed][:size]
+    items = [r for r in rows if r.id not in reviewed]
+    if field == "overseas":
+        from app.collectors.icp import cn_evidence_of_lead
+
+        items.sort(key=lambda r: 0 if cn_evidence_of_lead(r) == "weak" else 1)
+    items = items[:size]
 
     # 联系人维度：带上被检联系人的邮箱/电话供核验
     contact_map: dict[int, list[dict[str, Any]]] = {}
@@ -87,7 +101,7 @@ async def review_queue(
                 select(LeadContact)
                 .where(
                     LeadContact.lead_id.in_([i.id for i in items]),
-                    LeadContact.email.is_not(None),
+                    (LeadContact.email.is_not(None)) | (LeadContact.phone.is_not(None)),
                 )
                 .limit(100)
             )
@@ -108,12 +122,16 @@ async def review_queue(
                 "website": lead.website,
             }
         elif field == "overseas":
+            from app.collectors.icp import cn_evidence_of_lead
+
             evidence = {
                 "overseas_signals": {
                     k: (v or [])[:3] for k, v in (lead.overseas_signals or {}).items()
                 },
                 "target_countries": lead.target_countries,
                 "website": lead.website,
+                # weak = 仅 CJK 启发式判 CN（东南亚华人企业易误判），抽检重点
+                "cn_evidence": cn_evidence_of_lead(lead),
             }
         elif field == "contact":
             evidence = {"contacts": contact_map.get(lead.id, [])}

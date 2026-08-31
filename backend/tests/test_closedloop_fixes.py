@@ -120,7 +120,7 @@ async def test_upsert_auto_contact_from_collector_email(db_session):
     ).scalars().all()
     assert len(contacts) == 1
     assert contacts[0].email == "sales@closedloop-contact.com"
-    assert contacts[0].source == "website_enrich"  # auto_create_from_email 的来源标记
+    assert contacts[0].source == "meta_ads"  # 来源透传 draft.source（2026-08-31 审计口径）
     assert contacts[0].job_title is None  # 「待补全」
 
     # 同邮箱再合并不重复生成
