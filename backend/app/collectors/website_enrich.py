@@ -26,6 +26,7 @@ from typing import Any
 import httpx
 from loguru import logger
 from sqlalchemy import select
+from sqlalchemy import select as _sa_select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.collectors.base import Collector, TaskContext
@@ -106,6 +107,40 @@ _SITE_BRAND_DISTRACTORS: tuple[str, ...] = (
     "腾讯", "qq邮箱", "qq 邮箱", "微信", "支付宝", "携程", "美团", "饿了么", "高德",
     "滴滴", "哈啰", "下载", "下载站", "win10", "windows", "android", "apk",
 )
+_CN_MOBILE_RE = re.compile(r"(?<!\d)1[3-9]\d[-\s]?\d{4}[-\s]?\d{4}(?!\d)")
+# 具名联系人（2026-09-01 kaadas 实测金矿）：页面「XX部门（业务） 联系人：屈先生
+# （负责人） 联系电话：189-2522-1831」——人名+部门+手机号 = 「找谁」的最优答案
+_CONTACT_PERSON_RE = re.compile(
+    r"([一-鿿A-Za-z&/（）()、·]{2,24})?\s*(?:联系人|联系人:|contact)\s*[:：]?\s*"
+    r"([一-鿿·]{2,6})(?:[（(]([^）)]{1,12})[）)])?\s*"
+    r"(?:联系电话|联系方式|电话|mobile|tel)\s*[:：]?\s*"
+    r"((?:\+?86[-\s]?)?1[3-9]\d[-\s]?\d{4}[-\s]?\d{4})",
+    re.I,
+)
+
+
+def detect_contact_persons(html_list: list[str]) -> list[dict[str, str]]:
+    """页面上的具名联系人 → [{name, title, phone}]（title=部门/角色，可空）。
+
+    kaadas 联系页形态：「海外事业部（加盟合作/OEM/ODM） 联系人：屈先生
+    联系电话：189-2522-1831」——比泛邮箱强一个量级的「找谁」答案。
+    """
+    text = page_text(html_list, keep_case=True)
+    out: list[dict[str, str]] = []
+    for m in _CONTACT_PERSON_RE.finditer(text):
+        dept, name, role, phone = (m.group(1) or "").strip(), m.group(2).strip(), (m.group(3) or "").strip(), m.group(4)
+        phone_digits = re.sub(r"[\s\-+]", "", phone)
+        if len(phone_digits) > 11 and phone_digits.startswith("86"):
+            phone_digits = phone_digits[2:]
+        if not re.fullmatch(r"1[3-9]\d{9}", phone_digits):
+            continue
+        title = " ".join(x for x in (dept, role) if x)[:60]
+        entry = {"name": name, "title": title, "phone": phone_digits}
+        if not any(e["name"] == name and e["phone"] == phone_digits for e in out):
+            out.append(entry)
+    return out[:8]
+
+
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.S | re.I)
 
 
@@ -144,9 +179,14 @@ def detect_text_phones(html_list: list[str]) -> list[str]:
     from app.collectors.scenes import page_text
 
     text = page_text(html_list, keep_case=True)
+    spans: list[tuple[int, int]] = []
     out: list[str] = []
-    for pattern in (_TEXT_PHONE_RE, _400_HOTLINE_RE, _CN_LANDLINE_RE):
+    for pattern in (_TEXT_PHONE_RE, _400_HOTLINE_RE, _CN_LANDLINE_RE, _CN_MOBILE_RE):
         for m in pattern.finditer(text):
+            # span 去重：+86 137... 的国际命中已覆盖其中的手机段，不重复产出
+            if any(a <= m.start() and m.end() <= b for a, b in spans):
+                continue
+            spans.append((m.start(), m.end()))
             v = m.group(0).strip()
             if v not in out:
                 out.append(v)
@@ -1065,6 +1105,24 @@ async def _enrich_one(
     # 首页里找内页链接（联系/关于/产品，最多 3 个，域名相同才跟）
     base_domain = extract_domain(base)
     inner_urls = find_inner_page_urls(homepage, base, base_domain)
+    # 常规联系路径探测（2026-09-01 用户需求：每家联系页路径不一样）——首页
+    # 链接里没有联系页时（导航 JS 渲染/路径冷门），直接探惯例路径，抓到即补
+    has_contact_page = any(
+        _INNER_CONTACT_WORDS_RE.search(u) for u in inner_urls
+    )
+    if not has_contact_page:
+        for path in (
+            "/contact", "/contact/", "/contact-us", "/contact-us/",
+            "/contact.html", "/Contact/contact.html", "/lianxi", "/lianxiwomen",
+            "/about", "/about-us", "/support", "/get-in-touch",
+        ):
+            probe = _resolve_url(base, path)
+            if probe and probe not in inner_urls:
+                html_probe = await _fetch_site(clients, probe)
+                if html_probe and ("联系" in html_probe or "contact" in html_probe.lower()):
+                    inner_urls.insert(0, probe)  # 联系页优先补入
+                    await ctx.log("info", f"[lead {lead_id}] 🔍 常规路径探测命中联系页：{path}")
+                    break
     pages = [homepage]
     page_urls = [base]  # 与 pages 平行：每页 HTML 对应的 URL（证据链用）
     for url in inner_urls:
@@ -1263,22 +1321,73 @@ async def _enrich_one(
         # 明文国际格式电话（「CONTACT US +86 137 3602 8159」类——2026-09-01 实测
         # mugroup.com：多数联系页不写 tel: 链接，电话就是正文文本）
         text_phones = detect_text_phones(pages)
+
+        def _phone_rank(raw: str) -> int:
+            # 选取定序（2026-09-01 kaadas 实测教训：先抓到的 400 是招商热线，
+            # 不是对外联系电话）：座机总机 0 → 国际 1 → 400 热线 2 → 手机 3
+            # （手机归具名联系人所有，只作总机/热线全缺时的兜底）
+            r = raw.strip()
+            if r.startswith("0"):
+                return 0
+            if r.startswith("+"):
+                return 1
+            if r.startswith("400"):
+                return 2
+            return 3
+
         phone_candidates = [x for x in (jsonld.get("phone"), *tel_phones, *text_phones) if x]
+        phone_candidates.sort(key=_phone_rank)
+        best_phone: tuple[str, str] | None = None
         for raw in phone_candidates:
-            if lead.phone_e164:
-                break
             region = "CN" if (lead.is_cn or (lead.country or "").upper() == "CN") else None
             e164 = normalize_phone(raw, region)
             if e164:
-                lead.phone_raw = lead.phone_raw or raw
-                lead.phone_e164 = e164
-                touch_field_meta(lead, "phone_e164", "website_enrich", confidence=85, now=now)
+                best_phone = (raw, e164)
                 break
+        # 更优序位可替换（2026-09-01 kaadas 教训：旧轮先抓到的 400 招商热线
+        # 占住字段后，新一轮的总机座机永远进不来——只填空不更新会锁死错选）
+        if best_phone and (
+            not lead.phone_e164 or _phone_rank(best_phone[0]) < _phone_rank(lead.phone_raw or "")
+        ):
+            lead.phone_raw = best_phone[0]
+            lead.phone_e164 = best_phone[1]
+            touch_field_meta(lead, "phone_e164", "website_enrich", confidence=85, now=now)
         # WhatsApp 号码 → 自动联系人（name 待补全、电话即号码——销售的直接建联对象）
         from app.crud.contact import auto_create_from_phone
 
         for n in wa_numbers[:3]:
             await auto_create_from_phone(session, lead, n)
+        # 具名联系人（2026-09-01 kaadas 实测：「海外事业部 联系人：屈先生
+        # 联系电话：189-2522-1831」——比泛邮箱强一个量级的「找谁」答案）
+        persons = detect_contact_persons(pages)
+        if persons:
+            from app.models.lead import LeadContact
+
+            existing_phones = {
+                c.phone for c in (await session.execute(
+                    _sa_select(LeadContact).where(LeadContact.lead_id == lead.id)
+                )).scalars().all()
+            }
+            added = 0
+            for psn in persons:
+                if psn["phone"] in existing_phones or added >= 6:
+                    continue
+                title = psn.get("title", "")
+                seniority = (
+                    "tier1" if re.search(r"负责人|总监|总经理|创始人|CEO", title)
+                    else "tier2" if re.search(r"经理|主管|部长", title)
+                    else "unknown"
+                )
+                session.add(LeadContact(
+                    lead_id=lead.id, name=psn["name"], job_title=title or None,
+                    phone=psn["phone"], seniority=seniority,
+                    source="website_enrich", confidence=88,
+                ))
+                existing_phones.add(psn["phone"])
+                added += 1
+            if added:
+                touch_field_meta(lead, "contacts_persons", "website_enrich", confidence=88, now=now)
+                await ctx.log("info", f"[lead {lead_id}] 👤 具名联系人 +{added}（含部门/手机号）")
         lead.enriched_at = now
         # 成功自愈：清除历史失败标记（field_meta.enrich_fail 只反映最近一次富化）
         meta = dict(lead.field_meta or {})
