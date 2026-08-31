@@ -188,3 +188,13 @@ def test_industry_group_mapping():
     assert industry_group_of(None, "某游戏网络科技有限公司") == "game_app"
     assert industry_group_of("广告公司", None) == "overseas_service"
     assert industry_group_of(None, "某餐饮管理有限公司") == ""
+
+
+def test_non_buyer_letschuhai_and_36kr():
+    """2026-09-01 实测漏网：36氪出海独立域 + 名称 token（36kr.com 在清单、letschuhai.com 漏）。"""
+    assert is_non_buyer(domain="letschuhai.com")
+    assert is_non_buyer(name="36氪出海")
+    assert compute_icp_status(
+        name="36氪出海", domain="letschuhai.com", is_cn=True, country="CN",
+        overseas_signals={"export_words": ["出海"]},
+    ) == "non_buyer"

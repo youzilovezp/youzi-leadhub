@@ -69,13 +69,15 @@ NON_BUYER_DOMAINS: tuple[str, ...] = (
     "mckinsey.com.cn",   # 咨询报告页
     "gizmodo.com",       # 海外科技媒体（软件下载页宿主）
     "whatsappbusiness.com",  # WhatsApp 官方产品页
+    "letschuhai.com",    # 36氪出海（2026-09-01 实测：独立域漏网，混入且拿 qualified）
+    "iciba.com",         # 爱词霸词典（同日实测：词条页整条入库）
 )
 
 # 名称词表（域边界锚定不适用于中文，用子串；宁可窄不可误杀正常企业）
 # download 是唯一英文 token：软件下载页宿主（gizmodo 的 WhatsApp 下载页）
 # 实测漏网，且正常买家名不含该词
 _NON_BUYER_NAME_RE = re.compile(
-    r"资讯|社区|论坛|白皮书|市场研究|行业报告|研究报告|下载|download|百科|导航|工具箱|协会|学会",
+    r"资讯|社区|论坛|白皮书|市场研究|行业报告|研究报告|下载|download|百科|导航|工具箱|协会|学会|36氪",
     re.IGNORECASE,
 )
 
