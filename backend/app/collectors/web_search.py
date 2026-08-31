@@ -52,6 +52,10 @@ _NON_SITE_DOMAINS = (
     # 平台补漏（2026-08-31 审计）：微信/ Etsy / Temu / B2B 平台 / Pinterest 等
     "wechat.com", "etsy.com", "temu.com", "1688.com", "made-in-china.com",
     "globalsources.com", "pinterest.com", "t.me", "threads.net", "discord.com",
+    # 跨境行业媒体/社区/平台门户（2026-08-31 dev 库实测霸榜的"假线索"；
+    # 与 collectors/icp.py NON_BUYER_DOMAINS 同源——这里入库拦截，那边存量兜底）
+    "ikjzd.com", "wearesellers.com", "cifnews.com", "kuajingyan.com",
+    "kjtong.com", "mckinsey.com.cn", "gizmodo.com", "whatsappbusiness.com",
 )
 
 
@@ -405,7 +409,8 @@ class WebSearchCollector(Collector):
         "等富化抓到 ICP 备案号或中文内容后再认定——避免把海外公司误当中国出海企业。\n"
         "【自动接力】任务完成后系统自动执行「网站富化」（找官网、抓信号、重新评分），"
         "已有全库富化在排队时不会重复堆任务。\n"
-        "【关键词怎么填】用中文业务词组（如：whatsapp 客服 跨境电商、外贸 私域运营）。"
+        "【关键词怎么填】五行业定向词（跨境电商/品牌 DTC/游戏/制造/出海服务），"
+        "用中文长尾业务词组（如：跨境电商 独立站 品牌、出海品牌 独立站）。"
         "只搜 whatsapp 一个词或英文拼错词，结果全是软件下载页，找不到客户。\n"
         "【边界】搜索只负责发现候选，是否值得跟进由 ICP 准入和评分决定。"
     )
@@ -415,10 +420,10 @@ class WebSearchCollector(Collector):
             "label": "搜索关键词",
             "required": True,
             "type": "tags",
-            "placeholder": '中文业务词效果好，如 whatsapp 客服 跨境电商',
-            # 预填默认词：打开就能一键创建。中文长尾业务词是有效口径
-            # （英文词/单词会搜到软件页面而非企业）
-            "default": "whatsapp 客服 跨境电商,外贸 whatsapp 群发,海外私域运营 工具,跨境电商 独立站 客服",
+            "placeholder": "五行业定向词（跨境电商/品牌DTC/游戏/制造/出海服务），中文长尾业务词有效",
+            # 预填默认词：五行业定向词库，打开就能一键创建。中文长尾业务词是
+            # 有效口径（英文词/单词会搜到软件页面而非企业）
+            "default": "跨境电商 独立站 品牌,出海品牌 独立站,DTC 出海 品牌 官网,跨境 电商平台 卖家 服务,出海 游戏 公司,制造业 出海 工厂 外贸",
         },
         {
             "key": "max_results",

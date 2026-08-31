@@ -262,6 +262,8 @@ class MetaAdsCollector(Collector):
         "可靠信号（广告平台不直接提供按钮数据，这是公认的有效代理口径）。"
         "凭据缺失或失效时任务直接失败并提示怎么处理，不会假装成功。\n"
         "【自动接力】任务完成后系统自动执行「网站富化」，对挖到的官网进一步抓场景和需求信号。\n"
+        "【关键词怎么填】关键词建议按目标行业品类词填（跨境电商品类/游戏/工具 App），"
+        "挖的是「在投海外广告的中国企业」。\n"
         "【建议节奏】每天定时跑：在投广告数和最近投放时间只增不减，持续在投的公司证据会越来越足。\n"
         "【使用条件】需要在 backend/.env 配置 META_ADS_ACCESS_TOKEN，"
         "免费申请：facebook.com/ads/archive/api（只需只读权限，不用投放广告）。"
@@ -274,7 +276,7 @@ class MetaAdsCollector(Collector):
             "type": "tags",
             "placeholder": "行业/品类词（英文），如 smart watch, leggings",
             # 预填默认词：跨境大卖常见品类，打开就能一键创建
-            "default": "smart watch,leggings,wig,shapewear,led strip light",
+            "default": "smart watch,leggings,wig,shapewear,led strip light,phone case,jewelry,game",
         },
         {
             "key": "countries",

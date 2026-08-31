@@ -175,3 +175,13 @@ async def test_search_with_fallback_switches_engine(monkeypatch):
     monkeypatch.setattr(ws, "_search", fake_ok)
     items2, err2, used2 = await ws.search_with_fallback((None, None), "whatsapp 客服", 10)
     assert used2 == ws.settings.SEARCH_ENGINE and items2[0]["url"].startswith("https://primary")
+
+
+def test_blocked_domains_include_cn_trade_media():
+    """买家门同源黑名单：跨境媒体/社区/门户不再当企业官网入库（2026-08-31 实测漏网）。"""
+    from app.collectors.web_search import _is_blocked_domain
+
+    for d in ("ikjzd.com", "wearesellers.com", "cifnews.com", "kuajingyan.com",
+              "kjtong.com", "mckinsey.com.cn", "www.cifnews.com"):
+        assert _is_blocked_domain(d), d
+    assert not _is_blocked_domain("anker.com")
