@@ -21,7 +21,9 @@ FRONTEND = ROOT / "frontend"
 SPECS = {
     "backend": {
         "cwd": BACKEND,
-        "cmd": ["uv", "run", "uvicorn", "app.main:app", "--port", "8000"],
+        # 直接用 venv 里的 uvicorn 二进制，不经过 uv run——uv 包装层起的
+        # 进程在工具会话回收时会被连坐杀掉（实测 pnpm 直起的 vite 存活、uv run 的后端被回收）
+        "cmd": [str(BACKEND / ".venv/bin/uvicorn"), "app.main:app", "--port", "8000"],
         "log": "/tmp/leadhub-backend.log",
     },
     "frontend": {

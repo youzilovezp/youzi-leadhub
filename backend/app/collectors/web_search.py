@@ -282,8 +282,10 @@ class WebSearchCollector(Collector):
             "label": "搜索关键词",
             "required": True,
             "type": "tags",
-            "placeholder": '如 "whatsapp customer service" 跨境电商 / supplier "chat on whatsapp"',
-            "default": "",
+            "placeholder": '中文业务词效果好，如 whatsapp 客服 跨境电商',
+            # 预填默认词：打开就能一键创建。中文长尾业务词是有效口径
+            # （英文词/单词会搜到软件页面而非企业）
+            "default": "whatsapp 客服 跨境电商,外贸 whatsapp 群发,海外私域运营 工具,跨境电商 独立站 客服",
         },
         {
             "key": "max_results",

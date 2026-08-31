@@ -21,6 +21,11 @@ export const THEME_PRESETS: ThemePreset[] = [
 /** 启动默认主题色：翡翠绿 */
 export const DEFAULT_PRIMARY = THEME_PRESETS[0]?.color ?? '#10b981'
 
+// 主题色持久化 key v2：v1（youzi-app-primary）时期默认色曾是柚子橙，
+// 老浏览器里残留的 #f59e0b 会盖过代码默认——版本化换 key 让旧值一次性失效
+const PRIMARY_KEY = 'youzi-app-primary@2'
+const LEGACY_PRIMARY_KEY = 'youzi-app-primary'
+
 /** 合法主题色：仅 6 位 hex（非法输入忽略，防 NaN 通道写坏变量/overrides） */
 const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/
 
@@ -68,7 +73,11 @@ export const useAppStore = defineStore('app', () => {
     },
     { immediate: true, flush: 'sync' },
   )
-  const primaryColor = useStorage('youzi-app-primary', DEFAULT_PRIMARY, undefined, {
+  // 一次性清理 v1 残留（旧默认柚子橙等），此后所有浏览器默认翡翠绿
+  if (localStorage.getItem(LEGACY_PRIMARY_KEY) !== null) {
+    localStorage.removeItem(LEGACY_PRIMARY_KEY)
+  }
+  const primaryColor = useStorage(PRIMARY_KEY, DEFAULT_PRIMARY, undefined, {
     flush: 'sync',
   })
 
