@@ -28,6 +28,10 @@ INTENT_SIGNALS: list[tuple[str, str, int]] = [
     ("wa_business", "WhatsApp Business 业务号", 15),
     ("meta_ads_running", "在投 Meta 海外广告", 15),
     ("overseas_biz", "出海业务证据", 15),
+    # 出海 SaaS 线（2026-09-01 深度复核补）：定位句是「WA 消息 + 出海 SaaS」两条
+    # 产品线——已在为 SaaS 付费（买入强度≥40，与推荐阈值同口径）的出海公司是
+    # SaaS 线最确定的买家，此前 0 分进 C 级、永远进不了今日商机（半条产品线失效）
+    ("saas_buying", "SaaS 工具买入成规模（已在为 CRM/客服系统付费）", 15),
     ("overseas_site", "海外独立站", 10),
     ("crm_job", "在招 CRM/客服系统运营岗", 10),
     ("three_markets", "覆盖 ≥3 国市场", 10),
@@ -91,6 +95,13 @@ def score_lead_inputs(
     ov = overseas_signals or {}
     markets = {c.upper() for c in (target_countries or []) if c}
     markets |= {m.upper() for m in ov.get("markets", []) if m}
+    # SaaS 买入强度（与推荐阈值同口径，表在 scenes 单一来源）——wa_bsp 已有专列
+    # 信号（+30），强度里再叠加会双计，扣除后判定「其余类目」是否成规模
+    from app.collectors.scenes import SAAS_CATEGORY_POINTS
+
+    saas_strength_ex_bsp = sum(
+        SAAS_CATEGORY_POINTS.get(k, 0) for k in saas_keys if k != "wa_bsp"
+    )
 
     matched: dict[str, bool] = {
         "ctwa_ad": ctwa,
@@ -101,6 +112,7 @@ def score_lead_inputs(
         "wa_business": wa_business,
         "meta_ads_running": ad_running and not ctwa,
         "overseas_biz": bool(ov),
+        "saas_buying": saas_strength_ex_bsp >= 40,
         "overseas_site": bool(website) and bool(ov),
         "crm_job": "crm_ops" in job_keys,
         "three_markets": len(markets) >= 3,

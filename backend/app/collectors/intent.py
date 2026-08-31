@@ -91,6 +91,7 @@ def build_three_questions(lead: Any, *, contacts: Sequence[Any] | None = None) -
     products = recommend_products(
         whatsapp_hit=bool(getattr(lead, "whatsapp_hit", False)),
         whatsapp_url=getattr(lead, "whatsapp_url", None),
+        whatsapp_numbers=list(getattr(lead, "whatsapp_numbers", None) or []),
         whatsapp_job=bool(getattr(lead, "whatsapp_job", False)),
         scenes=list(getattr(lead, "scenes", None) or []),
         saas_signals=dict(getattr(lead, "saas_signals", None) or {}),

@@ -109,17 +109,25 @@ def test_whatsapp_job_and_wa_ops_same_fact_counted_once():
     assert [it["key"] for it in items] == ["wa_ops_job"]
 
 
-def test_saas_and_scale_signals_do_not_score():
-    """SaaS 类目/规模类信号不进主分（它们回答「卖什么」，不是意向本身）；
-    唯一例外 wa_bsp（竞品栈=迁移意向）。"""
-    score, _, _ = score_lead_inputs(
+def test_saas_and_scale_signal_scopes():
+    """SaaS 信号只经 saas_buying（+15，买入强度≥40 才触发）参与主分，不逐类累计；
+    规模/联系人信号仍完全不进分。wa_bsp 是唯一逐项信号（+30）且不与 saas_buying 双计。
+    （2026-09-01 深度复核改口径：此前 SaaS 全不进分 → 出海 SaaS 线买家永远 C 级）"""
+    # 强度 62≥40 → 只有 +15，不逐类累计成 62
+    score, items, _ = score_lead_inputs(
         saas_signals={"crm": 1, "helpdesk": 1, "chatbot": 1},
-        job_urls=["j1", "j2", "j3", "j4"],
-        email="x@a.com",
-        contacts_count=3,
-        has_tier1=True,
     )
-    assert score == 0
+    assert score == 15
+    assert [it["key"] for it in items] == ["saas_buying"]
+    # 弱 SaaS（18<40）不触发
+    _, items2, _ = score_lead_inputs(saas_signals={"chatbot": 1})
+    assert not items2
+    # 规模/联系人仍不进分
+    _, items3, _ = score_lead_inputs(
+        job_urls=["j1", "j2", "j3", "j4"], email="x@a.com",
+        contacts_count=3, has_tier1=True,
+    )
+    assert not items3
 
 
 def test_total_caps_at_100():
@@ -149,6 +157,7 @@ def test_intent_signal_table_values():
     table = {k: p for k, _l, p in INTENT_SIGNALS}
     assert table == {
         "ctwa_ad": 40,
+        "saas_buying": 15,
         "wa_ops_job": 30,
         "wa_bsp_competitor": 30,
         "site_whatsapp": 25,
@@ -162,6 +171,25 @@ def test_intent_signal_table_values():
         "multi_numbers": 10,
         "social_active": 5,
     }
+
+
+def test_anchor_saas_buying_line_visible():
+    """F1（2026-09-01 深度复核）：定位句「WA 消息 + 出海 SaaS」两产品线——
+    已在为 SaaS 付费（买入强度≥40）的出海公司此前 25 分 C 级永远进不了销售视野，
+    saas_buying +15 让 SaaS 线买家到 B（可见）而不过 WA 主线（40 分封顶差异保留）。"""
+    score, items, grade = score_lead_inputs(
+        saas_signals={"crm": 1, "helpdesk": 1},  # 22+22=44 ≥40（brand_stack 12 也计）
+        website="https://saasbuyer.example.com",
+        overseas_signals={"languages": ["EN"]},
+    )
+    assert (score, grade) == (40, "B")
+
+    # wa_bsp 不双计（已有 +30 专列信号）：wa_bsp+crm=52 但 ex_bsp=22<40 → 不加
+    _, items2, _ = score_lead_inputs(saas_signals={"wa_bsp": 1, "crm": 1})
+    assert "saas_buying" not in {it["key"] for it in items2}
+    # brand_stack 进强度：brand_stack12+crm22+helpdesk22=56 ≥40
+    _, items3, _ = score_lead_inputs(saas_signals={"brand_stack": 1, "crm": 1, "helpdesk": 1})
+    assert "saas_buying" in {it["key"] for it in items3}
 
 
 def test_bonus_breakdown_compat_wrapper():
