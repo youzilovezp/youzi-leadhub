@@ -207,6 +207,10 @@ async def seed_business_data() -> None:
     from app.models.collect_task import CollectTask
     from app.models.lead import Lead
 
+    if not getattr(settings, "AUTO_SEED_BUSINESS", True):
+        logger.info("⏭️  AUTO_SEED_BUSINESS=false，跳过业务种子")
+        return
+
     async with async_session() as session:
         existing = (
             await session.execute(select(sa_func.count()).select_from(Lead))
