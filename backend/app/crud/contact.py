@@ -186,3 +186,52 @@ async def auto_create_from_email(
         note=f"富化发现公开邮箱，自动生成联系人：{email}",
     )
     return contact
+
+
+async def auto_create_from_phone(
+    db: AsyncSession,
+    lead: Lead,
+    phone: str,
+    *,
+    source: str = "website_enrich",
+) -> LeadContact | None:
+    """WhatsApp 号码/tel 电话 → 自动联系人（「找谁」的直接答案）。
+
+    同 lead 内同号码已存在（或号码已是线索电话）则不重复建。号码是 WhatsApp
+    入口时建联对象就是这个号——name 待补全，phone 存号码（补 + 存国际格式）。
+    """
+    if not phone:
+        return None
+    number = phone.lstrip("+")
+    if not number.isdigit():
+        return None
+    phone_val = f"+{number}" if not phone.startswith("+") else phone
+    dup = (
+        await db.execute(
+            select(LeadContact).where(
+                LeadContact.lead_id == lead.id, LeadContact.phone == phone_val
+            )
+        )
+    ).scalar_one_or_none()
+    if dup is not None:
+        return None
+    is_wa = source == "website_enrich"  # 富化来的号码来自 wa.me 链接
+    contact = LeadContact(
+        lead_id=lead.id,
+        name=None,
+        job_title=None,
+        phone=phone_val,
+        seniority=None,
+        confidence=85 if is_wa else 60,
+        source=source,
+    )
+    db.add(contact)
+    await db.flush()
+    add_event(
+        db,
+        lead,
+        "contact_added",
+        payload={"contact_id": contact.id, "phone": phone_val, "source": source},
+        note=f"{'富化发现 WhatsApp 号码' if is_wa else '采集发现电话'}，自动生成联系人：{phone_val}",
+    )
+    return contact

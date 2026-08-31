@@ -421,7 +421,6 @@ async function handleAutoAssign() {
 
 const columns: DataTableColumns<Lead> = [
   { type: 'selection' },
-  { title: 'ID', key: 'id', width: 64 },
   {
     title: '企业',
     key: 'name',
@@ -488,11 +487,16 @@ const columns: DataTableColumns<Lead> = [
   {
     title: '联系人',
     key: 'contacts_count',
-    width: 80,
-    render: (row) =>
-      row.contacts_count
-        ? h('span', { style: 'font-weight:500' }, String(row.contacts_count))
-        : h('span', { style: `color:${PLACEHOLDER_GRAY}` }, '—'),
+    width: 110,
+    render: (row) => {
+      if (!row.contacts_count)
+        return h('span', { style: `color:${PLACEHOLDER_GRAY}` }, '待补')
+      // 有决策层联系人（CEO/总经理）= 「找谁」的第一答案，直接标出来
+      return h('span', { style: 'display:flex;align-items:center;gap:4px' }, [
+        h('span', { style: 'font-weight:500' }, `${row.contacts_count} 人`),
+        row.has_tier1 ? h(NTag, { size: 'tiny', type: 'success', bordered: false }, () => '决策层') : null,
+      ])
+    },
   },
   {
     title: '推荐产品',

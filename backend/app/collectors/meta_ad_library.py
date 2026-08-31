@@ -269,14 +269,7 @@ class MetaAdsCollector(Collector):
             # 预填 WhatsApp 高渗透市场（东南亚 + 中东）：打开就能一键创建
             "default": "MY,SG,ID,TH,PH,VN,AE,SA",
         },
-        {
-            "key": "max_pages",
-            "label": "翻页数",
-            "required": False,
-            "type": "number",
-            "placeholder": "每关键词最多翻几页（每页 100 条广告）",
-            "default": "2",
-        },
+        # 翻页数不在表单暴露：固定默认 2 页（每页 100 条广告，run() 里兜底）
         {
             "key": "probe_pages",
             "label": "探测广告主主页",

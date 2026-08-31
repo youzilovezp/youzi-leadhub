@@ -237,3 +237,27 @@ async def test_maybe_chain_enrich_creates_and_throttles(db_session, monkeypatch)
         sa_delete(CollectTask).where(CollectTask.name.like(f"{_CHAIN_NAME}%"))
     )
     await db_session.commit()
+
+
+def test_portal_domains_filtered():
+    """门户/内容社区不进线索池（sohu.com 实测被当企业官网入库后的修复）。"""
+    from app.collectors.web_search import _is_company_site
+
+    for domain in (
+        "sohu.com", "www.sohu.com", "zhihu.com", "36kr.com", "csdn.net",
+        "weibo.com", "xiaohongshu.com", "bilibili.com",
+    ):
+        assert not _is_company_site(f"https://{domain}/some/article"), domain
+    # 正常企业站不受影响
+    assert _is_company_site("https://salesmartly.com/")
+    assert _is_company_site("https://www.acme-trading.com/about")
+
+
+def test_detect_tel_phones():
+    """tel: 链接电话提取（富化补联系方式的直接来源）。"""
+    from app.collectors.website_enrich import detect_tel_phones
+
+    html = '<a href="tel:+86 755-1234 5678">call</a> <a href="tel:075512345678">call2</a>'
+    assert detect_tel_phones([html]) == ["+8675512345678", "075512345678"]
+    assert detect_tel_phones(["<p>no tel here</p>"]) == []
+    assert detect_tel_phones(["", None]) == []

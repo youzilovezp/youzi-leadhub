@@ -50,6 +50,8 @@ export interface Lead {
   /** 字段级数据质量 {字段: {source, updated_at, confidence}}（§32） */
   field_meta: Record<string, { source: string; updated_at: string; confidence: number }>
   contacts_count: number
+  /** 有决策层联系人（CEO/总经理等）——「找谁」的第一答案 */
+  has_tier1: boolean
   recommended_products: string[]
   created_at: string
   updated_at: string

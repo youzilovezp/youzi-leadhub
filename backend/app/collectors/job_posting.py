@@ -125,14 +125,7 @@ class JobPostingCollector(Collector):
             # （2026-08-31 实测单词条 20 岗零信号，多词组合有效）。用中文词组合
             "default": "跨境电商客服,英语客服,海外社媒运营,私域运营,外贸业务员,海运客服",
         },
-        {
-            "key": "max_pages",
-            "label": "翻页数",
-            "required": False,
-            "type": "number",
-            "placeholder": "1-5",
-            "default": "2",
-        },
+        # 翻页数不在表单暴露：固定默认 2 页（run() 里兜底），需要调参属于运维场景
     ]
 
     # 渲染模式下逐站适配（jobui 已适配；其余大站结构各异待加解析器）

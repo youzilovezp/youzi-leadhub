@@ -34,7 +34,8 @@ _UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 )
-# 搜索结果里不算「企业官网」的域（平台/文档/社媒）
+# 搜索结果里不算「企业官网」的域（平台/文档/社媒/中国门户与内容社区——
+# 门户站不是销售对象，混进来只会污染线索池）
 _NON_SITE_DOMAINS = (
     "facebook.com", "instagram.com", "linkedin.com", "tiktok.com", "youtube.com",
     "twitter.com", "x.com", "amazon.", "shopee.", "lazada.", "alibaba.com",
@@ -43,6 +44,11 @@ _NON_SITE_DOMAINS = (
     "zapier.com", "hubspot.com", "salesforce.com", "zendesk.com",
     "whatsapp.com", "wa.me", "blogspot.", "wordpress.com", "wixsite.com",
     "duckduckgo.com", "searx", "bing.com", "baidu.com",
+    # 中国门户/媒体/内容社区（实测 sohu.com 被当线索入库）
+    "sohu.com", "sina.com", "163.com", "qq.com", "zhihu.com", "weibo.com",
+    "jd.com", "tmall.com", "taobao.com", "toutiao.com", "36kr.com", "csdn.net",
+    "bilibili.com", "douyin.com", "xiaohongshu.com", "ifeng.com", "cnblogs.com",
+    "jianshu.com", "oschina.net", "gitee.com",
 )
 
 # DDG HTML 结果：标题链接与跳转参数

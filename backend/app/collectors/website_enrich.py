@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -260,10 +261,11 @@ class WebsiteEnrichCollector(Collector):
     title = "网站富化（检测 WhatsApp/邮箱/社媒）"
     logic_note = (
         "【做什么】给线索补齐关键信息：没有官网的先搜出官网，再抓官网页面，"
-        "识别 WhatsApp 入口和号码、联系邮箱、社交媒体、业务场景（客服/营销/订单）、"
+        "识别 WhatsApp 入口和号码、联系邮箱、联系电话（tel 链接）、社交媒体、业务场景（客服/营销/订单）、"
         "SaaS 工具需求（CRM/工单/Chatbot）、出海证据（多语言/海外货币/国际物流/投放市场）、"
-        "ICP 备案号。识别完自动重新评分。\n"
-        "【准确性】只在成功打开官网时才记录结果，打不开的下一轮自动重试，不出假数据；"
+        "ICP 备案号。识别完自动重新评分。邮箱和 WhatsApp 号码会自动生成联系人。\n"
+        "【准确性】常规请求打不开的大站（有反爬）自动换无头浏览器渲染再抓一次；"
+        "域名已失效的站点如实记失败，下一轮自动重试，不出假数据；"
         "邮箱识别带两层防误判（排除图片文件名、网站监控埋点邮箱）；"
         "判断「是不是中国企业」优先认 ICP 备案号，其次看中文内容占比。\n"
         "【循环复核】已入库的线索按等级定期重查：S 级每天、A 级每 3 天、B 级每 7 天、"
@@ -287,6 +289,33 @@ class WebsiteEnrichCollector(Collector):
         lead_ids = _parse_lead_ids(ctx.params.get("lead_ids"))
         async with _session_factory()() as session:
             leads = await _load_scope(session, lead_ids)
+
+        # 结果统计（结束日志说清成功/失败——失败不再淹没在「完成」里）
+        ok_sites: list[str] = []
+        fail_sites: list[str] = []
+
+        # 浏览器渲染兜底（懒启动）：httpx 三通道都被拒的站点（如大型电商的
+        # 反爬 403）用无头浏览器渲染一次，实测 banggood 403 → 渲染 200。
+        # 未装 [collect] 可选依赖时静默降级（日志说明一次）。
+        browser = None
+        render_note_logged = False
+
+        async def get_browser():
+            nonlocal browser, render_note_logged
+            if browser is not None:
+                return browser
+            try:
+                from playwright.async_api import async_playwright
+            except ImportError:
+                if not render_note_logged:
+                    render_note_logged = True
+                    await ctx.log(
+                        "info", "浏览器渲染兜底不可用（装 playwright 可抓反爬大站）：pip install '.[collect]'"
+                    )
+                return None
+            pw = await async_playwright().start()
+            browser = await pw.chromium.launch(headless=True)
+            return browser
 
         # 两个 client：正常（代理优先）+ 宽松 SSL 直连兜底（证书过期的小站常见）
         async with _make_client() as client, _make_client(**_SSL_LOOSE_CLIENT_ARGS) as loose:
@@ -337,15 +366,31 @@ class WebsiteEnrichCollector(Collector):
                 async with sem:
                     ctx.check_cancelled()
                     try:
-                        await _enrich_one((client, loose), ctx, lead_id, website)
+                        if await _enrich_one((client, loose), ctx, lead_id, website, get_browser):
+                            ok_sites.append(website)
+                        else:
+                            fail_sites.append(website)
                     except Exception:  # noqa: BLE001  单站点失败不放大为整任务失败
                         logger.exception(f"[lead {lead_id}] 富化异常：{website}")
+                        fail_sites.append(website)
                 done += 1
                 ctx.inc_progress(1)
 
             await asyncio.gather(*(wrapped(lid, ws) for lid, ws in leads))
 
-        await ctx.log("info", f"富化完成：{done} 个站点")
+        if browser is not None:
+            try:
+                await browser.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+        # 汇总日志：成功/失败分开数，失败给原因分类（下一轮自动重试）
+        summary = f"富化完成：成功 {len(ok_sites)}、失败 {len(fail_sites)}"
+        if fail_sites:
+            summary += "（失败站点：{} —— 域名失效或拒绝访问，下一轮自动重试）".format(
+                "、".join(s.replace("https://", "").replace("http://", "") for s in fail_sites[:10])
+            )
+        await ctx.log("info", summary)
 
 
 # ---------- 官网发现（补全链，2026-08-31） ----------
@@ -438,16 +483,60 @@ def _session_factory():
     return async_session
 
 
+async def _render_with_browser(browser, url: str) -> str | None:
+    """无头浏览器渲染兜底：httpx 被反爬拒绝（403）的大站用渲染抓。失败返回 None。"""
+    try:
+        page = await browser.new_page(locale="zh-CN", viewport={"width": 1440, "height": 900})
+        try:
+            resp = await page.goto(url, wait_until="domcontentloaded", timeout=25000)
+            if resp is not None and resp.status >= 400:
+                return None
+            return await page.content()
+        finally:
+            await page.close()
+    except Exception:  # noqa: BLE001  渲染失败（超时/崩溃）不算数
+        return None
+
+
+# tel: 链接里的电话（富化补电话：联系方式的直接来源）
+_TEL_LINK_RE = re.compile(r'href=["\']tel:([+\d][\d\-()\s]{5,25})["\']', re.I)
+
+
+def detect_tel_phones(html_list: list[str]) -> list[str]:
+    """页面 tel: 链接电话（去空格/横线/括号，去重保序）。"""
+    joined = "\n".join(h for h in html_list if h)
+    phones: list[str] = []
+    for m in _TEL_LINK_RE.finditer(joined):
+        raw = re.sub(r"[\s\-()]", "", m.group(1))
+        if raw and raw not in phones:
+            phones.append(raw)
+    return phones
+
+
 async def _enrich_one(
-    clients: tuple[httpx.AsyncClient, httpx.AsyncClient], ctx: TaskContext, lead_id: int, website: str
-) -> None:
-    """富化单个站点并回写。只在「成功抓到至少一个页面」时更新 enriched_at。"""
+    clients: tuple[httpx.AsyncClient, httpx.AsyncClient],
+    ctx: TaskContext,
+    lead_id: int,
+    website: str,
+    get_browser: Callable[[], Awaitable[Any]] | None = None,
+) -> bool:
+    """富化单个站点并回写。返回是否成功（成功 = 抓到至少一个页面）。
+
+    只在「成功抓到首页」时更新 enriched_at；httpx 三通道全失败时尝试
+    无头浏览器渲染兜底（反爬 403 的大站），仍失败留待下一轮自动重试。
+    """
     primary = clients[0]
     base = website if website.startswith(("http://", "https://")) else f"https://{website}"
     homepage = await _fetch_site(clients, base)
+    if homepage is None and get_browser is not None:
+        browser = await get_browser()
+        if browser is not None:
+            homepage = await _render_with_browser(browser, base)
+            if homepage is not None:
+                await ctx.log("info", f"[lead {lead_id}] 🌐 浏览器渲染兜底成功：{website}")
     if homepage is None:
-        await ctx.log("warn", f"[lead {lead_id}] 首页抓取失败：{website}")
-        return
+        await ctx.log("warn", f"[lead {lead_id}] 首页抓取失败（域名失效或拒绝访问）：{website}")
+        return False
 
     # 首页里找内页链接（联系/关于/产品，最多 3 个，域名相同才跟）
     base_domain = extract_domain(base)
@@ -489,7 +578,7 @@ async def _enrich_one(
 
         lead = await session.get(Lead, lead_id)
         if lead is None:
-            return
+            return False
         before = snapshot_lead(lead)
         now = datetime.now(timezone.utc)
         if whatsapp_hit:
@@ -620,6 +709,25 @@ async def _enrich_one(
         if email:
             # 抓到公开邮箱 → 自动生成「待补全」联系人（同邮箱已存在则跳过）
             await auto_create_from_email(session, lead, email)
+        # ---------- 联系方式补全（「找谁」是爬取最关键的产出） ----------
+        # tel: 链接电话 → 线索电话（此前只抓邮箱不抓电话）
+        from app.collectors.normalize import normalize_phone
+
+        tel_phones = detect_tel_phones(pages)
+        if tel_phones and not lead.phone_e164:
+            region = "CN" if (lead.is_cn or (lead.country or "").upper() == "CN") else None
+            for raw in tel_phones:
+                e164 = normalize_phone(raw, region)
+                if e164:
+                    lead.phone_raw = lead.phone_raw or raw
+                    lead.phone_e164 = e164
+                    touch_field_meta(lead, "phone_e164", "website_enrich", confidence=85, now=now)
+                    break
+        # WhatsApp 号码 → 自动联系人（name 待补全、电话即号码——销售的直接建联对象）
+        from app.crud.contact import auto_create_from_phone
+
+        for n in wa_numbers[:3]:
+            await auto_create_from_phone(session, lead, n)
         lead.enriched_at = now
         # 统一重评钩子：六维重算（读 ORM 行属性，fb_whatsapp 不再漏传）+ 事件发射
         await rescore_and_log(session, lead, before=before)
@@ -632,3 +740,4 @@ async def _enrich_one(
     if saas_signals:
         labels = "、".join(SAAS_LABELS_ZH.get(k, k) for k in saas_signals)
         await ctx.log("info", f"[lead {lead_id}] SaaS 需求信号：{labels}")
+    return True
