@@ -165,6 +165,12 @@ class Settings(BaseSettings):
     BING_SEARCH_KEY: str = ""  # Bing Web Search（Azure）key
     COLLECT_MAX_CONCURRENT: int = 2   # 同时运行的采集任务数（满则排队）
     COLLECT_TASK_TIMEOUT: int = 3600  # 单任务超时（秒）
+    # 采集流水线自动接力（2026-08-31 交互改造）：发现类采集器（web_search/
+    # job_posting/meta_ads）任务完成 → 自动排入一个隐式 website_enrich 全库扫描
+    # （官网发现 + 信号复核）。依赖关系由系统承担，用户不需要知道「先采集后富化」的顺序。
+    AUTO_CHAIN_ENRICH: bool = True
+    # 自动接力的节流窗口（分钟）：窗口内已有富化任务跑过就跳过，防连环触发重复扫描
+    AUTO_CHAIN_ENRICH_INTERVAL: int = 60
     ENRICH_CONCURRENCY: int = 5     # 富化并发站点数
     SCHEDULER_ENABLED: bool = False  # 定时调度总开关（WORKERS=1 的进程才会启动）
     # 六维评分权重覆盖（JSON，键 overseas/whatsapp/saas/scale/marketing/contact，按和归一化）

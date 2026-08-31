@@ -13,7 +13,11 @@
 - phone_e164 以 +86 开头
 
 出海证据（任一命中）：overseas_signals 非空 / fb_whatsapp（FB 私域）/
-target_countries 非空（meta_ads 投放国家）。
+target_countries 非空（meta_ads 投放国家）/ 招聘信号含海外语义岗
+（wa_ops=WhatsApp 运营、overseas_cs=海外客服、overseas_sales=海外销售、
+social_ops=海外社媒运营——在招海外岗位 = 出海业务在运转的直接证据；
+2026-08-31 巡检补：jobui 通道 24 家真实出海企业因无官网证据卡死培育池，
+官网发现命中率救不回这个缺口）。
 
 「有评估结论」= enriched_at 非空（官网已抓取且无中文/无 CN 特征）或
 来源含 meta_ads（页名与文案已做过中文判定）——只有评估过才有资格说 foreign，
@@ -25,6 +29,10 @@ from __future__ import annotations
 from typing import Any
 
 ICP_STATUS_VALUES = ("qualified", "cn_domestic", "foreign", "unknown")
+
+# 招聘信号里的海外语义键（§4.3 分类器产出）：命中任一 = 出海业务在运转。
+# crm_ops 不算——运营 CRM 不必然服务海外市场。
+OVERSEAS_JOB_KEYS = ("wa_ops", "overseas_cs", "overseas_sales", "social_ops")
 
 ICP_STATUS_LABELS_ZH: dict[str, str] = {
     "qualified": "中国出海",
@@ -44,9 +52,15 @@ def has_overseas_evidence(
     overseas_signals: dict[str, list[str]] | None,
     fb_whatsapp: bool,
     target_countries: list[str] | None,
+    job_signals: dict[str, Any] | None = None,
 ) -> bool:
-    """出海证据：官网出海信号 / FB 私域（CTWA 代理）/ 投放国家，任一命中。"""
-    return bool(overseas_signals) or bool(fb_whatsapp) or bool(target_countries)
+    """出海证据：官网出海信号 / FB 私域（CTWA 代理）/ 投放国家 / 在招海外岗，任一命中。"""
+    return (
+        bool(overseas_signals)
+        or bool(fb_whatsapp)
+        or bool(target_countries)
+        or any(k in (job_signals or {}) for k in OVERSEAS_JOB_KEYS)
+    )
 
 
 def compute_icp_status(
@@ -57,6 +71,7 @@ def compute_icp_status(
     overseas_signals: dict[str, list[str]] | None = None,
     fb_whatsapp: bool = False,
     target_countries: list[str] | None = None,
+    job_signals: dict[str, dict[str, Any]] | None = None,
     enriched_at: Any = None,
     sources: list[dict[str, Any]] | None = None,
 ) -> str:
@@ -66,6 +81,7 @@ def compute_icp_status(
         overseas_signals=overseas_signals,
         fb_whatsapp=fb_whatsapp,
         target_countries=target_countries,
+        job_signals=job_signals,
     )
     if cn:
         return "qualified" if overseas else "cn_domestic"
@@ -84,6 +100,7 @@ def compute_icp_status_of(lead: Any) -> str:
         overseas_signals=getattr(lead, "overseas_signals", None) or None,
         fb_whatsapp=bool(getattr(lead, "fb_whatsapp", False)),
         target_countries=getattr(lead, "target_countries", None) or None,
+        job_signals=getattr(lead, "job_signals", None) or None,
         enriched_at=getattr(lead, "enriched_at", None),
         sources=getattr(lead, "sources", None),
     )

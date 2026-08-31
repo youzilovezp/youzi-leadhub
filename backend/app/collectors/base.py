@@ -53,6 +53,8 @@ class LeadDraft:
     job_signals: dict[str, dict[str, int | str]] = field(default_factory=dict)
     # 广告信号（§4.1 meta_ads）：累计在投广告数
     ad_count: int = 0
+    # 最近一次见到的广告投放开始时间（meta_ads 的 ad_delivery_start_time 取 max）
+    last_ad_at: datetime | None = None
 
 
 @dataclass
@@ -84,6 +86,9 @@ class Collector(ABC):
     title: str = ""  # 前端展示名
     # 参数说明（前端动态渲染创建表单用）：[{key, label, required, placeholder, default}]
     param_schema: list[dict[str, Any]] = []
+    # 爬取逻辑与循环复核说明（数据源管理页展示：抓什么/怎么滤/准确机制/复核节奏，
+    # 口径依据 docs/业务逻辑.md §4）——让使用者知道数据从哪来、准不准、多久核一次
+    logic_note: str = ""
 
     def validate_params(self, params: dict[str, Any]) -> None:  # noqa: B027  可选钩子，默认不校验
         """创建任务时校验参数，非法直接 BusinessError。默认不校验。"""

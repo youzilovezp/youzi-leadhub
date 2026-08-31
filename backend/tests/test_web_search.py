@@ -91,3 +91,39 @@ def test_article_pages_filtered():
     assert drafts[0].name == "Glow Tech Official Site"
     # 种子入口归一为站点根（富化从首页开始）
     assert drafts[0].website == "https://glowtech.com.sg"
+
+
+def test_is_cn_requires_cjk_title():
+    """is_cn 语义收紧（2026-08-31 巡检修 ICP 门完整性）：参数开 ∧ 标题含中文。
+
+    英文标题的种子（英文/拼错关键词的自然结果）不吃盲标——否则 meta.com、
+    gizmodo.com 这类纯海外站会以 is_cn=True 入库，富化出海外信号后以
+    qualified 混进中国出海销售池。英文标题留给富化（ICP 备案/中文内容）判定。
+    """
+    from app.collectors.web_search import results_to_drafts
+
+    items = [
+        {"title": "深圳 glow 科技 官方网站", "url": "https://glow-cn-test.com/"},
+        {"title": "WhatsApp from Meta", "url": "https://meta-cn-test.com/"},
+        {"title": "Gizmodo Download Page", "url": "https://gizmodo-cn-test.com/"},
+    ]
+    drafts = results_to_drafts(items, params_is_cn="true")
+    assert [d.is_cn for d in drafts] == [True, False, False]
+    # 参数关：全部不标
+    drafts_off = results_to_drafts(items, params_is_cn="false")
+    assert not any(d.is_cn for d in drafts_off)
+
+
+def test_drafts_with_stats_filter_breakdown():
+    """滤因统计：平台域/内容页/同域重复分别计数（任务日志透明化）。"""
+    from app.collectors.web_search import drafts_with_stats
+
+    items = [
+        {"title": "Normal Corp 官网", "url": "https://stat-normal.com/"},
+        {"title": "Facebook Page", "url": "https://facebook.com/x"},  # 平台域
+        {"title": "How to Use WhatsApp 指南", "url": "https://stat-article.com/guide"},  # 内容页
+        {"title": "Same Corp Second Page", "url": "https://www.stat-normal.com/other"},  # 同域
+    ]
+    drafts, stats = drafts_with_stats(items)
+    assert len(drafts) == 1
+    assert stats == {"platform_domain": 1, "article_page": 1, "dup_domain": 1}

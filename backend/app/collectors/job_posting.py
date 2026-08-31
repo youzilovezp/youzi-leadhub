@@ -100,17 +100,30 @@ async def _render_page(page, url: str, timeout_ms: int = 20000) -> str:
 class JobPostingCollector(Collector):
     name = "job_posting"
     title = "中国招聘网站监控（jobui）"
+    logic_note = (
+        "【抓什么】监控中国招聘网站（职友集 jobui）的在招岗位，从岗位判断公司在做什么业务："
+        "在招「海外客服」说明有海外客户，在招「WhatsApp 运营」说明在用 WhatsApp 做私域。\n"
+        "【信号分类】岗位标题自动分五类：WhatsApp 运营/客服、海外客服、海外社媒运营、"
+        "CRM 运营、海外销售。分类从严——拿不准的不标，避免把分数抬错。\n"
+        "【准确性】同一家公司的多个岗位合并成一条线索；每个岗位帖的链接都存进证据链，"
+        "可点开核对。抓取失败的任务直接判失败，不会假装成功。\n"
+        "【自动接力】任务完成后系统自动执行「网站富化」——招聘页没有公司官网，"
+        "富化会先搜官网再抓信号、重新评分。\n"
+        "【建议节奏】配成每天定时跑：新出现的岗位自动并入同一家公司，岗位还在投递也会持续刷新佐证。\n"
+        "【边界】站内搜索只认中文岗位词（推荐：跨境电商客服、英语客服、海外社媒运营、私域运营、"
+        "外贸业务员、海运客服）；单个词容易被模糊匹配稀释，多词组合效果好。"
+    )
     param_schema = [
         {
             "key": "keywords",
             "label": "搜索关键词",
             "required": False,
             "type": "tags",
-            "placeholder": "岗位关键词回车，如 whatsapp / 海外客服 / 跨境电商运营",
+            "placeholder": "岗位关键词回车，多词组合效果更好（如 跨境电商客服,英语客服,海外社媒运营）",
             # 注意：jobui 站内搜索不吃英文词——「whatsapp运营」会联想跑偏到
-            # UI 设计师类岗位（2026-08-31 实测 20 岗全跑偏、零信号命中）；
-            # 「whatsapp 客服」带空格直接 0 结果。用有效中文词组合
-            "default": "海外客服,跨境电商客服,海外社媒运营,私域运营,外贸业务员",
+            # UI 设计师类岗位；单词「海外客服」也可能被稀释成模糊「客服」匹配
+            # （2026-08-31 实测单词条 20 岗零信号，多词组合有效）。用中文词组合
+            "default": "跨境电商客服,英语客服,海外社媒运营,私域运营,外贸业务员,海运客服",
         },
         {
             "key": "max_pages",
@@ -214,10 +227,18 @@ class JobPostingCollector(Collector):
                                         )
                                     await session.commit()
                         wa_n = sum(1 for d in drafts if d.whatsapp_job)
+                        sig_n = sum(1 for d in drafts if d.job_signals)
                         await ctx.log(
                             "info",
                             f"「{kw}」第 {pg} 页 → {len(drafts)} 个在招岗位"
-                            + (f"，信号相关 {wa_n} 个" if drafts else ""),
+                            + (f"，带海外/运营信号 {sig_n} 个" if sig_n else "")
+                            + (f"（含 WhatsApp 岗位 {wa_n}）" if wa_n else "")
+                            + (
+                                "——⚠️ 零信号命中：岗位标题与关键词不相关"
+                                "（jobui 站内搜索会把单词稀释成模糊匹配，建议多词组合跑）"
+                                if drafts and not sig_n
+                                else ""
+                            ),
                         )
                         ctx.inc_progress(1)
                         await asyncio.sleep(_PAGE_GAP)

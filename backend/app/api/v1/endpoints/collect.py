@@ -23,6 +23,7 @@ from app.collectors.icp import ICP_STATUS_LABELS_ZH
 from app.collectors.recommend import detect_need_types, recommend_products, sales_suggestion
 from app.collectors.scenes import SAAS_LABELS_ZH, SCENE_LABELS_ZH
 from app.collectors.scoring import effective_dim_weights
+from app.core.config import settings
 from app.core.exceptions import BusinessError, NotFoundError, PermissionDeniedError
 from app.crud.contact import (
     create_contact,
@@ -467,6 +468,42 @@ async def export_leads(
 
 
 @router.get(
+    "/leads/trend",
+    response_model=ResponseModel[list[dict]],
+    summary="近 N 日新增线索趋势（dashboard 图，真实数据）",
+)
+async def lead_trend_endpoint(
+    db: SessionDep,
+    _user: CurrentUser,
+    days: int = Query(default=7, ge=1, le=90),
+):
+    """按日聚合新增线索总数与其中 qualified（中国出海）数。
+
+    Python 内存分组而非 SQL 按日 truncate——date_trunc 是 PG 专属，SQLite
+    测试库没有；量级（窗口内行数）内存聚合完全够。注意：路由须声明在
+    /leads/{lead_id} 之前（同 export/daily-batch）。
+    """
+    from datetime import timedelta
+
+    now = datetime.now(timezone.utc)
+    cutoff = (now - timedelta(days=days - 1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    rows = (
+        await db.execute(select(Lead.created_at, Lead.icp_status).where(Lead.created_at >= cutoff))
+    ).all()
+    buckets: dict = {}
+    for i in range(days):
+        d = (cutoff + timedelta(days=i)).date()
+        buckets[d] = {"date": d.isoformat(), "total": 0, "qualified": 0}
+    for created_at, icp_status in rows:
+        d = created_at.date()
+        if d in buckets:
+            buckets[d]["total"] += 1
+            if icp_status == "qualified":
+                buckets[d]["qualified"] += 1
+    return ResponseModel(data=list(buckets.values()))
+
+
+@router.get(
     "/leads/daily-batch",
     response_model=ResponseModel[dict],
     summary="今日商机批次（销售每天直接收到一批值得联系的客户）",
@@ -859,19 +896,45 @@ async def claim_lead_endpoint(
 ):
     """§七 输出规格的「领取线索」：销售看到商机一键认领。
 
-    撞单保护：已被他人跟进的线索报错（改派走 assign，需主管权限）；
-    自己已持有则幂等返回。
+    撞单保护（并发安全，2026-08-31 巡检修）：不再「先读后写」——那是
+    TOCTOU，两个销售同时领取都能过检查、后提交者覆盖前者。改为原子
+    UPDATE 抢占（WHERE owner IS NULL OR owner=自己），行锁保证只有一个
+    请求认领成功，失败方拿到 40001；自己已持有则幂等成功。
     """
+    from sqlalchemy import or_, update
+
     lead = await db.get(Lead, lead_id)
     if lead is None:
         raise NotFoundError("线索不存在")
-    if lead.owner_id is not None and lead.owner_id != user.id:
+    was_mine = lead.owner_id == user.id
+    # RETURNING 判定抢占成功与否（rowcount 在 Result 类型上不可静态断言）
+    claimed = (
+        await db.execute(
+            update(Lead)
+            .where(Lead.id == lead_id, or_(Lead.owner_id.is_(None), Lead.owner_id == user.id))
+            .values(owner_id=user.id)
+            .returning(Lead.id)
+            .execution_options(synchronize_session=False)
+        )
+    ).scalar_one_or_none()
+    if claimed is None:
+        await db.refresh(lead)
         other = (await _user_display_map(db, {lead.owner_id})).get(lead.owner_id) or f"#{lead.owner_id}"
         raise BusinessError(code=40001, message=f"该线索已由 {other} 跟进（撞单保护）")
-    try:
-        await assign_lead(db, lead, user.id, assigned_by=user.id)
-    except ValueError as exc:
-        raise BusinessError(code=40001, message=str(exc)) from exc
+    await db.refresh(lead)  # 拿回 UPDATE 后的行状态
+    if not was_mine:
+        from app.crud.lead_events import add_event
+
+        if lead.follow_status in (None, "unassigned"):
+            lead.follow_status = "pending"
+        add_event(
+            db,
+            lead,
+            "assigned",
+            payload={"old": None, "new": user.id},
+            note="销售领取（共享池认领）",
+            created_by=user.id,
+        )
     await db.commit()
     await db.refresh(lead)
     out = LeadOut.model_validate(lead)
@@ -1320,5 +1383,13 @@ async def collect_stats(db: SessionDep, _user: CurrentUser):
             "icp_counts": icp_counts,
             "month_new_leads": month_new,
             "month_won_count": month_won,
+            # 管道健康度（2026-08-31 巡检）：今日商机空转的根因可视化——
+            # meta_ads 是唯一 S/A 制造机（CTWA/投放证据），token 未配置或
+            # 调度未开启时销售每天收到的是空批次。前端今日商机页空态据此提示。
+            "pipeline_health": {
+                "meta_ads_ready": bool(settings.META_ADS_ACCESS_TOKEN),
+                "scheduler_enabled": bool(settings.SCHEDULER_ENABLED),
+                "qualified_leads": icp_counts["qualified"],
+            },
         }
     )

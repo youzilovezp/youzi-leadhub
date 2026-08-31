@@ -30,6 +30,63 @@ class TaskRunner:
         self._progress_synced_at: dict[int, float] = {}  # task_id -> 上次落库时间戳
         self._stopping = False
 
+    # ---------- 采集流水线自动接力（2026-08-31 交互改造） ----------
+    # 发现类采集器产出的种子/线索要靠 website_enrich 才能出信号、过 ICP 门、
+    # 进评分——这个先后依赖以前要用户自己知道并手动跑两步。改为系统承担：
+    # 发现类任务成功完成 → 自动排入隐式富化复核任务（官网发现 + 分级重爬）。
+
+    _CHAIN_ENRICH_AFTER = frozenset({"web_search", "job_posting", "meta_ads"})
+
+    async def _maybe_chain_enrich(
+        self, log_fn, task_id: int, collector: str, created_by: int | None
+    ) -> None:
+        """发现类任务完成后自动接力 website_enrich（节流 + 失败不影响主任务）。"""
+        from datetime import timedelta
+
+        if not settings.AUTO_CHAIN_ENRICH or collector not in self._CHAIN_ENRICH_AFTER:
+            return
+        try:
+            cutoff = datetime.now(timezone.utc) - timedelta(
+                minutes=max(1, settings.AUTO_CHAIN_ENRICH_INTERVAL)
+            )
+            async with async_session() as s:
+                recent = (
+                    await s.execute(
+                        select(CollectTask.id)
+                        .where(
+                            CollectTask.collector == "website_enrich",
+                            CollectTask.last_run_at.is_not(None),
+                            CollectTask.last_run_at >= cutoff,
+                        )
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if recent is not None:
+                    await log_fn(
+                        "info",
+                        f"↪️ 已跳过自动富化接力（{settings.AUTO_CHAIN_ENRICH_INTERVAL} 分钟内已有富化任务跑过）",
+                    )
+                    return
+                chained = CollectTask(
+                    name=f"🔁 自动富化复核（由 {collector} 任务 #{task_id} 触发）",
+                    collector="website_enrich",
+                    params={},
+                    is_implicit=True,
+                    created_by=created_by,
+                )
+                s.add(chained)
+                await s.flush()
+                chained_id = chained.id
+                await s.commit()
+            await self.enqueue(chained_id)
+            await log_fn(
+                "info",
+                f"✅ 已自动接力网站富化任务 #{chained_id}（官网发现 + 信号复核 + 重评分）——"
+                "发现类采集完成后的依赖步骤无需手动执行",
+            )
+        except Exception:  # noqa: BLE001  接力是增强体验，失败绝不影响主任务结果
+            logger.exception(f"任务 {task_id} 自动富化接力失败（忽略）")
+
     # ---------- 生命周期 ----------
 
     async def start(self) -> None:
@@ -149,6 +206,8 @@ class TaskRunner:
                 return
             collector = get_collector(task.collector)
             params = dict(task.params or {})
+            # 接力元信息趁会话开着取（detached 实例属性访问不可靠）
+            chain_collector, chain_created_by = task.collector, task.created_by
 
         if collector is None:
             await self._finish(task_id, "failed", error=f"未知采集器：{task.collector}")
@@ -226,6 +285,8 @@ class TaskRunner:
         )
         if status == "completed":
             await log("info", f"任务完成：新增 {counters['added']}，合并 {counters['merged']}")
+            # 流水线自动接力：发现类采集 → 富化复核（系统承担依赖顺序）
+            await self._maybe_chain_enrich(log, task_id, chain_collector, chain_created_by)
 
     async def _sync_progress(self, task_id: int, total: int, done: int) -> None:
         """运行中节流落库进度（失败静默——进度展示不值得炸协程）。"""

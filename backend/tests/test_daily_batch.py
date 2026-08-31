@@ -5,6 +5,7 @@
 
 from app.collectors.base import LeadDraft
 from app.crud.lead import upsert_lead
+from app.models.lead import Lead
 
 _STRONG_DRAFT = dict(
     source="meta_ads",
@@ -99,3 +100,53 @@ async def test_daily_batch_and_claim(client, admin_credentials, db_session):
     # 清理（共享测试库）
     await client.delete(f"/api/v1/collect/leads/{fresh.id}", headers=h)
     await client.delete(f"/api/v1/collect/leads/{promote_id}", headers=h)
+
+
+async def test_claim_concurrent_only_one_wins(client, admin_credentials, db_session):
+    """并发领取撞单（2026-08-31 巡检修 TOCTOU）：两个销售同时领取同一共享池线索，
+    原子 UPDATE 抢占保证恰好一个成功、另一个 40001——不允许后提交者覆盖。"""
+    import asyncio
+
+    h = await _login(client, admin_credentials)
+    race, _ = await upsert_lead(
+        db_session,
+        LeadDraft(
+            name="今日批次并发领取科技（南京）有限公司",
+            **{**_STRONG_DRAFT, "website": "https://dailybatch-race.com"},
+        ),
+    )
+    await db_session.commit()
+    race_id = race.id  # expire_all 后属性访问会触发懒加载 IO，先缓存
+
+    await client.post(
+        "/api/v1/users",
+        headers=h,
+        json={
+            "username": "dailybatch_race_sales",
+            "password": "pass-123456",
+            "nickname": "并发领取销售",
+        },
+    )
+    r2 = await client.post(
+        "/api/v1/auth/login",
+        json={"username": "dailybatch_race_sales", "password": "pass-123456"},
+    )
+    h2 = {"Authorization": f"Bearer {r2.json()['data']['access_token']}"}
+
+    r_admin, r_sales = await asyncio.gather(
+        client.post(f"/api/v1/collect/leads/{race_id}/claim", headers=h),
+        client.post(f"/api/v1/collect/leads/{race_id}/claim", headers=h2),
+    )
+    statuses = sorted([r_admin.status_code, r_sales.status_code])
+    assert statuses == [200, 400]  # 恰好一个认领成功，另一个撞单
+
+    # 库里 owner 唯一且是赢家之一（200 的那个）
+    db_session.expire_all()
+    winner = await db_session.get(Lead, race_id)
+    assert winner.owner_id is not None
+    winners = [
+        r for r in (r_admin, r_sales) if r.status_code == 200
+    ]
+    assert winner.owner_id == winners[0].json()["data"]["owner_id"]
+
+    await client.delete(f"/api/v1/collect/leads/{race_id}", headers=h)

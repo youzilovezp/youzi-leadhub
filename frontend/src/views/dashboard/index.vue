@@ -13,7 +13,7 @@ import {
 import { listUsers } from '@/api/user'
 import { listRoles } from '@/api/role'
 import { useUserStore } from '@/stores/user'
-import LoginTrendChart from './components/LoginTrendChart.vue'
+import LeadTrendChart from './components/LeadTrendChart.vue'
 import RolePieChart from './components/RolePieChart.vue'
 import { countByRole, type RoleStat } from './role-stats'
 
@@ -130,9 +130,9 @@ onMounted(async () => {
     <div class="grid grid-cols-1 gap-4 lg:grid-cols-2">
       <div class="rounded-card border border-border bg-bg-card p-5">
         <div class="text-text mb-2 font-semibold">
-          近 7 日登录趋势
+          近 7 日新增线索趋势
         </div>
-        <LoginTrendChart />
+        <LeadTrendChart />
       </div>
       <div class="rounded-card border border-border bg-bg-card p-5">
         <div class="text-text mb-2 font-semibold">

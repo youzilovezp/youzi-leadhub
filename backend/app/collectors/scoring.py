@@ -352,6 +352,17 @@ def apply_score(
     from app.collectors.icp import compute_icp_status_of
 
     lead.icp_status = compute_icp_status_of(lead)
+    # 出海业务类型（§8 出海画像）：同为行属性派生，同点重算（2026-08-31 巡检接线
+    # ——此前 export_type 列无任何写入方，恒空）
+    from app.collectors.overseas import derive_export_type
+
+    lead.export_type = derive_export_type(
+        industry=getattr(lead, "industry", None),
+        overseas_signals=getattr(lead, "overseas_signals", None),
+        target_countries=getattr(lead, "target_countries", None),
+        job_signals=getattr(lead, "job_signals", None),
+        sources=lead.sources,
+    )
     # MVP 加分制明细（§五）：与六维并存的可解释层
     lead.score_breakdown = bonus_breakdown(
         fb_whatsapp=lead.fb_whatsapp,
