@@ -307,6 +307,9 @@ class LeadDetailOut(LeadOut):
     # weak=仅 CJK 启发式（东南亚华人本地企业易误判，建联/统计时留意）/
     # 空=非 CN。qualified + weak = 中国出海判定待核验。
     cn_evidence: str = ""
+    # 最近一次富化失败信息 {reason, website, updated_at}（成功后自愈清除；
+    # 存在 = 线索数据可能过期，销售建联前可先看原因）
+    enrich_fail: dict[str, Any] | None = None
 
 
 # ---------- 分配（PRD §24） ----------

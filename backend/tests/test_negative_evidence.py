@@ -46,11 +46,11 @@ async def test_whatsapp_gone_event_emitted_and_flag_kept(client, monkeypatch):
         lead_id = lead.id
 
     async def fake_fetch_site(clients, url):  # noqa: ARG001
-        return _HOME_WITHOUT_WA
+        return _HOME_WITHOUT_WA, []
 
-    monkeypatch.setattr(website_enrich, "_fetch_site", fake_fetch_site)
+    monkeypatch.setattr(website_enrich, "_fetch_site_detailed", fake_fetch_site)
 
-    ok = await website_enrich._enrich_one((None, None), _CtxStub(), lead_id, "https://gone-test.com", None)  # noqa: SLF001
+    ok, _reason = await website_enrich._enrich_one((None, None), _CtxStub(), lead_id, "https://gone-test.com", None)  # noqa: SLF001
     assert ok is True
 
     async with async_session() as s:
@@ -95,10 +95,10 @@ async def test_no_gone_event_when_whatsapp_still_there(client, monkeypatch):
         lead_id = lead.id
 
     async def fake_fetch_site(clients, url):  # noqa: ARG001
-        return '<html><body><a href="https://wa.me/60999888777">Chat</a></body></html>'
+        return '<html><body><a href="https://wa.me/60999888777">Chat</a></body></html>', []
 
-    monkeypatch.setattr(website_enrich, "_fetch_site", fake_fetch_site)
-    ok = await website_enrich._enrich_one((None, None), _CtxStub(), lead_id, "https://still-wa.com", None)  # noqa: SLF001
+    monkeypatch.setattr(website_enrich, "_fetch_site_detailed", fake_fetch_site)
+    ok, _reason = await website_enrich._enrich_one((None, None), _CtxStub(), lead_id, "https://still-wa.com", None)  # noqa: SLF001
     assert ok is True
 
     async with async_session() as s:

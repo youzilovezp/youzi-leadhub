@@ -738,6 +738,7 @@ async def get_lead_detail(db: SessionDep, user: CurrentUser, lead_id: int):
     out.ad_count = lead.ad_count or 0
     out.last_ad_at = lead.last_ad_at
     out.cn_evidence = cn_evidence_of_lead(lead)
+    out.enrich_fail = (lead.field_meta or {}).get("enrich_fail")
     signal_rows = await list_signals(db, lead_id)
 
     def _stale_days(last_seen: datetime | None) -> int | None:
@@ -1221,7 +1222,7 @@ async def get_geo_options(_user: CurrentUser):
 async def lead_industries(db: SessionDep, _user: CurrentUser):
     """行业筛选下拉的数据源：直接取库里实际存在的 industry 值。
 
-    不用预设词表——google_maps 存关键词、OSM 存标签值、手工录入任意填，
+    不用预设词表——web_search 存搜索词、meta_ads 存 FB 类目映射、手工录入任意填，
     distinct 才能保证「选项里有的就能查到」。label 是中文展示名
     （词表映射，未收录原样显示），value 保持原 token 保证筛选精确。
     """

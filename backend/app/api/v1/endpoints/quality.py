@@ -226,7 +226,7 @@ async def quality_stats(db: SessionDep, user: CurrentUser):
             .group_by(Lead.grade)
         )
     ).all()
-    grade_counts = {g: c for g, c in grade_rows}
+    grade_counts = dict(grade_rows)
     total = sum(grade_counts.values()) or 1
     sa_ratio = round((grade_counts.get("S", 0) + grade_counts.get("A", 0)) / total, 4)
 

@@ -7,22 +7,22 @@ from app.collectors.base import LeadDraft
 from app.crud.lead import upsert_lead
 from app.models.lead import Lead
 
-_STRONG_DRAFT = dict(
-    source="meta_ads",
-    country="CN",
-    website=None,  # 各用例单独给唯一域名
-    is_cn=True,
-    fb_whatsapp=True,
-    whatsapp_url="https://wa.me/8613900000001",
-    whatsapp_numbers=["8613900000001", "8613900000002"],
-    wa_business=True,
-    target_countries=["US", "GB", "AE"],
-    overseas_signals={
+_STRONG_DRAFT = {
+    "source": "meta_ads",
+    "country": "CN",
+    "website": None,  # 各用例单独给唯一域名
+    "is_cn": True,
+    "fb_whatsapp": True,
+    "whatsapp_url": "https://wa.me/8613900000001",
+    "whatsapp_numbers": ["8613900000001", "8613900000002"],
+    "wa_business": True,
+    "target_countries": ["US", "GB", "AE"],
+    "overseas_signals": {
         "currencies": ["USD"], "languages": ["EN"], "ecommerce": ["shopify"],
         "markets": ["USA"], "shipping": ["worldwide"],
     },
-    social={"facebook": "https://facebook.com/dailybatch", "instagram": "https://instagram.com/dailybatch"},
-)
+    "social": {"facebook": "https://facebook.com/dailybatch", "instagram": "https://instagram.com/dailybatch"},
+}
 
 
 async def _login(client, credentials):

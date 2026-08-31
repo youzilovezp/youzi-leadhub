@@ -91,9 +91,8 @@ async def test_load_discoverable_skips_cooldown(db_session):
     """冷却中的线索不占发现窗口名额（负缓存接线验证）。"""
     from datetime import datetime, timezone
 
-    from app.crud.lead import touch_field_meta
-
     from app.collectors.website_enrich import _load_discoverable
+    from app.crud.lead import touch_field_meta
 
     d = LeadDraft(source="job_posting", name="发现链冷却测试科技（深圳）有限公司",
                   country="CN", is_cn=True)

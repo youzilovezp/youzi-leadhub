@@ -648,6 +648,15 @@ onMounted(fetchDetail)
                   <template v-else>未识别（跑 meta_ads 采集后累计）</template>
                 </span>
                 <span class="k">业务类型</span><span>{{ detail.export_type || '—' }}</span>
+                <template v-if="detail.enrich_fail">
+                  <span class="k">富化失败</span>
+                  <span>
+                    <n-tag size="small" type="warning" :bordered="false">
+                      {{ detail.enrich_fail.reason }}（{{ formatTime(detail.enrich_fail.updated_at) }}）
+                    </n-tag>
+                    <span class="dim-weight"> 数据可能过期，下一轮自动重试</span>
+                  </span>
+                </template>
                 <span class="k">FB 私域</span><span>{{ detail.fb_whatsapp ? '✓ 主页带 wa.me' : '—' }}</span>
                 <span class="k">在投广告</span>
                 <span>

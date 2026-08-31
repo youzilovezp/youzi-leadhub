@@ -243,10 +243,11 @@ async def _fetch_page(
         # 202 = 代理对目标站软拦截（website_enrich 踩过的坑），换通道再试
         if resp.status_code == 200 and len(resp.text) > 500:
             return resp.text
-    # 第二层：Chrome TLS 指纹伪装（反爬只认指纹的站点）
+    # 第二层：Chrome TLS 指纹伪装（反爬只认指纹的站点）；返回 (html, 原因)
     from app.collectors.website_enrich import _fetch_impersonated
 
-    return await _fetch_impersonated(url)
+    html, _reason = await _fetch_impersonated(url)
+    return html
 
 
 class MetaAdsCollector(Collector):

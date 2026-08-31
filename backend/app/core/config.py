@@ -145,10 +145,6 @@ class Settings(BaseSettings):
     # AUTO_SEED_DATA: 种子数据。**生产必须 false**（避免 Demo@123 等公开凭据进入生产 DB）
     AUTO_INIT_DB: bool = True
     AUTO_SEED_DATA: bool = False
-    # AUTO_SEED_BUSINESS: 业务种子（中国企业出海线索 93 条 + 3 个采集任务，
-    # 导出自 dev 库 2026-08-31）——仅当 leads 表为空时导入一次；想部署完全
-    # 干净的库（自行采集）设 false。测试环境由 conftest 强制关闭
-    AUTO_SEED_BUSINESS: bool = True
 
     # ---------- 线索采集 ----------
     # Meta 广告资料库（Ad Library API）访问令牌，meta_ads 采集器必填。
