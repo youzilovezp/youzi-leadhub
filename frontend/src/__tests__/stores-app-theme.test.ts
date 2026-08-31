@@ -29,7 +29,16 @@ describe('app store 主题', () => {
     const v = getComputedStyle(document.documentElement).getPropertyValue('--yz-primary')
     expect(v.trim().toLowerCase()).toBe('#2080f0')
     expect(app.naiveThemeOverrides.common?.primaryColor).toBe('#2080f0')
-    expect(localStorage.getItem('youzi-app-primary')).toBe('#2080f0')
+    expect(localStorage.getItem('youzi-app-primary@2')).toBe('#2080f0')
+  })
+
+  it('旧 key 残留值（旧默认柚子橙）被废弃，默认翡翠绿生效且旧 key 被清理', () => {
+    // v1 时期（a5eef52）默认色是柚子橙，老浏览器 localStorage 里存了 #f59e0b，
+    // 若沿用旧 key 会永远盖过代码默认翡翠绿
+    localStorage.setItem('youzi-app-primary', '#f59e0b')
+    const app = useAppStore()
+    expect(app.primaryColor).toBe('#10b981')
+    expect(localStorage.getItem('youzi-app-primary')).toBeNull()
   })
 
   it('setPrimaryColor 忽略非法 hex（3 位缩写 / rgb() 不写入不覆盖）', () => {
@@ -38,7 +47,7 @@ describe('app store 主题', () => {
     app.setPrimaryColor('#f00')
     app.setPrimaryColor('rgb(0, 0, 0)')
     expect(app.primaryColor).toBe('#7c3aed')
-    expect(localStorage.getItem('youzi-app-primary')).toBe('#7c3aed')
+    expect(localStorage.getItem('youzi-app-primary@2')).toBe('#7c3aed')
     expect(
       getComputedStyle(document.documentElement).getPropertyValue('--yz-primary').trim().toLowerCase(),
     ).toBe('#7c3aed')

@@ -255,8 +255,9 @@ class MetaAdsCollector(Collector):
             "label": "搜索关键词",
             "required": True,
             "type": "tags",
-            "placeholder": "行业/品类词，如 smart watch, leggings, wig",
-            "default": "",
+            "placeholder": "行业/品类词（英文），如 smart watch, leggings",
+            # 预填默认词：跨境大卖常见品类，打开就能一键创建
+            "default": "smart watch,leggings,wig,shapewear,led strip light",
         },
         {
             "key": "countries",
@@ -265,7 +266,8 @@ class MetaAdsCollector(Collector):
             "type": "multiselect",
             "options": COUNTRY_OPTIONS,
             "placeholder": "广告投放的国家（WA 高渗透市场优先）",
-            "default": "",
+            # 预填 WhatsApp 高渗透市场（东南亚 + 中东）：打开就能一键创建
+            "default": "MY,SG,ID,TH,PH,VN,AE,SA",
         },
         {
             "key": "max_pages",
