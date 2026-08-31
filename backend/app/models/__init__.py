@@ -17,6 +17,7 @@ __all__ = [
     "LeadContact",
     "LeadEvent",
     "LeadSignal",
+    "LeadReview",
     "CollectTask",
     "CollectTaskLog",
 ]

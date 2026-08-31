@@ -87,11 +87,14 @@ const icpFilterOptions = [
   })),
 ]
 
+/** 来源词表与后端 sources 写入方对齐（collectors emit / 导入入口）；
+ *  2026-08-31 修正：移除已下线的 osm_overpass/google_maps，补 web_search/career_site/seed_import */
 const sourceOptions = [
   { label: 'Meta 广告库', value: 'meta_ads' },
-  { label: '开源地图', value: 'osm_overpass' },
-  { label: '谷歌地图', value: 'google_maps' },
-  { label: '招聘监控', value: 'job_posting' },
+  { label: '搜索引擎发现', value: 'web_search' },
+  { label: '中国招聘网站', value: 'job_posting' },
+  { label: '企业招聘官网', value: 'career_site' },
+  { label: 'CSV 种子导入', value: 'seed_import' },
   { label: '网站富化', value: 'website_enrich' },
   { label: '手工录入', value: 'manual' },
 ]
@@ -104,9 +107,10 @@ function sourceLabel(token: string): string {
 /** 来源标签配色：不同来源一眼可辨 */
 const SOURCE_TAG_TYPES: Record<string, 'success' | 'warning' | 'info' | 'default' | 'error'> = {
   meta_ads: 'error',
-  osm_overpass: 'success',
-  google_maps: 'warning',
+  web_search: 'success',
   job_posting: 'info',
+  career_site: 'info',
+  seed_import: 'warning',
   website_enrich: 'default',
   manual: 'default',
 }

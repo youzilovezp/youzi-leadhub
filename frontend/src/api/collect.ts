@@ -327,6 +327,8 @@ export interface SignalEvidence {
 export interface LeadDetail extends Lead {
   /** CN 证据强度：strong=硬证据 / weak=仅 CJK 启发式（待核验）/ 空=非 CN */
   cn_evidence: string
+  /** 最近一次富化失败 {reason, website, updated_at}；成功富化后自愈清除 */
+  enrich_fail: { reason: string; website?: string; updated_at?: string } | null
   dimensions: Record<string, number>
   dimension_weights: Record<string, number>
   contacts: Contact[]

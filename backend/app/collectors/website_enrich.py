@@ -163,15 +163,35 @@ def find_inner_page_urls(homepage_html: str, base_url: str, base_domain: str | N
     return urls
 
 
-async def _fetch(client: httpx.AsyncClient, url: str) -> str | None:
-    """抓页面 HTML；任何失败（超时/4xx/5xx/编码异常）返回 None。"""
+def _classify_httpx_error(exc: Exception) -> str:
+    """httpx 异常 → 短中文原因（富化失败原因描述，销售/运营可读）。"""
+    import ssl
+
+    if isinstance(exc, httpx.ConnectError):
+        cause = exc.__cause__
+        if isinstance(cause, ssl.SSLError) or "certificate" in str(exc).lower():
+            return "TLS/证书错误"
+        msg = str(exc).lower()
+        if any(k in msg for k in ("getaddrinfo", "nodename nor servname", "name or service", "no address")):
+            return "DNS 解析失败（域名可能失效）"
+        return "连接被拒绝/重置"
+    if isinstance(exc, httpx.ConnectTimeout):
+        return "连接超时（站点不可达或被墙）"
+    if isinstance(exc, httpx.ReadTimeout | httpx.WriteTimeout | httpx.PoolTimeout):
+        return "响应超时"
+    return type(exc).__name__
+
+
+async def _fetch_detailed(client: httpx.AsyncClient, url: str) -> tuple[str | None, str | None]:
+    """抓单页，失败时带回原因（None=成功无原因；空串层不可用）。"""
     try:
         resp = await client.get(url, follow_redirects=True)
-        if resp.status_code != 200:
-            return None
-        return resp.text
-    except httpx.HTTPError:
-        return None
+    except httpx.HTTPError as exc:
+        return None, _classify_httpx_error(exc)
+    if resp.status_code != 200:
+        return None, f"HTTP {resp.status_code}"
+    return resp.text, None
+
 
 
 # 采集 client 双通道（与 meta_ads / web_search 同策略）：
@@ -190,24 +210,42 @@ def _make_client(**kwargs: Any) -> httpx.AsyncClient:
     )
 
 
+async def _fetch_site_detailed(
+    clients: tuple[httpx.AsyncClient, httpx.AsyncClient], url: str
+) -> tuple[str | None, list[str]]:
+    """抓站点首页（换 scheme 重试 + 宽松 SSL 兜底），失败时收集各次尝试的原因。
+
+    返回 (html, 原因列表)；html 命中时原因列表为空。
+    """
+    primary, loose = clients
+    html, reason = await _fetch_detailed(primary, url)
+    if html is not None:
+        return html, []
+    reasons = [reason] if reason else []
+    alt = url.replace("https://", "http://", 1) if url.startswith("https://") else url.replace(
+        "http://", "https://", 1
+    )
+    if alt != url:
+        html, reason = await _fetch_detailed(primary, alt)
+        if html is not None:
+            return html, []
+        if reason:
+            reasons.append(reason)
+    html, reason = await _fetch_detailed(loose, url)
+    if html is not None:
+        return html, []
+    if reason:
+        reasons.append(f"{reason}（宽松SSL直连）")
+    return None, reasons
+
+
 async def _fetch_site(clients: tuple[httpx.AsyncClient, httpx.AsyncClient], url: str) -> str | None:
     """抓站点首页，失败时换 scheme 重试，最后用宽松 SSL 的兜底 client 再试一次。
 
     请求预算：正常 1 次；失败最多 +2 次（换 scheme、宽松 SSL）。
     联系页抓取不算在内（首页成功才有联系页），礼貌性可控。
     """
-    primary, loose = clients
-    html = await _fetch(primary, url)
-    if html is not None:
-        return html
-    alt = url.replace("https://", "http://", 1) if url.startswith("https://") else url.replace(
-        "http://", "https://", 1
-    )
-    if alt != url:
-        html = await _fetch(primary, alt)
-        if html is not None:
-            return html
-    return await _fetch(loose, url)
+    return (await _fetch_site_detailed(clients, url))[0]
 
 
 def _resolve_url(base_url: str, href: str) -> str | None:
@@ -326,9 +364,9 @@ class WebsiteEnrichCollector(Collector):
         async with _session_factory()() as session:
             leads = await _load_scope(session, lead_ids)
 
-        # 结果统计（结束日志说清成功/失败——失败不再淹没在「完成」里）
+        # 结果统计（结束日志说清成功/失败与各自原因——失败不再淹没在「完成」里）
         ok_sites: list[str] = []
-        fail_sites: list[str] = []
+        fail_sites: list[tuple[str, str | None]] = []  # (website, 失败原因)
 
         # 浏览器渲染兜底（懒启动）：httpx 三通道都被拒的站点（如大型电商的
         # 反爬 403）用无头浏览器渲染一次，实测 banggood 403 → 渲染 200。
@@ -484,13 +522,14 @@ class WebsiteEnrichCollector(Collector):
                 async with sem:
                     ctx.check_cancelled()
                     try:
-                        if await _enrich_one((client, loose), ctx, lead_id, website, get_browser):
+                        ok, fail_reason = await _enrich_one((client, loose), ctx, lead_id, website, get_browser)
+                        if ok:
                             ok_sites.append(website)
                         else:
-                            fail_sites.append(website)
+                            fail_sites.append((website, fail_reason))
                     except Exception:  # noqa: BLE001  单站点失败不放大为整任务失败
                         logger.exception(f"[lead {lead_id}] 富化异常：{website}")
-                        fail_sites.append(website)
+                        fail_sites.append((website, "富化异常（见服务端日志）"))
                 done += 1
                 ctx.inc_progress(1)
 
@@ -502,12 +541,16 @@ class WebsiteEnrichCollector(Collector):
             except Exception:  # noqa: BLE001
                 pass
 
-        # 汇总日志：成功/失败分开数，失败给原因分类（下一轮自动重试）
+        # 汇总日志：成功/失败分开数，失败带真实原因（每站点：原因）——
+        # 「域名失效或拒绝访问」这种一刀切文案换成分层诊断（DNS/超时/TLS/HTTP 码）
         summary = f"富化完成：成功 {len(ok_sites)}、失败 {len(fail_sites)}"
         if fail_sites:
-            summary += "（失败站点：{} —— 域名失效或拒绝访问，下一轮自动重试）".format(
-                "、".join(s.replace("https://", "").replace("http://", "") for s in fail_sites[:10])
+            detail = "、".join(
+                f"{site.replace('https://', '').replace('http://', '')}"
+                f"（{reason or '未知原因'}）"
+                for site, reason in fail_sites[:10]
             )
+            summary += f"（失败站点：{detail} —— 下一轮自动重试，原因已写入线索详情）"
         await ctx.log("info", summary)
 
 
@@ -658,24 +701,27 @@ def _session_factory():
     return async_session
 
 
-async def _fetch_impersonated(url: str) -> str | None:
+async def _fetch_impersonated(url: str) -> tuple[str | None, str | None]:
     """Chrome TLS/HTTP2 指纹伪装请求（curl_cffi）：大多数反爬只认指纹不开浏览器就能过。
 
     抓取三层递进的第二层——httpx（快、通用）→ 本层（指纹伪装，毫秒级开销，
-    实测 banggood 403 → 200）→ 无头浏览器渲染（JS 挑战才需要）。失败/未安装返回 None。
+    实测 banggood 403 → 200）→ 无头浏览器渲染（JS 挑战才需要）。
+    返回 (html, 原因)；未安装可选依赖时 (None, None)——层不可用不算失败原因。
     """
     try:
         from curl_cffi.requests import AsyncSession
     except ImportError:
-        return None
+        return None, None
     try:
         async with AsyncSession(impersonate="chrome", timeout=20) as s:
             resp = await s.get(url)
             if resp.status_code == 200 and len(resp.text) > 500:
-                return resp.text
-    except Exception:  # noqa: BLE001  指纹层失败留给浏览器层
-        return None
-    return None
+                return resp.text, None
+            if resp.status_code != 200:
+                return None, f"指纹层 HTTP {resp.status_code}"
+            return None, "指纹层内容过短"
+    except Exception as exc:  # noqa: BLE001  指纹层失败留给浏览器层
+        return None, f"指纹层 {type(exc).__name__}"
 
 
 async def _render_with_browser(browser, url: str) -> str | None:
@@ -708,35 +754,67 @@ def detect_tel_phones(html_list: list[str]) -> list[str]:
     return phones
 
 
+async def _record_enrich_fail(lead_id: int, website: str, reason: str) -> None:
+    """富化失败原因落到线索 field_meta.enrich_fail（详情页可见；成功富化时自愈清除）。
+
+    独立短事务：失败路径此时还没有打开过的写会话，且不碰 enriched_at——
+    失败线索保留在下一轮重爬范围里。
+    """
+    from app.models.lead import Lead
+
+    async with _session_factory()() as session:
+        lead = await session.get(Lead, lead_id)
+        if lead is None:
+            return
+        meta = dict(lead.field_meta or {})
+        meta["enrich_fail"] = {
+            "reason": reason[:500],
+            "website": website,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        lead.field_meta = meta
+        await session.commit()
+
+
 async def _enrich_one(
     clients: tuple[httpx.AsyncClient, httpx.AsyncClient],
     ctx: TaskContext,
     lead_id: int,
     website: str,
     get_browser: Callable[[], Awaitable[Any]] | None = None,
-) -> bool:
-    """富化单个站点并回写。返回是否成功（成功 = 抓到至少一个页面）。
+) -> tuple[bool, str | None]:
+    """富化单个站点并回写。返回 (是否成功, 失败原因)——成功时原因为 None。
 
     只在「成功抓到首页」时更新 enriched_at；httpx 三通道全失败时尝试
     无头浏览器渲染兜底（反爬 403 的大站），仍失败留待下一轮自动重试。
+    失败原因分层收集（DNS/超时/TLS/HTTP 状态码/指纹层/渲染层），写入
+    field_meta.enrich_fail 供详情页展示（用户需求：每条线索的失败原因描述）。
     """
     base = website if website.startswith(("http://", "https://")) else f"https://{website}"
-    homepage = await _fetch_site(clients, base)
+    homepage, fail_reasons = await _fetch_site_detailed(clients, base)
     if homepage is None:
         # 第二层：Chrome 指纹伪装（大多数反爬站到此为止，不用开浏览器）
-        homepage = await _fetch_impersonated(base)
+        homepage, imp_reason = await _fetch_impersonated(base)
         if homepage is not None:
             await ctx.log("info", f"[lead {lead_id}] 🥷 Chrome 指纹伪装通过：{website}")
+        elif imp_reason:
+            fail_reasons.append(imp_reason)
+    render_attempted = False
     if homepage is None and get_browser is not None:
         # 第三层：无头浏览器渲染（JS 验证挑战站才需要）
         browser = await get_browser()
         if browser is not None:
+            render_attempted = True
             homepage = await _render_with_browser(browser, base)
             if homepage is not None:
                 await ctx.log("info", f"[lead {lead_id}] 🌐 浏览器渲染兜底成功：{website}")
     if homepage is None:
-        await ctx.log("warn", f"[lead {lead_id}] 首页抓取失败（域名失效或拒绝访问）：{website}")
-        return False
+        if render_attempted:
+            fail_reasons.append("浏览器渲染失败")
+        reason = "；".join(dict.fromkeys(r for r in fail_reasons if r)) or "未知原因"
+        await ctx.log("warn", f"[lead {lead_id}] 首页抓取失败：{website} —— {reason}")
+        await _record_enrich_fail(lead_id, website, reason)
+        return False, reason
 
     # 首页里找内页链接（联系/关于/产品，最多 3 个，域名相同才跟）
     base_domain = extract_domain(base)
@@ -774,7 +852,7 @@ async def _enrich_one(
 
         lead = await session.get(Lead, lead_id)
         if lead is None:
-            return False
+            return False, "线索已不存在"
         before = snapshot_lead(lead)
         now = datetime.now(timezone.utc)
         if whatsapp_hit:
@@ -942,6 +1020,10 @@ async def _enrich_one(
         for n in wa_numbers[:3]:
             await auto_create_from_phone(session, lead, n)
         lead.enriched_at = now
+        # 成功自愈：清除历史失败标记（field_meta.enrich_fail 只反映最近一次富化）
+        meta = dict(lead.field_meta or {})
+        if meta.pop("enrich_fail", None) is not None:
+            lead.field_meta = meta
         # 统一重评钩子：六维重算（读 ORM 行属性，fb_whatsapp 不再漏传）+ 事件发射
         await rescore_and_log(session, lead, before=before)
         await session.commit()
@@ -953,4 +1035,4 @@ async def _enrich_one(
     if saas_signals:
         labels = "、".join(SAAS_LABELS_ZH.get(k, k) for k in saas_signals)
         await ctx.log("info", f"[lead {lead_id}] SaaS 需求信号：{labels}")
-    return True
+    return True, None

@@ -161,7 +161,7 @@ class CareerSiteCollector(Collector):
         ok = hit = 0
         async with _make_client() as client, _make_client(verify=False, trust_env=False) as loose:
             clients = (client, loose)
-            for lead_id, name, website, city, country, is_cn in rows:
+            for _lead_id, name, website, city, country, is_cn in rows:
                 ctx.check_cancelled()
                 base = website if website.startswith(("http://", "https://")) else f"https://{website}"
                 domain = extract_domain(base) or ""

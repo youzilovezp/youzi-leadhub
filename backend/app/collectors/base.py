@@ -23,7 +23,7 @@ from app.core.exceptions import BusinessError
 class LeadDraft:
     """采集器产出的原始线索（未归一化、未去重）。"""
 
-    source: str  # 来源标识：google_maps / website_enrich / job_posting / manual / meta_ads
+    source: str  # 来源标识：web_search / website_enrich / job_posting / manual / meta_ads / career_site / seed_import
     name: str
     country: str | None = None  # ISO2
     city: str | None = None

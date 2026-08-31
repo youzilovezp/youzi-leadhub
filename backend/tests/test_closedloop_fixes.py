@@ -165,7 +165,9 @@ async def test_maybe_chain_enrich_creates_and_throttles(db_session, monkeypatch)
     不算数——按时间窗口节流会整批漏富化（同日修复）；非发现类/开关关 → 不动。"""
     from datetime import datetime, timezone
 
-    from sqlalchemy import delete as sa_delete, select as sa_select, update as sa_update
+    from sqlalchemy import delete as sa_delete
+    from sqlalchemy import select as sa_select
+    from sqlalchemy import update as sa_update
 
     from app.models.collect_task import CollectTask
     from app.services.task_runner import task_runner

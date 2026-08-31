@@ -7,20 +7,20 @@ from app.collectors.base import LeadDraft
 from app.crud.lead import upsert_lead
 from app.schemas.collect import ContactCreate
 
-_QA_DRAFT: dict = dict(
-    country="CN",
-    is_cn=True,
-    fb_whatsapp=True,
-    whatsapp_url="https://wa.me/8613911110001",
-    whatsapp_numbers=["8613911110001", "8613911110002"],
-    wa_business=True,
-    target_countries=["US", "GB", "AE"],
-    overseas_signals={
+_QA_DRAFT: dict = {
+    "country": "CN",
+    "is_cn": True,
+    "fb_whatsapp": True,
+    "whatsapp_url": "https://wa.me/8613911110001",
+    "whatsapp_numbers": ["8613911110001", "8613911110002"],
+    "wa_business": True,
+    "target_countries": ["US", "GB", "AE"],
+    "overseas_signals": {
         "currencies": ["USD"], "languages": ["EN"], "ecommerce": ["shopify"],
         "markets": ["USA"], "shipping": ["worldwide"],
     },
-    social={"facebook": "https://facebook.com/qualx", "instagram": "https://instagram.com/qualx"},
-)
+    "social": {"facebook": "https://facebook.com/qualx", "instagram": "https://instagram.com/qualx"},
+}
 
 
 async def _login(client, credentials):

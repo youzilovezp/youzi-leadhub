@@ -92,6 +92,8 @@ _ARTICLE_TITLE_WORDS = (
     "指南", "测评", "手册", "必看", "攻略", "如何", "怎么办", "完整", "清单",
     "排行", "对比", "top 10", "top10", "best ", "how to", "guide", "review", "tutorial",
     "vs ", "tips", "checklist", "解密", "深度", "解析", "入门", "实战",
+    # 内容门户/知识站（2026-08-31 实测漏网：「外贸知识大全-外贸知识网」混进线索池）
+    "大全", "知识网", "百科", "资讯网", "论坛", "问答", "导航",
 )
 _ARTICLE_PATH_WORDS = (
     "/blog", "/article", "/articles", "/news", "/docs", "/doc/", "/archives",
@@ -172,29 +174,48 @@ def parse_bing_html(html: str) -> list[dict[str, Any]]:
 async def _search_bing(
     clients: tuple[httpx.AsyncClient, httpx.AsyncClient], kw: str, limit: int
 ) -> tuple[list[dict[str, Any]], str | None]:
-    """cn.bing.com 直连搜索（直连优先，代理兜底；ConnectError 退避一次重试）。"""
+    """cn.bing.com 直连搜索（直连优先，代理兜底；连接异常退避 8s 重试一次）。
+
+    翻页取满 limit（first=1/11/21…，≤4 页，页间 2s）。2026-08-31 用户反馈
+    「爬取量太少」：此前只取第一页 ≈10 条且 count 参数对 HTML 端点不生效，
+    max_results>10 形同虚设——必应 HTML 单页固定 ~10 条 b_algo，翻页是唯一增量。
+    """
     err: str | None = None
-    # 直连优先（国内站走代理反而 301），复用传入 client 的 keep-alive 连接；
-    # cn.bing 首次访问常 30x 跳转（区域/参数规整），必须跟跳转；
-    # 连续新建连接会被掐 TLS（惩罚窗口约 1 分钟）——退避 8s 重试，共 3 次
     for client in (clients[1], clients[0]):
-        for attempt in range(3):
-            try:
-                resp = await client.get(
-                    "https://cn.bing.com/search",
-                    params={"q": kw, "count": min(limit, 30)},
-                    headers={"User-Agent": _UA, "Accept-Language": "zh-CN,zh;q=0.9"},
-                    follow_redirects=True,
-                )
-            except httpx.HTTPError as exc:
-                err = f"必应连接失败 {type(exc).__name__}"
-                if attempt < 2:
-                    await asyncio.sleep(8)
-                continue
-            if resp.status_code != 200:
-                err = f"必应 {resp.status_code}"
-                continue
-            return parse_bing_html(resp.text)[:limit], None
+        collected: list[dict[str, Any]] = []
+        seen_urls: set[str] = set()
+        first = 1
+        for _page in range(4):
+            resp: httpx.Response | None = None
+            for attempt in range(2):
+                try:
+                    resp = await client.get(
+                        "https://cn.bing.com/search",
+                        params={"q": kw, "first": first},
+                        headers={"User-Agent": _UA, "Accept-Language": "zh-CN,zh;q=0.9"},
+                        follow_redirects=True,
+                    )
+                    break
+                except httpx.HTTPError as exc:
+                    # 连续新建连接会被掐 TLS（惩罚窗口约 1 分钟）——退避 8s 重试一次
+                    err = f"必应连接失败 {type(exc).__name__}"
+                    if attempt == 0:
+                        await asyncio.sleep(8)
+            if resp is None or resp.status_code != 200:
+                if resp is not None:
+                    err = f"必应 {resp.status_code}"
+                break
+            new = [x for x in parse_bing_html(resp.text) if x["url"] not in seen_urls]
+            if not new:
+                break
+            collected.extend(new)
+            seen_urls.update(x["url"] for x in new)
+            if len(collected) >= limit:
+                break
+            first += 10
+            await asyncio.sleep(2)
+        if collected:
+            return collected[:limit], None
     return [], err or "必应不可达"
 
 
@@ -434,6 +455,9 @@ class WebSearchCollector(Collector):
         except ValueError:
             max_results = 20
         engine = settings.SEARCH_ENGINE
+        # DDG 撞墙记忆：本网络 DDG 不可达时，后续关键词直接走必应——
+        # 否则每个词都白等一次 DDG 超时（实测 ~7s/词，纯浪费且刷屏 warn）
+        ddg_dead = False
         ctx.set_total(len(keywords))
         ok_queries = 0
 
@@ -444,11 +468,18 @@ class WebSearchCollector(Collector):
             clients = (via_proxy, direct)
             for kw in keywords:
                 ctx.check_cancelled()
-                await ctx.log("info", f"搜索（{engine}）：「{kw}」")
-                # 主引擎 + DDG 不可达自动切必应（search_with_fallback 与官网发现共用）
-                items, err, engine_used = await search_with_fallback(
-                    clients, kw, max_results, log=ctx.log
-                )
+                await ctx.log("info", f"搜索（{'bing_cn' if ddg_dead else engine}）：「{kw}」")
+                if ddg_dead:
+                    items, err = await _search_bing(clients, kw, max_results)
+                    engine_used = "bing_cn"
+                else:
+                    # 主引擎 + DDG 不可达自动切必应（search_with_fallback 与官网发现共用）
+                    items, err, engine_used = await search_with_fallback(
+                        clients, kw, max_results, log=ctx.log
+                    )
+                    if engine_used == "bing_cn":
+                        ddg_dead = True
+                        await ctx.log("info", "DDG 本轮不可达，后续关键词直接走必应（省去每词超时等待）")
                 if err:
                     await ctx.log("error", f"「{kw}」搜索失败：{err}")
                 else:
