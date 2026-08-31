@@ -60,14 +60,13 @@ python3 backend/scripts/add_module.py <name> --title "中文标题" --fields "a:
 
 ## 常用命令
 
+全量命令看根目录 [README](README.md) 或 `make help`。AI 最常用：
+
 ```bash
-make dev        # 一键启动（装依赖+中间件+前后端）
-make test       # 跑测试（临时 sqlite 测试库，不碰开发数据、不需要中间件）
-make backup     # 备份 → backups/（带时间戳）
-make restore FILE=backups/app_xxx.sql   # 恢复
-make db-migrate MSG="..." && make db-upgrade   # 改表结构
-make admin-pass NEW='<强密码>'          # 改 admin 密码
-make use-sqlite / make use-pg          # 切数据库模式
+make dev                                          # 一键启动
+make test                                         # 测试（临时 sqlite 库，不碰开发数据）
+make db-migrate MSG="..." && make db-upgrade      # 改表结构
+make admin-pass NEW='<强密码>'                     # 改 admin 密码
 ```
 
 ## 中间件策略

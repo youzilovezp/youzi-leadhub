@@ -14,7 +14,7 @@
 ![Vue](https://img.shields.io/badge/Vue-3.4-42b883.svg)
 ![Naive UI](https://img.shields.io/badge/Naive%20UI-2.6-green.svg)
 
-[📖 业务逻辑](docs/业务逻辑.md) · [🚀 脚手架使用说明](项目说明.md) · [🤖 AI 开发手册](AGENTS.md)
+[📘 使用手册](docs/使用手册.md) · [📖 业务逻辑](docs/业务逻辑.md) · [🛠️ 运维部署](docs/运维部署.md) · [🤖 AI 开发手册](AGENTS.md)
 
 </div>
 
@@ -26,9 +26,9 @@
 make dev    # 装依赖 + 准备中间件 + 启动前后端，Ctrl+C 一起停
 ```
 
-打开 **http://localhost:3000**，账号 `admin` / 见 `backend/.env` 的 `INITIAL_ADMIN_PASSWORD`（默认 `admin`），登录成功 ✅
+打开 **http://localhost:3000**，账号 `admin` / 密码见 `backend/.env` 的 `INITIAL_ADMIN_PASSWORD`（默认 `admin`），登录成功 ✅
 
-> 💡 默认密码 `admin/admin` 方便本地开发。**生产前必须改密码：`make admin-pass NEW='<强密码>'`。**
+> 💡 默认密码方便本地开发。**生产前必须改密码：`make admin-pass NEW='<强密码>'`。**
 
 分开跑（输出更清晰）：`make install` → `make backend-dev`（终端 A）→ `make frontend-dev`（终端 B）。
 
@@ -38,27 +38,30 @@ make dev    # 装依赖 + 准备中间件 + 启动前后端，Ctrl+C 一起停
 |---|---|---|
 | 🖥️ 前端 | http://localhost:3000 | 用户界面 |
 | ⚡ 后端 API | http://localhost:8000 | REST 接口 |
-| 📘 API 文档 | http://localhost:8000/docs | Swagger UI |
+| 📘 API 文档 | http://localhost:8000/docs | Swagger UI（点 Authorize 输 token 调试） |
 | 🗄️ 数据库 UI | http://localhost:8080 | adminer（手动启动：`docker compose --env-file backend/.env up -d adminer`） |
 
-### ⚙️ 可选配置
+> 💡 adminer 登录：Docker 起的 PG 填 Server=`youzi-leadhub-postgres`；复用本机 PG 填 `host.docker.internal`。用户名/密码/库见 `backend/.env`。
+
+### ⚙️ 高频可选配置
 
 | 配置项 | 作用 |
 |---|---|
-| `SCORING_DIM_WEIGHTS` / `TARGET_REGIONS` | 覆盖六维评分权重 / 目标地区 |
-| `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | AI 企业分析/销售话术（OpenAI 兼容协议；可指向本地 Ollama/vLLM 跑开源模型实现零成本；未配置降级规则模板，全功能可用） |
-| `SEARCH_ENGINE` | web_search 搜索引擎：`duckduckgo`（默认，零 key 零费用）/ `searxng`（自托管开源元搜索，配 `SEARXNG_URL`）/ google_cse、bing（可选付费加速） |
-| `ENRICH_INTERVAL_HOURS` | C 级线索富化兜底周期（默认 168h；S/A/B 级固定 1/3/7 天更勤） |
-| `SCHEDULER_ENABLED=true` | 开启 cron 定时调度（单进程） |
+| `META_ADS_ACCESS_TOKEN` | 主通道 meta_ads 必填（免费申请：[Ad Library API](https://www.facebook.com/ads/archive/api)） |
+| `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | AI 分析/话术（OpenAI 兼容；可指向本地 Ollama 零成本；未配置降级规则模板，全功能可用） |
+| `SEARCH_ENGINE` | `duckduckgo`（默认零 key）/ `searxng`（自托管）/ google_cse、bing（付费加速） |
+| `SCORING_DIM_WEIGHTS` / `TARGET_REGIONS` / `SCHEDULER_ENABLED` | 六维评分权重 / 目标地区 / cron 定时调度 |
+
+> 完整配置项：[backend/docs/配置说明.md](backend/docs/配置说明.md) ／ 生产核对清单：[docs/运维部署.md](docs/运维部署.md)
 
 ---
 
 ## 🤔 这是什么？
 
-给销售找「需要用 WhatsApp 做生意」的企业线索，完整链路：**采集 → 归一化 → 去重合并 → 六维评分分级 → 画像/联系人/事件 → 列表筛选 → 跟进建联**。
+给销售找「需要用 WhatsApp 做生意」的企业线索，完整链路：**采集 → 归一化 → 去重合并 → ICP 二重门 → 六维评分分级 → 今日商机批次 → 领取 → 跟进建联 → 成交回传**。
 
 ```
-采集器产出 LeadDraft（meta_ads 主通道 / web_search 搜索发现 / seed_import 种子导入 / job_posting / website_enrich / 手工录入）
+采集器产出 LeadDraft（meta_ads 主通道 / web_search / seed_import / job_posting / website_enrich / 手工录入）
         │
         ▼
 归一化：电话 E.164 · 域名 registrable domain · 公司名归一
@@ -67,35 +70,29 @@ make dev    # 装依赖 + 准备中间件 + 启动前后端，Ctrl+C 一起停
 去重合并：三身份列反查，跨来源合并到同一 Lead   ← 系统核心
         │
         ▼
-六维评分+分级：出海25% · WhatsApp30% · SaaS需求20% · 规模10% · 营销10% · 联系人5% → S/A/B/C
+ICP 二重门（中国企业 + 出海证据才进销售池）+ 六维评分 → S/A/B/C
         │
         ▼
-控制台 UI：画像详情（六维/联系人/事件时间线/产品推荐/销售建议）/ 等级筛选 / CSV 导出 / 批量检测 WhatsApp
+控制台 UI：今日商机 / 画像详情 / 领取跟进 / CSV 导出 / 批量检测 WhatsApp
 ```
 
 ### ✨ 核心能力
 
 | 能力 | 说明 |
 |---|---|
-| 🔌 多源采集 | 插件式采集器，注册即接入任务/去重/评分体系 |
-| 🌱 Seed Pool | CSV 批量导入中国企业种子（`POST /collect/leads/import`，走去重合并，is_cn 标记）——PRD 模块①入口 |
-| 📣 `meta_ads` | **主通道**（PRD ICP=中国出海企业）：广告库搜投放企业 → 主页探测 WA/邮箱/官网 + 中文特征（Ad Library API 免费） |
-| 💼 `job_posting` | 招聘站点监控（kalibrr 等），在招 WhatsApp 客服的公司即高意向线索 |
-| 🔍 `website_enrich` | 富化存量线索：官网检测 WhatsApp/邮箱/社媒 + 场景（客服/营销/交易）与 SaaS 需求关键词，邮箱自动生成联系人 |
-| ✍️ 手工录入 | 同样走去重合并 |
-| 🧬 去重合并（核心） | 电话 E.164 / 域名 registrable domain / 公司名归一化，三身份列反查跨来源合并 |
-| 📊 六维评分分级 | 出海/WhatsApp/SaaS需求/规模/营销/联系人 加权 0-100，S/A/B/C 分级，`SCORING_DIM_WEIGHTS` env 覆盖 |
-| 👤 联系人 | 手工 CRUD + 富化邮箱自动生成，职位自动分层（决策层/市场客服/技术），参与评分 |
-| 📡 动态事件 | WhatsApp 发现/场景变化/等级迁移等 11 类事件自动记录，详情页时间线 |
-| 🎯 产品推荐 | 规则引擎按画像推荐产品 + 销售建议文案（不依赖 LLM） |
-| 📤 CSV 导出 | 当前筛选口径、36 个可选字段、UTF-8 BOM（Excel 直接打开） |
-| 🤖 AI 能力 | 企业分析/话术生成（§七 输出规格；OpenAI 兼容协议，未配置降级规则模板） |
+| 🔌 多源采集 | 插件式采集器，注册即接入任务/去重/评分体系；**meta_ads 主通道**挖在投海外广告的中国企业 |
+| 🧬 去重合并 | 电话 E.164 / 域名 / 公司名三身份列反查，跨来源合并——同一企业永远只有一条 |
+| 🚪 ICP 二重门 | 中国企业 + 出海证据才进销售池，非中国企业默认不出现在列表与导出 |
+| 📊 六维评分分级 | 出海25 / WhatsApp30 / SaaS需求20 / 规模10 / 营销10 / 联系人5，加权 0-100 → S/A/B/C |
+| 🔥 今日商机 | 每天自动汇总新晋 S/A + 新增高分 + 高价值预警，销售领取即跟进 |
+| 👤 联系人 | 手工 CRUD + 官网邮箱自动生成，职位自动分层（决策层/市场客服/技术） |
+| 🎯 产品推荐 | 规则引擎双产品线（WA 消息 / 出海 SaaS / 广告代理）+ 销售建议文案，不依赖 LLM |
+| 🤖 AI 能力 | 企业分析/话术生成（OpenAI 兼容协议，未配置降级规则模板） |
+| 📤 CSV 导出 | 当前筛选口径、36 个可选字段、Excel 直接打开 |
 | 👑 RBAC + 数据权限 | 5 种子角色 × 7 权限码；公司/团队/个人三级数据权限 |
-| 📊 数据源管理 | 渠道×等级产出分析（§一「分析哪个渠道商机产出最高」） |
-| ⏱️ 任务体系 | DB 即队列（无 Celery/Redis），支持并发闸门、取消、进度/日志实时轮询、APScheduler cron 定时 |
-| 🖥️ 控制台 UI | 线索筛选（等级/国家/行业/来源/分数/WhatsApp 检测/关键词）、企业画像详情页、勾选批量检测、任务表单按 param_schema 动态渲染、日志流式查看 |
+| ⏱️ 任务体系 | DB 即队列（无 Celery/Redis），并发闸门、取消、进度/日志实时轮询、cron 定时 |
 
-> 📖 业务细节（数据流、去重算法、评分权重、设计取舍）见 [docs/业务逻辑.md](docs/业务逻辑.md)
+> 📖 业务细节（数据流、去重算法、评分权重、设计取舍）见 [docs/业务逻辑.md](docs/业务逻辑.md)；界面操作见 [docs/使用手册.md](docs/使用手册.md)。
 
 ---
 
@@ -106,7 +103,7 @@ youzi-leadhub/
 ├── backend/                # Python 后端（FastAPI）
 │   ├── app/
 │   │   ├── api/v1/endpoints/  # REST 接口
-│   │   ├── collectors/        # 插件式采集器（google_maps / job_posting / website_enrich）
+│   │   ├── collectors/        # 插件式采集器（meta_ads / job_posting / website_enrich …）
 │   │   ├── crud/              # 数据访问（lead.py 的 upsert_lead = 去重合并核心）
 │   │   ├── models/  schemas/  # SQLAlchemy 模型 / Pydantic 校验
 │   │   └── services/          # task_runner（DB 队列）、scheduler（cron）
@@ -114,24 +111,13 @@ youzi-leadhub/
 │   ├── scripts/            # add_module.py / reset_admin.py
 │   └── docs/               # 架构/配置/开发/API 文档
 ├── frontend/               # Vue 3 + TS
-│   └── src/views/collect/  # 线索列表 / 任务列表 / 任务详情
-├── docs/业务逻辑.md         # 业务逻辑梳理（数据流/去重/评分/设计取舍）
-├── docs/运维部署.md         # 生产部署手册（上线 checklist / 备份恢复 / 故障 runbook / PII 合规）
+│   ├── src/views/collect/  # 今日商机 / 线索 / 任务
+│   └── docs/               # 前端架构/配置/开发文档
+├── docs/                   # 使用手册 / 业务逻辑 / 运维部署
 ├── docker-compose.yml      # PostgreSQL / Redis + adminer
-├── Makefile                # 常用命令
-├── AGENTS.md               # AI 开发手册（模块注册流程、勿动文件清单）
-└── 项目说明.md              # 脚手架使用说明
+├── Makefile                # 常用命令（make help 看全量）
+└── AGENTS.md               # AI 开发手册（模块注册、勿动文件清单）
 ```
-
----
-
-## 🧩 扩展：新增采集器（三步）
-
-1. `backend/app/collectors/` 写类继承 `Collector`，实现 `run(ctx)`，产出 `LeadDraft` 并 `ctx.emit()`
-2. `collectors/__init__.py` 的 `_REGISTRY` 加一行注册
-3. 定义 `param_schema`（前端创建任务表单自动渲染）
-
-去重、评分、任务调度、日志、前端表单**全部自动接入**。
 
 ---
 
@@ -140,14 +126,14 @@ youzi-leadhub/
 ```bash
 make help            # 查看完整命令列表
 make dev             # 一键启动
-make test            # 跑后端 + 前端测试（独立临时测试库）
+make test            # 跑后端 + 前端测试（独立临时测试库，不碰开发数据）
 make db-migrate MSG="add order"   # 生成数据库迁移
-make db-upgrade      # 应用迁移
+make db-upgrade      # 应用迁移（db-downgrade 回滚一步，慎用）
 make backup          # 备份数据库 → backups/
-make restore FILE=backups/app_xxx.sql   # 恢复
-make use-sqlite      # 切换 SQLite（零依赖单文件）
-make use-pg          # 切换回 PostgreSQL
-make admin-pass NEW=xxx  # 重置 admin 密码
+make restore FILE=backups/app_xxx.sql   # 恢复（⚠️ 清库导入，破坏性）
+make use-sqlite      # 切换 SQLite（零依赖单文件）；make use-pg 切回
+make reset-admin     # 忘了密码？重置为 admin
+make admin-pass NEW=xxx  # 重置为指定密码
 ```
 
 ---
@@ -157,9 +143,11 @@ make admin-pass NEW=xxx  # 重置 admin 密码
 | 层 | 技术 |
 |---|---|
 | ⚡ 后端 | FastAPI + SQLAlchemy 2 + Alembic，PostgreSQL（默认）/ SQLite（零依赖模式） |
-| 🕷️ 采集 | Crawlee（HTTP 爬虫）、httpx[socks]、phonenumbers、tldextract、APScheduler 3.x |
+| 🕷️ 采集 | Crawlee（HTTP 爬虫）、Playwright（渲染采集）、httpx[socks]、phonenumbers、tldextract、APScheduler 3.x |
 | 🎨 前端 | Vue 3 + TypeScript + Vite + Naive UI + Tailwind（原子类布局） |
 | 🗄️ 中间件 | Docker Compose（PostgreSQL / Redis / adminer），优先复用本机已运行实例 |
+
+> 版本明细：[backend/docs/技术栈.md](backend/docs/技术栈.md) · [frontend/docs/技术栈.md](frontend/docs/技术栈.md)
 
 ---
 
@@ -167,10 +155,10 @@ make admin-pass NEW=xxx  # 重置 admin 密码
 
 | 你想了解什么 | 看这里 |
 |---|---|
+| 📘 **怎么用**（销售跟进 / 管理员建任务 / 导出 / 权限） | [docs/使用手册.md](docs/使用手册.md) |
 | 🧠 业务逻辑（数据流 / 去重合并 / 评分 / 任务生命周期 / 设计取舍） | [docs/业务逻辑.md](docs/业务逻辑.md) |
 | 🛠️ 运维部署（部署架构 / 上线 checklist / 备份恢复 / 故障 runbook / PII 合规） | [docs/运维部署.md](docs/运维部署.md) |
-| 🚀 脚手架使用（启动、命令、加业务模块） | [项目说明.md](项目说明.md) |
-| 🤖 AI 助手开发约定 | [AGENTS.md](AGENTS.md) |
+| 🤖 改代码（加模块 / 加采集器 / 勿动文件清单 / 开发约定） | [AGENTS.md](AGENTS.md) |
 | ⚙️ 后端架构 / 配置 / 开发 / API | [架构](backend/docs/架构说明.md) · [配置](backend/docs/配置说明.md) · [开发](backend/docs/开发指南.md) · [API](backend/docs/API文档.md) |
 | 🎨 前端架构 / 配置 / 开发 | [架构](frontend/docs/架构说明.md) · [配置](frontend/docs/配置说明.md) · [开发](frontend/docs/开发指南.md) |
 
