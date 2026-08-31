@@ -537,7 +537,8 @@ async def daily_batch_endpoint(db: SessionDep, user: CurrentUser):
     alert_rows = (
         await db.execute(
             select(LeadEvent)
-            .where(LeadEvent.is_alert, LeadEvent.created_at >= today)
+            .join(Lead, LeadEvent.lead_id == Lead.id)
+            .where(LeadEvent.is_alert, LeadEvent.created_at >= today, Lead.icp_status != "foreign")
             .order_by(LeadEvent.created_at.desc())
             .limit(100)
         )
