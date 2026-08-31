@@ -1,13 +1,14 @@
 <script setup lang="ts">
 // 今日商机批次：销售每天直接收到一批值得联系的中国出海企业（业务主线交付层）。
-// 三问齐备：为什么值得联系（关键信号 chips）/ 应该卖什么（推荐产品列）/
-// 应该找谁（联系人列 + WA 入口）。批次空转时给出根因诊断（管道健康度）。
+// 三问上一线：为什么值得联系 / 应该卖什么 / 应该找谁 三列直读
+// 后端逐行挂载的 three_questions（不齐备的行已被后端过滤）。
+// 批次空转时给出根因诊断（管道健康度）。
 import { computed, h, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { NAlert, NButton, NCard, NDataTable, NTag } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import * as collectApi from '@/api/collect'
-import type { DailyBatch, Lead } from '@/api/collect'
+import type { DailyBatch, DailyBatchRow } from '@/api/collect'
 import { EVENT_TYPE_LABELS, gradeTagType } from '@/api/collect'
 import { formatTime } from '@/utils/format'
 import { message } from '@/utils/feedback'
@@ -43,7 +44,7 @@ async function fetchData() {
   }
 }
 
-async function handleClaim(row: Lead) {
+async function handleClaim(row: DailyBatchRow) {
   claimingId.value = row.id
   try {
     const lead = await collectApi.claimLead(row.id)
@@ -54,23 +55,12 @@ async function handleClaim(row: Lead) {
   }
 }
 
-/** 「为什么值得联系」：行内最强信号 chips（数据全部来自 LeadOut，无额外请求） */
-function keySignalChips(row: Lead): Array<{ label: string; type: 'error' | 'warning' | 'success' | 'info' }> {
-  const chips: Array<{ label: string; type: 'error' | 'warning' | 'success' | 'info' }> = []
-  if (row.fb_whatsapp) chips.push({ label: 'FB私域按钮', type: 'error' })
-  if (row.whatsapp_hit) chips.push({ label: '官网WA入口', type: 'success' })
-  if (row.whatsapp_job) chips.push({ label: '在招WA岗位', type: 'warning' })
-  if (row.whatsapp_numbers.length >= 2)
-    chips.push({ label: `${row.whatsapp_numbers.length}条WA分线`, type: 'success' })
-  if (row.ad_count > 0) chips.push({ label: `在投广告${row.ad_count}条`, type: 'info' })
-  for (const meta of Object.values(row.job_signals ?? {}))
-    chips.push({ label: `招:${meta.label}`, type: 'info' })
-  const saasN = Object.keys(row.saas_signals ?? {}).length
-  if (saasN > 0) chips.push({ label: `SaaS信号×${saasN}`, type: 'info' })
-  return chips.slice(0, 4)
+/** 「为什么值得联系」：三问之 why（意向分命中最强信号，读 three_questions，无额外请求） */
+function keySignalChips(row: DailyBatchRow): Array<{ label: string; type: 'error' | 'warning' | 'success' | 'info' }> {
+  return (row.three_questions?.why ?? []).map((w) => ({ label: w.label, type: 'success' as const }))
 }
 
-const columns: DataTableColumns<Lead> = [
+const columns: DataTableColumns<DailyBatchRow> = [
   {
     title: '企业',
     key: 'name',
@@ -109,27 +99,40 @@ const columns: DataTableColumns<Lead> = [
     title: '应该卖什么',
     key: 'recommended_products',
     minWidth: 180,
-    render: (row) => (row.recommended_products.length ? row.recommended_products.join('、') : '—'),
+    render: (row) => {
+      const names = (row.three_questions?.what.products ?? []).map((p) => p.name)
+      return names.length ? names.join('、') : '—'
+    },
   },
   {
     title: '应该找谁',
     key: 'contacts',
-    width: 170,
-    render: (row) =>
-      h('span', { style: 'font-size:12px;display:inline-flex;align-items:center;gap:4px' }, [
-        row.contacts_count > 0
-          ? h('span', `${row.contacts_count} 人`)
-          : h('span', { style: 'color:#999' }, '联系人待补'),
-        row.has_tier1 ? h(NTag, { size: 'tiny', type: 'success', bordered: false }, () => '决策层') : null,
-        row.email ? h(NTag, { size: 'tiny', bordered: false }, () => '邮箱') : null,
-        row.whatsapp_url
-          ? h(
-              NButton,
-              { size: 'tiny', quaternary: true, type: 'primary', onClick: () => window.open(row.whatsapp_url!, '_blank') },
-              () => 'WA 建联',
-            )
-          : null,
-      ]),
+    width: 200,
+    render: (row) => {
+      const who = row.three_questions?.who
+      // 真实联系人 / WA 号码优先；没有则按信号派生的目标角色（销售至少知道该找什么职位）
+      if (who && (who.contacts.length || who.whatsapp_numbers.length)) {
+        return h('div', { style: 'font-size:12px;line-height:1.7' }, [
+          ...who.contacts.map((c) =>
+            h('div', { key: c.email || c.name }, `${c.name}${c.title ? `（${c.title}）` : ''}`),
+          ),
+          ...who.whatsapp_numbers.map((n) => h('div', { key: n }, `WA：${n}`)),
+          who.whatsapp_url
+            ? h(
+                NButton,
+                { size: 'tiny', quaternary: true, type: 'primary', onClick: () => window.open(who.whatsapp_url!, '_blank') },
+                () => 'WA 建联',
+              )
+            : null,
+        ])
+      }
+      const roles = who?.roles.map((r) => r.role) ?? []
+      return h(
+        'span',
+        { style: 'font-size:12px;color:#999' },
+        roles.length ? `建议找：${roles.join(' / ')}` : '联系人待补',
+      )
+    },
   },
   {
     title: '跟进人',
@@ -207,6 +210,10 @@ onMounted(fetchData)
           非中国企业不进名单。
         </li>
         <li>
+          <b>批次只收三问齐备的线索</b>（≥2 条证据 + 有推荐产品 + 有建联入口或明确角色）——
+          每行都答得出「为什么值得联系 / 应该卖什么 / 应该找谁」。
+        </li>
+        <li>
           <b>① 新晋 S/A</b>：原来分数不高、今天因为新证据（发现 WhatsApp、广告在投、联系人补全等）升上来的——
           需求正在升温，最值得马上联系。<b>② 新增高分</b>：今天第一次入库就够 60 分。<b>③ 预警</b>：
           发现 WhatsApp 入口、Facebook 主页挂 WhatsApp 按钮、SaaS 需求信号等高价值动态。
@@ -261,7 +268,7 @@ onMounted(fetchData)
         :columns="columns"
         :data="batch?.promoted ?? []"
         :loading="loading"
-        :row-key="(r: Lead) => r.id"
+        :row-key="(r: DailyBatchRow) => r.id"
         :bordered="false"
         size="small"
       />
@@ -276,7 +283,7 @@ onMounted(fetchData)
         :columns="columns"
         :data="batch?.new_leads ?? []"
         :loading="loading"
-        :row-key="(r: Lead) => r.id"
+        :row-key="(r: DailyBatchRow) => r.id"
         :bordered="false"
         size="small"
       />
