@@ -21,6 +21,7 @@ from app.api.perms import lead_visible, require_permission, scope_filter_params
 from app.collectors import list_collectors
 from app.collectors.icp import ICP_STATUS_LABELS_ZH, ICP_STATUS_VALUES
 from app.collectors.industry_labels import industry_group_of
+from app.collectors.intent import build_three_questions
 from app.collectors.recommend import detect_need_types, recommend_products, sales_suggestion
 from app.collectors.scenes import SAAS_LABELS_ZH, SCENE_LABELS_ZH
 from app.core.config import settings
@@ -139,6 +140,24 @@ async def _fill_lead_list_fields(db: SessionDep, items: list[Lead], outs: list[L
                 sources=i.sources,
             )
         ]
+
+
+async def _attach_three_questions(db: SessionDep, leads: list[Lead]) -> dict[int, dict]:
+    """批量为线索构建三问（一次 IN 查询取联系人，防 N+1）。返回 {lead_id: 三问}。"""
+    contact_map: dict[int, list[LeadContact]] = {}
+    if leads:
+        rows = (
+            (
+                await db.execute(
+                    select(LeadContact).where(LeadContact.lead_id.in_([i.id for i in leads]))
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for c in rows:
+            contact_map.setdefault(c.lead_id, []).append(c)
+    return {i.id: build_three_questions(i, contacts=contact_map.get(i.id)) for i in leads}
 
 
 @router.get("/leads", response_model=ResponseModel[PageResponse[LeadOut]], summary="线索列表")
@@ -628,11 +647,24 @@ async def daily_batch_endpoint(db: SessionDep, user: CurrentUser):
     await _fill_lead_list_fields(db, promoted, outs_promoted)
     await _fill_lead_list_fields(db, new_leads, outs_new)
 
+    tq_map = await _attach_three_questions(db, [*promoted, *new_leads])
+    # 齐备门槛（spec §七）：不齐备的行不进今日商机
+    rows_promoted = [
+        {**o.model_dump(mode="json"), "three_questions": tq_map[o.id]}
+        for o in outs_promoted
+        if tq_map[o.id]["complete"]
+    ]
+    rows_new = [
+        {**o.model_dump(mode="json"), "three_questions": tq_map[o.id]}
+        for o in outs_new
+        if tq_map[o.id]["complete"]
+    ]
+
     return ResponseModel(
         data={
             "date": today.date().isoformat(),
-            "promoted": [o.model_dump(mode="json") for o in outs_promoted],
-            "new_leads": [o.model_dump(mode="json") for o in outs_new],
+            "promoted": rows_promoted,
+            "new_leads": rows_new,
             "alerts": [
                 {
                     "lead_id": ev.lead_id,
@@ -729,6 +761,8 @@ async def get_lead_detail(db: SessionDep, user: CurrentUser, lead_id: int):
         saas_signals=lead.saas_signals,
         sources=lead.sources,
     )
+    # 三问（spec §六）：为什么需要你 / 应该卖什么 / 应该找谁
+    out.three_questions = build_three_questions(lead, contacts=contacts)
     # 信号体系（§4.2/§4.3/§4.1）：出海/招聘/广告信号 + 证据链
     from app.collectors.icp import cn_evidence_of_lead
     from app.crud.lead_signals import SIGNAL_TYPE_LABELS_ZH, list_signals
