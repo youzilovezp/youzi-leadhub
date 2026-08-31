@@ -103,51 +103,59 @@ def test_classify_job_title_no_false_positive():
         assert classify_job_title(title) == {}, title
 
 
-# ---------- 评分新输入 ----------
+# ---------- 评分新输入（v3 加分制口径） ----------
 
 
 def test_scoring_three_plus_countries_bonus():
-    """§4.2 规则：投放 ≥3 国 → 出海维 +10。"""
+    """§4.2 规则：投放/提及 ≥3 国 → three_markets +10（<3 国不给分）。"""
     from app.collectors.scoring import score_lead_inputs
 
-    _, dims_2, _ = score_lead_inputs(is_cn=True, target_countries=["US", "GB"])
-    _, dims_5, _ = score_lead_inputs(is_cn=True, target_countries=["US", "GB", "AE", "SA", "BR"])
-    assert dims_5["overseas"] - dims_2["overseas"] == 10
+    total_2, items_2, _ = score_lead_inputs(is_cn=True, target_countries=["US", "GB"])
+    total_5, items_5, _ = score_lead_inputs(
+        is_cn=True, target_countries=["US", "GB", "AE", "SA", "BR"]
+    )
+    assert total_2 == 0 and items_2 == []
+    assert total_5 == 10
+    assert [it["key"] for it in items_5] == ["three_markets"]
 
 
 def test_scoring_overseas_signals_and_ad_count():
-    """出海信号类数进出海维；广告量分级进营销维；wa_ops 进 WhatsApp 维。"""
+    """出海证据非空 → overseas_biz +15；在投广告 → meta_ads_running +15；
+    whatsapp_job 列与 job_signals.wa_ops 同一事实只计一次 +30。"""
     from app.collectors.scoring import score_lead_inputs
 
-    _, base_dims, _ = score_lead_inputs(is_cn=True)
+    total_base, items_base, _ = score_lead_inputs(is_cn=True)
+    assert total_base == 0 and items_base == []
 
-    _, ov_dims, _ = score_lead_inputs(
+    total_ov, items_ov, _ = score_lead_inputs(
         is_cn=True,
         overseas_signals={"currencies": ["USD"], "ecommerce": ["shopify"], "markets": ["US"]},
     )
-    assert ov_dims["overseas"] - base_dims["overseas"] == 3 * 7  # 每类 +7（出海深度口径）
+    # 出海证据非空即 +15（v3 不按类数梯度；markets 仅 1 国不触发 three_markets）
+    assert total_ov == 15
+    assert {it["key"] for it in items_ov} == {"overseas_biz"}
 
-    # 同事实不双计（2026-08-31 修正回归）：whatsapp_job 与 wa_ops 是同一招聘
-    # 事实（job_posting 按标题分类置位），WhatsApp 维只计一次 +15
-    _, wa_dims, _ = score_lead_inputs(
+    # 同事实不双计：whatsapp_job 与 wa_ops 是同一招聘事实，只计 wa_ops_job +30
+    total_wa, items_wa, _ = score_lead_inputs(
         is_cn=True, whatsapp_job=True, job_signals={"wa_ops": {"label": "x", "points": 30}}
     )
-    _, plain_dims, _ = score_lead_inputs(is_cn=True, whatsapp_job=True)
-    assert wa_dims["whatsapp"] - plain_dims["whatsapp"] == 0
+    assert total_wa == 30
+    assert [it["key"] for it in items_wa] == ["wa_ops_job"]
 
-    _, ad_dims, _ = score_lead_inputs(is_cn=True, ad_count=6, sources=[{"source": "meta_ads"}])
-    assert ad_dims["marketing"] == 55  # 40(meta_ads 来源) + 15(≥5 条广告)
-    _, few_ad_dims, _ = score_lead_inputs(is_cn=True, ad_count=2, sources=[{"source": "meta_ads"}])
-    assert few_ad_dims["marketing"] == 48  # 40 + 8(2-4 条)
+    # 在投证据（meta_ads 来源或 ad_count>0）→ +15；无 fb_whatsapp 不构成 CTWA
+    for kwargs in ({"ad_count": 6, "sources": [{"source": "meta_ads"}]}, {"ad_count": 2}):
+        total_ad, items_ad, _ = score_lead_inputs(is_cn=True, **kwargs)
+        assert total_ad == 15
+        assert [it["key"] for it in items_ad] == ["meta_ads_running"]
 
 
 def test_scoring_backward_compatible_no_new_inputs():
-    """不传新输入 → 与旧口径一致（迁移回填/旧行为不变）。"""
+    """不传新输入 → 与 v3 口径一致（迁移回填/旧行为不变）。"""
     from app.collectors.scoring import score_lead_inputs
 
-    total, dims, grade = score_lead_inputs(is_cn=True, whatsapp_hit=True)
+    total, items, grade = score_lead_inputs(is_cn=True, whatsapp_hit=True)
     assert 0 <= total <= 100
-    assert set(dims) == {"overseas", "whatsapp", "saas", "scale", "marketing", "contact"}
+    assert [(it["key"], it["points"]) for it in items] == [("site_whatsapp", 25)]
     assert grade in ("S", "A", "B", "C")
 
 

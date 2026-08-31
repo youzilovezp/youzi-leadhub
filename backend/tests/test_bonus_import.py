@@ -1,34 +1,39 @@
-"""PRD 补课批测试：MVP 加分制明细 / 新信号检测（群链接·WA Business·竞品BSP）/ Seed Pool 导入。"""
+"""PRD 补课批测试：意向分 v3 加分明细 / 新信号检测（群链接·WA Business·竞品BSP）/ Seed Pool 导入。"""
 
 import pytest
 
-# ---------- §五 MVP 加分制明细 ----------
+# ---------- §五 MVP 加分制明细（v3：加分制即主分） ----------
 
 
 def test_bonus_breakdown_prd_signals():
-    """PRD §五 13 条加分表的映射与计分（CTWA+40/官网WA+30/竞品SaaS+30…）。"""
+    """v3 信号表的映射与计分（CTWA+40/官网WA+25/竞品SaaS+30…）。
+
+    CTWA 成立时替代 meta_ads_running（互斥）；overseas_biz 只认
+    overseas_signals 非空（is_cn 不再算出海证据）。
+    """
     from app.collectors.scoring import bonus_breakdown
 
     bd = bonus_breakdown(
-        fb_whatsapp=True,  # CTWA 代理 +40
-        whatsapp_hit=True,  # 官网 WA +30
+        fb_whatsapp=True,  # CTWA 组合信号的一半
+        sources=[{"source": "meta_ads"}],  # 在投证据 → CTWA +40（替代 meta_ads_running）
+        whatsapp_hit=True,  # 官网 WA +25
         whatsapp_numbers=["60111111", "60222222"],  # 多分线 +10
         wa_business=True,  # WA Business +15
         job_signals={"wa_ops": {"label": "x", "points": 30}},  # +30
         saas_signals={"wa_bsp": 2},  # 竞品 SaaS +30
-        sources=[{"source": "meta_ads"}],  # +15
-        is_cn=True,  # 海外业务 +15
-        overseas_signals={"languages": ["en"], "ecommerce": ["shopify"]},  # 独立站 +10
+        is_cn=True,  # v3：is_cn 不进打分
+        website="https://x.com",
+        overseas_signals={"languages": ["en"], "ecommerce": ["shopify"]},  # 出海 +15 / 独立站 +10
         target_countries=["US", "GB", "AE", "SA"],  # ≥3 国 +10
-        social={"facebook": "a", "instagram": "b", "youtube": "c"},  # 社媒 +5
+        social={"facebook": "a", "instagram": "b", "youtube": "c"},  # 社媒（≥2 平台）+5
     )
     pts = {it["key"]: it["points"] for it in bd["items"]}
     assert pts == {
-        "ctwa_ad": 40, "site_whatsapp": 30, "wa_ops_job": 30, "wa_bsp_competitor": 30,
-        "wa_business": 15, "meta_ads": 15, "overseas_biz": 15, "multi_numbers": 10,
+        "ctwa_ad": 40, "site_whatsapp": 25, "wa_ops_job": 30, "wa_bsp_competitor": 30,
+        "wa_business": 15, "overseas_biz": 15, "multi_numbers": 10,
         "overseas_site": 10, "three_markets": 10, "social_active": 5,
     }
-    # 11 条全命中 = 200 原始分 → 封顶 100
+    # 10 条命中 = 190 原始分 → 封顶 100
     assert bd["total"] == 100
 
 
@@ -39,13 +44,14 @@ def test_bonus_breakdown_empty_and_cap():
     empty = bonus_breakdown()
     assert empty == {"total": 0, "items": []}
 
-    # 全命中（含 overseas_cs_job/crm_job）= 210 分原始 → 封顶 100
+    # 全命中（含 overseas_cs_job/crm_job）= 220 分原始 → 封顶 100
     full = bonus_breakdown(
-        fb_whatsapp=True, whatsapp_hit=True, wa_business=True,
+        fb_whatsapp=True, sources=[{"source": "meta_ads"}],
+        website="https://x.com", whatsapp_hit=True, wa_business=True,
         whatsapp_numbers=["1", "2"],
         job_signals={"wa_ops": {}, "overseas_cs": {}, "crm_ops": {}},
-        saas_signals={"wa_bsp": 1}, sources=[{"source": "meta_ads"}],
-        is_cn=True, overseas_signals={"languages": ["en"]},
+        saas_signals={"wa_bsp": 1},
+        overseas_signals={"languages": ["en"]},
         target_countries=["US", "GB", "AE"], social={"a": "1", "b": "2", "c": "3"},
     )
     assert full["total"] == 100
@@ -84,9 +90,13 @@ def test_apply_score_writes_breakdown():
 
     lead = FakeLead()
     apply_score(lead)
+    # CTWA（fb_whatsapp ∧ meta_ads 在投）+40、官网 WA +25；
+    # overseas_signals 空 → overseas_biz/overseas_site 都不成立（is_cn 不算出海证据）
     pts = {it["key"]: it["points"] for it in lead.score_breakdown["items"]}
-    assert pts == {"ctwa_ad": 40, "site_whatsapp": 30, "meta_ads": 15, "overseas_biz": 15}
-    assert lead.score_breakdown["total"] == 100 - 0 or lead.score_breakdown["total"] == 100
+    assert pts == {"ctwa_ad": 40, "site_whatsapp": 25}
+    assert lead.score_breakdown["total"] == 65
+    assert lead.score == 65 and lead.grade == "A"
+    assert lead.score_signals == {"ctwa_ad": 40, "site_whatsapp": 25}
 
 
 # ---------- §4.1 新信号检测 ----------
