@@ -404,6 +404,11 @@ async def _merge_into(
                 merged_js[k] = v
         existing.job_signals = merged_js
         touch_field_meta(existing, "job_signals", draft.source, confidence=85, now=now)
+    # whatsapp_job 语义自愈（2026-08-31 验证轮发现）：列必须与 job_signals 的
+    # wa_ops 证据一致——旧代码 bool(any 信号) 置位的存量脏 True 在信号合并后按
+    # 证据重算，防止 WhatsApp 维虚高 +15（「在招WA岗位」导出口径同）
+    if "wa_ops" not in (existing.job_signals or {}):
+        existing.whatsapp_job = False
     if draft.ad_count:
         # 广告累计只增不减
         existing.ad_count = max(existing.ad_count or 0, draft.ad_count)

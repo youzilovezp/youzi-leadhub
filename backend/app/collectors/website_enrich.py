@@ -380,7 +380,8 @@ async def _load_scope(session: AsyncSession, lead_ids: list[Any]) -> list[tuple[
         )
     else:
         # 分级增量重爬（补充需求 §九）：高价值线索检查更勤——S 每天 / A 3 天 / B 7 天 / C 30 天；
-        # ENRICH_INTERVAL_HOURS 作为 C 级（兜底档）的可配置上限
+        # ENRICH_INTERVAL_HOURS 作为 C 级（兜底档）的可配置上限。
+        # foreign 行不在服务范围（ICP 门已排除销售池），不消耗抓取配额
         from sqlalchemy import or_
 
         def _stale(grade: str, days: int):
@@ -393,6 +394,7 @@ async def _load_scope(session: AsyncSession, lead_ids: list[Any]) -> list[tuple[
         stmt = select(Lead.id, Lead.website).where(
             Lead.website.is_not(None),
             Lead.website != "",
+            Lead.icp_status != "foreign",
             or_(_stale("S", 1), _stale("A", 3), _stale("B", 7), _stale("C", c_days)),
         )
     rows = (await session.execute(stmt)).all()
