@@ -80,17 +80,17 @@ function currentCollector(): CollectorInfo | undefined {
   return collectors.value.find((c) => c.name === form.collector)
 }
 
-/** 采集器分组：发现类在前（默认选），富化类在后可手动补跑——
- *  网站富化平时由「发现任务完成 → 自动接力」执行，但调度关闭/只想补信号时
- *  必须能手动跑（2026-09-01 巡检：藏掉手动入口导致调度关闭时富化永远不执行）。 */
+/** 采集器分组（2026-09-01 口径）：
+ *  - 数据源（可手动创建/定时）：web_search / job_posting / meta_ads / career_site
+ *  - 内部步骤（不进创建列表）：website_enrich——由三入口自动执行：
+ *    ① 发现任务完成 → 自动接力；② 每日 cron「网站富化·全库」（任务列表可手动执行）；
+ *    ③ 线索列表勾选 → 「富化选中」 */
+const SOURCE_COLLECTORS = ['web_search', 'job_posting', 'meta_ads', 'career_site']
 const DISCOVERY_COLLECTORS = ['web_search', 'job_posting', 'meta_ads']
-const ENRICH_COLLECTORS = ['website_enrich']
 const isDiscovery = computed(() => DISCOVERY_COLLECTORS.includes(form.collector))
-/** 创建对话框的采集器选项：发现类（默认）+ 富化类（手动补跑，含官网发现补全链） */
+/** 创建对话框的采集器选项：数据源（发现类 + 招聘页巡检），不含 website_enrich */
 const creatableCollectors = computed(() =>
-  collectors.value.filter(
-    c => DISCOVERY_COLLECTORS.includes(c.name) || ENRICH_COLLECTORS.includes(c.name),
-  ),
+  collectors.value.filter(c => SOURCE_COLLECTORS.includes(c.name)),
 )
 
 /** 按 param_schema 初始化参数值（default 按 type 反序列化） */

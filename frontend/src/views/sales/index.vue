@@ -22,12 +22,13 @@ async function fetchAll() {
 
 // ---------- 数据源（§33） ----------
 
-/** 流水线阶段：依赖关系可视化——发现层产出种子，复核层出信号，系统自动接力 */
+/** 流水线阶段：依赖关系可视化——发现层产出种子，信号层补招聘信号；
+ *  网站富化是内部复核步骤（非数据源），不出现在本列表（2026-09-01 口径） */
 const PIPELINE_STAGE: Record<string, { label: string; type: 'success' | 'info' | 'warning' }> = {
   web_search: { label: '① 发现层·种子', type: 'info' },
   job_posting: { label: '① 发现层·线索', type: 'info' },
   meta_ads: { label: '① 发现层·带信号直采', type: 'success' },
-  website_enrich: { label: '② 复核层·自动接力', type: 'warning' },
+  career_site: { label: '② 信号层·招聘页巡检', type: 'info' },
 }
 
 /** logic_note 是多段【标题】文本——逐段渲染成小标题+正文，可读性优于整坨 */
