@@ -183,3 +183,11 @@ ICP 三重门（collectors/icp.py）
 | `frontend/src/views/collect/lead/detail.vue`、`daily` 相关视图 | 三问列/详情改读 `three_questions` |
 | `backend/scripts/reeval_leads.py` | v3 重评 |
 | `backend/tests/`（评分/ICP/job_posting/daily_batch 等） | 锚点重写 + 新模块测试 |
+
+---
+
+## 附：2026-09-01 需求裁决（用户审核后修订，覆盖正文冲突处）
+
+1. **目标买家修订**：货代/物流/代运营/客服外包等出海中介服务商**不是**目标客户（正文的「出海服务」行业删除，目标行业为四类：跨境电商/品牌DTC、游戏App、制造业出海、出海SaaS与建站工具服务商）。建站/工具服务商（Shopline/Shoptop 类）**是**买家。
+2. **政府/事业单位排除**：gov.cn/edu.cn 域名 + 政务名称词表进非买家黑名单。
+3. **数量口径**：每日批次在质量门槛（三问齐备）之内**越多越好**，不设人为上限。
