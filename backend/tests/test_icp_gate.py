@@ -4,7 +4,7 @@
 """
 
 from app.collectors.base import LeadDraft
-from app.collectors.icp import compute_icp_status
+from app.collectors.icp import compute_icp_status, is_non_buyer
 from app.collectors.website_enrich import detect_icp_license
 from app.crud.lead import upsert_lead
 
@@ -116,13 +116,75 @@ async def test_icp_gate_list_and_stats(client, admin_credentials, db_session):
     assert any("Foreign Commerce" in n for n in names)
     assert any("ICP门科技" in n for n in names)
 
-    # stats：四态分布存在且 foreign 计入
+    # stats：五态分布存在且 foreign 计入（non_buyer 2026-08-31 第五态）
     r = await client.get("/api/v1/collect/stats", headers=h)
     icp_counts = r.json()["data"]["icp_counts"]
-    assert set(icp_counts) == {"qualified", "cn_domestic", "foreign", "unknown"}
+    assert set(icp_counts) == {"qualified", "cn_domestic", "foreign", "non_buyer", "unknown"}
     assert icp_counts["foreign"] >= 1
 
     # 清理（共享测试库）
     await client.delete(f"/api/v1/collect/leads/{cn_id}", headers=h)
     await db_session.delete(foreign)
     await db_session.commit()
+
+
+def test_non_buyer_blacklist_domains():
+    """实测漏网的行业媒体/社区/平台门户域（2026-08-31 dev 库查实清单）。"""
+    for domain in (
+        "ikjzd.com",        # 跨境知道（资讯）
+        "wearesellers.com", # 知无不言（社区）
+        "cifnews.com",      # 雨果跨境（媒体/平台）
+        "kuajingyan.com",   # 跨境眼
+        "kjtong.com",       # 跨境通
+        "mckinsey.com.cn",  # 咨询报告页
+        "www.ikjzd.com",    # 子域同样命中
+    ):
+        assert is_non_buyer(domain=domain), domain
+
+
+def test_non_buyer_name_patterns():
+    """名称词表：媒体/社区/报告/下载形态不是买家。"""
+    for name in (
+        "跨境知道-看跨境电商平台资讯、查报告、找资源",
+        "知无不言跨境电商社区",
+        "中国跨境电商市场研究白皮书",
+        "Download WhatsApp (free) for Windows",
+    ):
+        assert is_non_buyer(name=name), name
+    # 正常目标企业不得误杀
+    for name in ("安克创新科技股份有限公司", "深圳市某跨境电子商务有限公司", "SHEIN"):
+        assert not is_non_buyer(name=name), name
+
+
+def test_icp_status_non_buyer_precedes_qualified():
+    """黑名单优先于 CN/出海证据：媒体站哪怕 CN+出海全占也不进销售池。"""
+    status = compute_icp_status(
+        name="知无不言跨境电商社区",
+        domain="wearesellers.com",
+        is_cn=True,
+        country="CN",
+        phone_e164="+8613800138000",
+        overseas_signals={"languages": ["EN"]},
+        enriched_at="2026-08-31T00:00:00+00:00",
+    )
+    assert status == "non_buyer"
+
+
+def test_normal_buyer_unaffected():
+    status = compute_icp_status(
+        name="安克创新科技股份有限公司",
+        domain="anker.com",
+        is_cn=True,
+        country="CN",
+        overseas_signals={"languages": ["EN"]},
+    )
+    assert status == "qualified"
+
+
+def test_industry_group_mapping():
+    from app.collectors.industry_labels import industry_group_of
+
+    assert industry_group_of("电商", "深圳市安克创新科技股份有限公司") == "cross_border_ecom"
+    assert industry_group_of(None, "某游戏网络科技有限公司") == "game_app"
+    assert industry_group_of("广告公司", None) == "overseas_service"
+    assert industry_group_of(None, "某餐饮管理有限公司") == ""

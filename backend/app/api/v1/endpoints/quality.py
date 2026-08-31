@@ -49,8 +49,8 @@ async def _reviewed_lead_ids(db: SessionDep, field: str) -> set[int]:
 
 
 def _pool_conditions(field: str) -> list:
-    """各维度的待检池（在 ICP 门内抽样——foreign 本就不进销售池）。"""
-    conds = [Lead.icp_status != "foreign"]
+    """各维度的待检池（在 ICP 门内抽样——foreign/non_buyer 本就不进销售池）。"""
+    conds = [Lead.icp_status.notin_(("foreign", "non_buyer"))]
     if field == "whatsapp":
         conds.append(Lead.whatsapp_hit.is_(True))
     elif field == "overseas":
@@ -218,11 +218,11 @@ async def quality_stats(db: SessionDep, user: CurrentUser):
             "meets_target": (accuracy >= meta["target"]) if accuracy is not None else None,
         }
 
-    # S+A 占比（无需标注）：非 foreign 池内 S+A / 全体
+    # S+A 占比（无需标注）：ICP 门内（非 foreign/non_buyer）池内 S+A / 全体
     grade_rows = (
         await db.execute(
             select(Lead.grade, func.count())
-            .where(Lead.icp_status != "foreign")
+            .where(Lead.icp_status.notin_(("foreign", "non_buyer")))
             .group_by(Lead.grade)
         )
     ).all()

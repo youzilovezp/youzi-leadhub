@@ -95,7 +95,7 @@ class LeadOut(BaseModel):
     last_followed_at: datetime | None
     next_follow_at: datetime | None
     is_cn: bool = False  # 中国出海企业特征
-    icp_status: str = "unknown"  # ICP 二重门：qualified/cn_domestic/foreign/unknown
+    icp_status: str = "unknown"  # ICP 二重门+买家门：qualified/cn_domestic/foreign/non_buyer/unknown
     fb_whatsapp: bool = False  # FB 主页带 wa.me（CTWA/私域运营证据）
     target_countries: list[str] = []  # 投放/目标国家（meta_ads 累计，§8）
     export_type: str | None = None  # 出海业务类型
@@ -103,6 +103,7 @@ class LeadOut(BaseModel):
     contacts_count: int = 0  # 联系人数（列表接口批量注入）
     has_tier1: bool = False  # 有决策层联系人（CEO/总经理等，列表「找谁」直读）
     recommended_products: list[str] = []  # 推荐产品名（列表接口按行计算，纯函数）
+    industry_group: str = ""  # 五类目标行业组键（读取时派生，industry_labels.INDUSTRY_GROUP_LABELS_ZH 做展示名）
     created_at: datetime
     updated_at: datetime
 
