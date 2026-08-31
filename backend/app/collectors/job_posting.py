@@ -193,8 +193,10 @@ class JobPostingCollector(Collector):
     name = "job_posting"
     title = "中国招聘网站监控（jobui/猎聘/前程无忧）"
     logic_note = (
-        "【抓什么】监控中国招聘网站的在招岗位，从岗位判断公司在做什么业务："
-        "在招「海外客服」说明有海外客户，在招「WhatsApp 运营」说明在用 WhatsApp 做私域。\n"
+        "【抓什么】监控中国招聘网站的在招岗位，为库内已有线索的公司补充招聘信号"
+        "（在招海外客服=有海外客户、在招 WhatsApp 运营=在用 WA 做私域）。"
+        "默认不产生新线索——招聘站公司大多无官网，价值在信号不在发现；"
+        "需要扩量时打开『发现新线索』开关。\n"
         "【支持站点】职友集（聚合站）/ 猎聘 / 前程无忧，均为无头浏览器渲染抓取；"
         "BOSS 直聘与智联因验证码拦截暂未接入（选了会明确报错说明原因）。\n"
         "【信号分类】岗位标题自动分五类：WhatsApp 运营/客服、海外客服、海外社媒运营、"
@@ -232,6 +234,14 @@ class JobPostingCollector(Collector):
             # （2026-08-31 实测单词条 20 岗零信号，多词组合有效）。用中文词组合
             "default": "跨境电商客服,英语客服,海外社媒运营,私域运营,外贸业务员,海运客服",
         },
+        {
+            "key": "discover_new",
+            "label": "发现新线索（默认关）",
+            "required": False,
+            "type": "switch",
+            "placeholder": "默认只给库内已有公司补招聘信号；打开后才作为新线索来源",
+            "default": "false",
+        },
         # 翻页数不在表单暴露：固定默认 2 页（run() 里兜底），需要调参属于运维场景
     ]
 
@@ -249,6 +259,9 @@ class JobPostingCollector(Collector):
         site = str(ctx.params.get("site") or "jobui").strip()
         cfg = SITE_CONFIGS[site]
         keywords = split_csv(str(ctx.params.get("keywords"))) or ["whatsapp"]
+        # 巡检模式（默认）：只给库内已有公司补招聘信号（career_site 同款口径）；
+        # 『发现新线索』开关打开后才作为新线索来源建行
+        discover = str(ctx.params.get("discover_new") or "false").lower() in ("1", "true", "yes")
         try:
             max_pages = max(1, min(int(ctx.params.get("max_pages") or 2), 5))
         except ValueError:
@@ -303,8 +316,15 @@ class JobPostingCollector(Collector):
                             continue
                         ok_pages += 1
                         drafts = cfg["parse"](html, url)
+                        skipped_offline = 0  # 本页库外公司数（巡检模式跳过计数）
                         for d in drafts:
-                            lead_id, _created = await ctx.emit(d)
+                            lead_id, _created = await ctx.emit(d, create_if_missing=discover)
+                            if lead_id == 0:
+                                # 库外公司（巡检模式未命中库内）或空公司名：
+                                # 不落信号证据——lead_id=0 没有可挂靠的行
+                                if not discover:
+                                    skipped_offline += 1
+                                continue
                             # 信号级证据（§4.1）：招聘信号带岗位帖 URL 作证据；
                             # 写失败降级 warn 不放大为任务失败（2026-08-31 审计）
                             if d.job_signals:
@@ -329,11 +349,23 @@ class JobPostingCollector(Collector):
                                     )
                         wa_n = sum(1 for d in drafts if d.whatsapp_job)
                         sig_n = sum(1 for d in drafts if d.job_signals)
+                        if discover:
+                            head = f"「{kw}」第 {pg} 页 → {len(drafts)} 个在招岗位"
+                            if sig_n:
+                                head += f"，带海外/运营信号 {sig_n} 个"
+                            if wa_n:
+                                head += f"（含 WhatsApp 岗位 {wa_n}）"
+                        else:
+                            # 巡检口径：只报命中库内几家 / 跳过库外几家
+                            head = (
+                                f"「{kw}」第 {pg} 页 → {len(drafts)} 个在招岗位"
+                                f"，命中库内 {len(drafts) - skipped_offline} 家"
+                            )
+                            if skipped_offline:
+                                head += f"，跳过库外 {skipped_offline} 家（巡检模式）"
                         await ctx.log(
                             "info",
-                            f"「{kw}」第 {pg} 页 → {len(drafts)} 个在招岗位"
-                            + (f"，带海外/运营信号 {sig_n} 个" if sig_n else "")
-                            + (f"（含 WhatsApp 岗位 {wa_n}）" if wa_n else "")
+                            head
                             + (
                                 "——⚠️ 零信号命中：岗位标题与关键词不相关"
                                 "（站内搜索会把单词稀释成模糊匹配，建议多词组合跑）"
