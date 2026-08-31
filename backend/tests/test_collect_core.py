@@ -371,3 +371,100 @@ async def test_source_filter_regression(client, admin_credentials):
     # 不存在的 source：空集
     r2 = await client.get("/api/v1/collect/leads?keyword=SrcFilter&source=web_search", headers=h)
     assert r2.status_code == 200 and r2.json()["data"]["items"] == []
+
+
+def test_job_posting_liepin_parsing():
+    """猎聘职位卡解析（2026-08-31 实测结构）：job-card-pc-container 锚点 +
+    title 属性职位名 + company-info 公司名；匿名代发（某…公司）跳过；
+    /a/（猎头）与 /job/（企业直发）两种详情链接都识别。"""
+    from app.collectors.job_posting import parse_liepin_html
+
+    html = (
+        '<div class="_x job-card-pc-container" data-tlg-ext="%7B%22ckId%22%3A%22x%22%7D">'
+        '<a data-nick="job-detail-job-info" href="https://www.liepin.com/a/77323779.shtml?pgRef=x&amp;d=1">'
+        '<div class="_x ellipsis-1" title="招聘海外客服经理">招聘海外客服经理</div></a>'
+        '<a data-nick="job-detail-company-info"><span class="_x ellipsis-1">海南诺尼生物工程开发有限公司</span></a></div>'
+        '<div class="_x job-card-pc-container">'
+        '<a data-nick="job-detail-job-info" href="https://www.liepin.com/job/1984803653.shtml?pgRef=x">'
+        '<div class="_x ellipsis-1" title="WhatsApp 私域运营专员">WhatsApp 私域运营专员</div></a>'
+        '<a data-nick="job-detail-company-info"><span class="_x ellipsis-1">某国内大型食品/饮料/酒水公司</span></a></div>'
+    )
+    drafts = parse_liepin_html(html, "https://www.liepin.com/zhaopin/?key=x")
+    assert len(drafts) == 1  # 匿名代发跳过
+    d = drafts[0]
+    assert d.name == "海南诺尼生物工程开发有限公司"
+    assert d.is_cn is True and d.country == "CN"
+    assert d.job_urls == ["https://www.liepin.com/a/77323779.shtml"]  # 去 query
+    assert "overseas_cs" in d.job_signals  # 海外客户服务经理
+    assert d.whatsapp_job is False
+
+
+def test_job_posting_51job_parsing():
+    """51job 职位卡解析（2026-08-31 实测结构）：sensorsdata 结构化 JSON 取
+    职位名/城市（jobArea · 前段），cname 取公司名。"""
+    import html as _html
+    import json as _json
+
+    from app.collectors.job_posting import parse_51job_html
+
+    sensors = _html.escape(_json.dumps(
+        {"jobId": "173460250", "jobTitle": "海外销售代表（船司）", "jobArea": "上海·虹口区",
+         "jobSalary": "1-1.5万", "companyId": "9750561"}
+    ))
+    html = f"""
+    <div class="joblist-item"><div sensorsname="JobShortExposure" sensorsdata="{sensors}">
+      <span class="jname text-cut">海外销售代表（船司）</span>
+      <span class="cname text-cut"> 浙江海创运联网络科技有限公司 </span>
+    </div></div>
+    <div class="joblist-item"><div sensorsdata="{_html.escape(_json.dumps({'jobId': '1', 'jobTitle': '行政前台', 'jobArea': '北京·朝阳区'}))}">
+      <span class="cname text-cut">某某公司</span>
+    </div></div>
+    """
+    drafts = parse_51job_html(html, "https://we.51job.com/pc/search?keyword=x")
+    assert len(drafts) == 2
+    d1, d2 = drafts
+    assert d1.name == "浙江海创运联网络科技有限公司"
+    assert d1.city == "上海"  # jobArea · 前段
+    assert "overseas_sales" in d1.job_signals or "overseas_cs" in d1.job_signals
+    assert d2.job_signals == {}  # 行政前台不误标
+    assert d1.job_urls == ["https://we.51job.com/pc/search?keyword=x"]  # SPA 无静态详情 href
+
+
+def test_job_posting_stub_sites_rejected():
+    """BOSS/智联实测被验证码拦截：选了明确报错带原因，不产出假成功。"""
+    import pytest
+
+    from app.collectors.job_posting import JobPostingCollector
+    from app.core.exceptions import BusinessError
+
+    c = JobPostingCollector()
+    for site in ("zhipin", "zhilian"):
+        with pytest.raises(BusinessError) as ei:
+            c.validate_params({"site": site})
+        assert "实测" in str(ei.value.message)
+    c.validate_params({"site": "liepin"})  # 已适配站通过
+    c.validate_params({})  # 缺省 jobui
+
+
+def test_career_site_link_and_signal_extraction():
+    """企业招聘官网巡检：首页找「招聘」链接（锚文本/URL 命中，外链 ATS 域放行）
+    + 招聘页文本逐条过分类器（分类器即过滤器）。"""
+    from app.collectors.career_site import extract_job_signals, find_career_link
+
+    homepage = """
+    <a href="/about">关于我们</a>
+    <a href="https://app.mokahr.com/campus-apply/ugreen">加入我们</a>
+    <a href="/products">产品中心</a>
+    """
+    url = find_career_link(homepage, "https://www.ugreen.com/", "ugreen.com")
+    assert url == "https://app.mokahr.com/campus-apply/ugreen"  # ATS 外链放行
+
+    assert find_career_link('<a href="/careers">Careers</a>', "https://a.com/", "a.com") == "https://a.com/careers"
+    assert find_career_link('<a href="/news">新闻</a>', "https://a.com/", "a.com") is None
+
+    career_page = """
+    <a>海外客服专员（英语）</a><li>WhatsApp 私域运营</li><a>行政前台</a>
+    <a>海外社媒运营（Facebook/TikTok）</a><div>公司简介文字不算岗位</div>
+    """
+    signals = extract_job_signals(career_page)
+    assert "overseas_cs" in signals and "wa_ops" in signals and "social_ops" in signals

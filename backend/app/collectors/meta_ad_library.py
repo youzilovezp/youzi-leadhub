@@ -221,7 +221,7 @@ async def _ads_get(
 async def _fetch_page(
     clients: tuple[httpx.AsyncClient, httpx.AsyncClient], url: str
 ) -> str | None:
-    """抓 FB 主页 HTML。双通道：代理优先，连接失败 / 代理软拦截（202）换直连再试。"""
+    """抓 FB 主页 HTML。三层递进：代理优先双通道 → Chrome 指纹伪装 → 失败返回 None。"""
     for client in clients:
         try:
             resp = await client.get(url)
@@ -230,7 +230,10 @@ async def _fetch_page(
         # 202 = 代理对目标站软拦截（website_enrich 踩过的坑），换通道再试
         if resp.status_code == 200 and len(resp.text) > 500:
             return resp.text
-    return None
+    # 第二层：Chrome TLS 指纹伪装（反爬只认指纹的站点）
+    from app.collectors.website_enrich import _fetch_impersonated
+
+    return await _fetch_impersonated(url)
 
 
 class MetaAdsCollector(Collector):

@@ -221,6 +221,19 @@ async function handleCheckWhatsApp() {
   router.push(`/collect/task/${task.id}`)
 }
 
+// ---------- 全库富化（历史数据批量补全：搜官网 + 抓信号 + 重评分） ----------
+async function handleEnrichAll() {
+  const ok = await confirm({
+    title: '全库富化',
+    content: '给所有待补全的线索搜官网、抓 WhatsApp/联系人/出海信号并重新评分。没官网的每轮最多补 30 家，线索多时需要多点几次。任务在后台跑，随时可取消。',
+    positiveText: '开始',
+  })
+  if (!ok) return
+  const task = await collectApi.enrichAll()
+  message.success(`全库富化任务 #${task.id} 已开始`)
+  router.push(`/collect/task/${task.id}`)
+}
+
 // ---------- CSV 导出 ----------
 const exportVisible = ref(false)
 const exportSubmitting = ref(false)
@@ -833,6 +846,14 @@ onUnmounted(() => {
           重置
         </n-button>
         <div class="flex-1" />
+        <n-button
+          v-if="userStore.isSuperuser"
+          type="primary"
+          secondary
+          @click="handleEnrichAll"
+        >
+          全库富化
+        </n-button>
         <n-button
           :disabled="!checkedKeys.length"
           type="warning"

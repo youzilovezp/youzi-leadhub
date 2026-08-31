@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from app.collectors.base import Collector, LeadDraft, TaskContext
+from app.collectors.career_site import CareerSiteCollector
 from app.collectors.job_posting import JobPostingCollector
 from app.collectors.meta_ad_library import MetaAdsCollector
 from app.collectors.web_search import WebSearchCollector
@@ -14,6 +15,7 @@ _REGISTRY: dict[str, Collector] = {
         MetaAdsCollector(),
         WebSearchCollector(),
         JobPostingCollector(),
+        CareerSiteCollector(),
         WebsiteEnrichCollector(),
     )
 }

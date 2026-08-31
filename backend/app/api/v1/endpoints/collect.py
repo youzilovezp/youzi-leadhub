@@ -1005,6 +1005,31 @@ async def delete_lead(db: SessionDep, _user: SuperUser, lead_id: int):
 
 
 @router.post(
+    "/leads/enrich-all",
+    response_model=ResponseModel[TaskOut],
+    summary="手动触发全库富化（官网发现 + 分级信号复核，历史数据批量补全入口）",
+)
+async def enrich_all(db: SessionDep, user: CurrentUser):
+    """全库扫描：给没官网的线索搜官网（每轮上限 30）、给到期线索重抓信号。
+
+    自动接力只覆盖「发现类任务刚跑完的那批」，历史存量的批量补全走这个入口。
+    """
+    task = await task_crud.create(
+        db,
+        TaskCreate(
+            collector="website_enrich",
+            name="手动全库富化",
+            params={"discover_limit": 500},
+        ).model_dump()
+        | {"is_implicit": True, "created_by": user.id},
+    )
+    await db.commit()
+    await task_runner.enqueue(task.id)
+    await db.refresh(task)  # enqueue 在独立会话改了 status，刷新再返回
+    return ResponseModel(data=TaskOut.model_validate(task))
+
+
+@router.post(
     "/leads/check-whatsapp",
     response_model=ResponseModel[TaskOut],
     summary="勾选线索 → 创建隐式 website_enrich 任务（复用进度/取消/闸门）",

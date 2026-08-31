@@ -33,7 +33,7 @@ dependencies = [
 
     # 线索采集
     "slowapi>=0.1.9,<0.2",  # HTTP 限流（app/core/ratelimit.py；当前仅登录限流走 DB 计数）
-    "crawlee[beautifulsoup]>=1.9,<2",  # 爬虫引擎（Apify 开源，asyncio 原生；beautifulsoup extra 含 bs4+lxml）
+    "curl_cffi>=0.7,<1",  # Chrome TLS/HTTP2 指纹伪装（httpx 被反爬 403 的站点，不开浏览器直接过——实测 banggood 403→200）
     "phonenumbers>=8.13,<9",           # 电话 E.164 归一化（libphonenumber 官方移植）
     "tldextract>=5.1,<6",              # registrable domain 解析（公共后缀表，去重键的正确性依赖）
     "APScheduler>=3.10,<4",            # 定时调度（3.x AsyncIOScheduler；4.x API 不兼容，锁死）
@@ -47,8 +47,9 @@ dev = [
     "ruff>=0.3.0,<0.9",  # 锁 <0.9：更高版本 isort(I001) 规则漂移会改写已生成代码
     "mypy>=1.8.0",
 ]
-# 反爬站点（jobstreet 等 Cloudflare 站）需要的 Playwright 支持
-collect = ["crawlee[beautifulsoup,playwright]>=1.9,<2"]
+# JS 验证挑战站（jobui 等招聘站）与终极渲染兜底需要的 Playwright；
+# 安装后记得：python -m playwright install chromium
+collect = ["playwright>=1.40"]
 
 [tool.ruff]
 line-length = 100

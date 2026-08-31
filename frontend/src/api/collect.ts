@@ -486,6 +486,11 @@ export function checkWhatsApp(leadIds: number[]) {
   return request.post<CollectTask, CollectTask>('/collect/leads/check-whatsapp', { lead_ids: leadIds })
 }
 
+/** 手动触发全库富化（官网发现 + 分级信号复核——历史数据批量补全入口） */
+export function enrichAll() {
+  return request.post<CollectTask, CollectTask>('/collect/leads/enrich-all')
+}
+
 /** 企业画像详情（六维分/联系人/事件/跟进/推荐/销售建议） */
 export function getLeadDetail(id: number) {
   return request.get<LeadDetail, LeadDetail>(`/collect/leads/${id}`)
