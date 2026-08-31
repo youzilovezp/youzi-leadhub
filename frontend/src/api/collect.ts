@@ -22,7 +22,7 @@ export interface Lead {
   job_urls: string[]
   enriched_at: string | null
   score: number
-  /** 六维分 {维度键: 维度分}（overseas/whatsapp/saas/scale/marketing/contact） */
+  /** v3 意向分 {命中信号键: 分值} */
   score_signals: Record<string, number>
   grade: Grade
   /** WhatsApp 场景（website_enrich 关键词检测） */
@@ -57,7 +57,7 @@ export interface Lead {
   updated_at: string
 }
 
-/** 等级（六维总分：80+=S 60-79=A 40-59=B <40=C） */
+/** 等级（意向分：80+=S 60-79=A 40-59=B <40=C） */
 export type Grade = 'S' | 'A' | 'B' | 'C'
 
 export const GRADE_OPTIONS: Array<{ value: Grade; label: string }> = [
@@ -104,16 +104,6 @@ export const SAAS_LABELS: Record<string, string> = {
   marketing_automation: '营销自动化',
   omnichannel: '全渠道',
 }
-
-/** 六维键 → 中文（后端 DIM_LABELS_ZH 一致） */
-export const DIM_LABELS: Array<{ key: string; label: string; weight: number }> = [
-  { key: 'overseas', label: '出海指数', weight: 25 },
-  { key: 'whatsapp', label: 'WhatsApp 指数', weight: 30 },
-  { key: 'saas', label: 'SaaS 需求', weight: 20 },
-  { key: 'scale', label: '企业规模', weight: 10 },
-  { key: 'marketing', label: '营销活跃', weight: 10 },
-  { key: 'contact', label: '联系人质量', weight: 5 },
-]
 
 /** 跟进状态（后端 FOLLOW_STATUS_OPTIONS 同词表；PRD §23 十态） */
 export type FollowStatus =
@@ -329,8 +319,6 @@ export interface LeadDetail extends Lead {
   cn_evidence: string
   /** 最近一次富化失败 {reason, website, updated_at}；成功富化后自愈清除 */
   enrich_fail: { reason: string; website?: string; updated_at?: string } | null
-  dimensions: Record<string, number>
-  dimension_weights: Record<string, number>
   contacts: Contact[]
   events: LeadEvent[]
   follow_ups: FollowUpRecord[]
@@ -502,7 +490,7 @@ export function enrichAll() {
   return request.post<CollectTask, CollectTask>('/collect/leads/enrich-all')
 }
 
-/** 企业画像详情（六维分/联系人/事件/跟进/推荐/销售建议） */
+/** 企业画像详情（意向分/联系人/事件/跟进/推荐/销售建议） */
 export function getLeadDetail(id: number) {
   return request.get<LeadDetail, LeadDetail>(`/collect/leads/${id}`)
 }
@@ -549,12 +537,7 @@ export const EXPORT_FIELDS: Array<{ key: string; label: string }> = [
   { key: 'email', label: '邮箱' },
   { key: 'grade', label: '等级' },
   { key: 'score', label: 'Lead Score' },
-  { key: 'dim_overseas', label: '出海指数' },
-  { key: 'dim_whatsapp', label: 'WhatsApp指数' },
-  { key: 'dim_saas', label: 'SaaS需求' },
-  { key: 'dim_scale', label: '企业规模' },
-  { key: 'dim_marketing', label: '营销活跃' },
-  { key: 'dim_contact', label: '联系人质量' },
+  { key: 'intent_detail', label: '意向分明细' },
   { key: 'whatsapp_hit', label: 'WhatsApp' },
   { key: 'whatsapp_url', label: 'WhatsApp链接' },
   { key: 'whatsapp_numbers', label: 'WhatsApp号码' },

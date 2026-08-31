@@ -1024,7 +1024,7 @@ async def _enrich_one(
         meta = dict(lead.field_meta or {})
         if meta.pop("enrich_fail", None) is not None:
             lead.field_meta = meta
-        # 统一重评钩子：六维重算（读 ORM 行属性，fb_whatsapp 不再漏传）+ 事件发射
+        # 统一重评钩子：意向分重算（读 ORM 行属性，fb_whatsapp 不再漏传）+ 事件发射
         await rescore_and_log(session, lead, before=before)
         await session.commit()
     if whatsapp_hit:

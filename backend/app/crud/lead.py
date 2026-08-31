@@ -345,7 +345,7 @@ def _new_lead(
         touch_field_meta(lead, "overseas_signals", draft.source, confidence=85, now=now)
     if draft.job_signals:
         touch_field_meta(lead, "job_signals", draft.source, confidence=85, now=now)
-    apply_score(lead)  # 写 score / score_signals（六维） / grade
+    apply_score(lead)  # 写意向分 v3：score / score_signals（命中信号→分值）/ grade + ICP 门
     return lead
 
 
@@ -492,7 +492,7 @@ async def _merge_into(
         if conflict is None:
             existing.dedupe_key = upgraded
 
-    # 统一重评钩子：六维重算 + grade 写回 + 快照 diff 发射动态事件
+    # 统一重评钩子：意向分重算 + grade 写回 + 快照 diff 发射动态事件
     await rescore_and_log(db, existing, before=before)
 
 

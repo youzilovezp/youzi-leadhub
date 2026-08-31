@@ -1,7 +1,8 @@
 """产品推荐 & 销售建议：基于企业画像的规则引擎（V1 不接 LLM）。
 
-输入全部来自 Lead 行属性（whatsapp_hit/url/job、scenes、saas_signals、industry、
-六维分中的 saas 维度分），纯函数、无 IO，列表页可逐行调用。
+输入全部来自 Lead 行属性（whatsapp_hit/url/job、scenes、saas_signals、industry），
+纯函数、无 IO，列表页可逐行调用。SaaS 买入强度由 saas_signals 内部计算
+（SAAS_CATEGORY_POINTS，2026-08-31 六维下线后从 scoring 迁来）。
 """
 
 from __future__ import annotations
@@ -9,6 +10,18 @@ from __future__ import annotations
 from typing import Any
 
 from app.collectors.scenes import SAAS_LABELS_ZH
+
+# ---------- SaaS 买入强度（只服务推荐阈值，不进意向分主分） ----------
+
+SAAS_CATEGORY_POINTS: dict[str, int] = {
+    "crm": 22,
+    "helpdesk": 22,
+    "chatbot": 18,
+    "ai_service": 18,
+    "marketing_automation": 12,
+    "omnichannel": 8,
+    "wa_bsp": 30,
+}
 
 # ---------- 产品目录（双业务线：WA 消息/SaaS + 广告代理） ----------
 
@@ -110,7 +123,6 @@ def recommend_products(
     scenes: list[str] | None,
     saas_signals: dict[str, Any] | None,
     industry: str | None = None,
-    dim_saas: int = 0,
     sources: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """返回 [{key, name, reason, priority(1=最强)}]，按 priority 升序，可为空。
@@ -120,6 +132,7 @@ def recommend_products(
     """
     scene_set = set(scenes or [])
     saas = set(saas_signals or {})
+    saas_strength = sum(SAAS_CATEGORY_POINTS.get(k, 0) for k in saas)
     wa = _uses_whatsapp(whatsapp_hit, whatsapp_url)
     ad_running = any(r.get("source") == "meta_ads" for r in (sources or []))
     recs: list[dict[str, Any]] = []
@@ -160,8 +173,8 @@ def recommend_products(
             }
         )
 
-    # 规则四：SaaS 需求分较高 +（AI 信号 或 客服场景）→ AI 智能客服
-    if dim_saas >= 40 and ("ai_service" in saas or "customer_service" in scene_set):
+    # 规则四：SaaS 买入强度较高 +（AI 信号 或 客服场景）→ AI 智能客服
+    if saas_strength >= 40 and ("ai_service" in saas or "customer_service" in scene_set):
         recs.append(
             {
                 "key": "ai_cs",
@@ -171,8 +184,8 @@ def recommend_products(
             }
         )
 
-    # 规则五（出海 SaaS 线）：SaaS 需求信号成规模（≥2 类或维度分≥40）→ SaaS 方案
-    if len(saas) >= 2 or dim_saas >= 40:
+    # 规则五（出海 SaaS 线）：SaaS 需求信号成规模（≥2 类或买入强度≥40）→ SaaS 方案
+    if len(saas) >= 2 or saas_strength >= 40:
         recs.append(
             {
                 "key": "overseas_saas",

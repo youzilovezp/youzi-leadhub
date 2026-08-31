@@ -426,7 +426,7 @@ onUnmounted(() => {
             <div style="font-size: 12px; color: #888; line-height: 1.9">
               采集流水线：🔍 发现线索（搜索引擎 / 招聘监控 / 广告库）<br>
               → 🔄 自动接力「网站富化」（官网发现 + 信号复核）<br>
-              → ⚖️ ICP 二重门 + 六维评分 → 🔥 今日商机 / 高价值预警
+              → ⚖️ ICP 二重门 + 意向评分 → 🔥 今日商机 / 高价值预警
             </div>
           </template>
         </n-empty>

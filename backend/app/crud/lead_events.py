@@ -13,7 +13,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.collectors.scenes import SAAS_LABELS_ZH, SCENE_LABELS_ZH
-from app.collectors.scoring import DIM_LABELS_ZH, apply_score
+from app.collectors.scoring import apply_score
 from app.models.lead import Lead, LeadContact, LeadEvent
 
 # ---------- 事件词表 ----------
@@ -30,7 +30,7 @@ EVENT_TYPES: list[str] = [
     "saas_signal_change",  # SaaS 需求信号新增（CRM/工单/Chatbot…）
     "overseas_signal_found",  # 出海信号新增（货币/多语言/电商栈/配送/市场，§4.2）
     "job_signal_found",  # 招聘信号细分新增（wa_ops/overseas_cs/…，§4.3）
-    "score_change",  # 六维总分变化（含 old/new）
+    "score_change",  # 意向分总分变化（含 old/new）
     "grade_change",  # 等级变化（含 old/new）
     "contact_added",  # 新增联系人
     "assigned",  # 分配/转移/释放（PRD §24）
@@ -126,7 +126,7 @@ async def rescore_and_log(
     before: dict[str, Any] | None = None,
     created_by: int | None = None,
 ) -> tuple[int, int, str]:
-    """统一重评钩子：查联系人摘要 → 六维重评写回 → diff 发射事件。
+    """统一重评钩子：查联系人摘要 → 意向分 v3 重评写回 → diff 发射事件。
 
     before 传变更前快照（_merge_into / _enrich_one 入口取）时才发字段类事件；
     只传 lead 则仅发 score/grade 变化事件。返回 (旧分, 新分, 新分级)。
@@ -290,11 +290,3 @@ async def diff_lead_events(
             created_by=created_by,
         )
 
-
-def describe_dimensions(score_signals: dict[str, int] | None) -> dict[str, int]:
-    """score_signals → 六维分（缺失维度补 0），详情页直读。"""
-    dims = {k: 0 for k in DIM_LABELS_ZH}
-    for k, v in (score_signals or {}).items():
-        if k in dims:
-            dims[k] = int(v)
-    return dims

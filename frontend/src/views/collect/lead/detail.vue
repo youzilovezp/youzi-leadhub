@@ -8,7 +8,6 @@ import * as salesApi from '@/api/sales'
 import type { Contact, ContactPayload, FollowStatus, LeadDetail } from '@/api/collect'
 import type { AiAnalysis } from '@/api/sales'
 import {
-  DIM_LABELS,
   EVENT_TYPE_LABELS,
   FOLLOW_STATUS_OPTIONS,
   ICP_STATUS_LABELS,
@@ -40,17 +39,6 @@ async function fetchDetail() {
     loading.value = false
   }
 }
-
-// ---------- 六维条 ----------
-
-const dims = computed(() => {
-  const d = detail.value?.dimensions ?? {}
-  return DIM_LABELS.map((x) => ({
-    ...x,
-    weight: detail.value?.dimension_weights?.[x.key] ?? x.weight,
-    score: d[x.key] ?? 0,
-  }))
-})
 
 // ---------- 撞单提示（§45）+ 分配（§24） ----------
 
@@ -504,35 +492,14 @@ onMounted(fetchDetail)
         <div class="detail-grid grid gap-4">
           <!-- 左列 -->
           <div class="flex flex-col gap-4">
+            <!-- 意向分明细（v3 加分制主分：信号级可解释） -->
             <n-card
               size="small"
-              title="六维评分"
-            >
-              <div
-                v-for="dim in dims"
-                :key="dim.key"
-                class="dim-row"
-              >
-                <span class="dim-label">{{ dim.label }}</span>
-                <n-progress
-                  type="line"
-                  :percentage="dim.score"
-                  :height="10"
-                  :color="dim.score >= 60 ? '#18a058' : dim.score >= 30 ? '#f0a020' : '#d03050'"
-                  class="dim-bar"
-                />
-                <span class="dim-score">{{ dim.score }}<span class="dim-weight">/100 · 权重{{ dim.weight }}%</span></span>
-              </div>
-            </n-card>
-
-            <!-- 加分明细（§五 MVP 口径：信号级可解释，与六维加权总分并存） -->
-            <n-card
-              size="small"
-              title="信号加分（MVP 口径）"
+              title="意向分构成（加分制）"
             >
               <template #header-extra>
                 <n-tag size="small">
-                  加分制参考分 {{ detail.score_breakdown?.total ?? 0 }}
+                  意向分 {{ detail.score_breakdown?.total ?? detail.score ?? 0 }}
                 </n-tag>
               </template>
               <template v-if="detail.score_breakdown?.items?.length">
@@ -557,7 +524,7 @@ onMounted(fetchDetail)
                 暂无命中信号（跑一轮富化/采集后产生）
               </div>
               <div class="bonus-note">
-                与六维加权总分并存：六维为主分与分级依据，加分制为信号级可解释明细
+                加分制主分：命中信号分值直接相加，每 1 分可溯源到一条证据
               </div>
             </n-card>
 
@@ -828,9 +795,6 @@ onMounted(fetchDetail)
                 class="empty-hint"
               >
                 未检测到 SaaS 需求信号（运行「检测 WhatsApp」富化后自动识别）
-              </div>
-              <div class="saas-dim">
-                SaaS 需求维度分：{{ detail.dimensions.saas ?? 0 }}/100
               </div>
             </n-card>
 
@@ -1245,25 +1209,10 @@ onMounted(fetchDetail)
   color: var(--yz-primary, #2080f0);
   word-break: break-all;
 }
-.dim-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 5px 0;
-}
 .dim-label {
   width: 108px;
   flex-shrink: 0;
   font-size: 13px;
-}
-.dim-bar {
-  flex: 1;
-}
-.dim-score {
-  width: 118px;
-  text-align: right;
-  font-size: 13px;
-  flex-shrink: 0;
 }
 .dim-weight {
   color: var(--yz-text-secondary, #999);
@@ -1333,11 +1282,6 @@ onMounted(fetchDetail)
 }
 .saas-rate {
   flex: 1;
-}
-.saas-dim {
-  margin-top: 8px;
-  color: var(--yz-text-secondary, #888);
-  font-size: 12px;
 }
 .ai-block {
   font-size: 13px;

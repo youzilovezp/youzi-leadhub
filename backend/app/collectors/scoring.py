@@ -110,7 +110,7 @@ def score_lead_inputs(
     items = [
         {"key": key, "label": label, "points": points}
         for key, label, points in INTENT_SIGNALS
-        if matched.get(key)
+        if matched[key]
     ]
     total = min(100, sum(it["points"] for it in items))
     return total, items, grade_of(total)
@@ -174,20 +174,3 @@ def apply_score(
         sources=lead.sources,
     )
     return old_score, total, grade
-
-
-# ---------- 六维遗留（Task 2 清理消费方后删除，勿在新代码引用） ----------
-# TODO(Task2): 六维消费方清理后删除
-
-DIM_WEIGHTS: dict[str, int] = {
-    "overseas": 25, "whatsapp": 30, "saas": 20,
-    "scale": 10, "marketing": 10, "contact": 5,
-}
-DIM_LABELS_ZH: dict[str, str] = {
-    "overseas": "出海指数", "whatsapp": "WhatsApp 指数", "saas": "SaaS 需求",
-    "scale": "企业规模", "marketing": "营销活跃", "contact": "联系人质量",
-}
-
-
-def effective_dim_weights() -> dict[str, int]:
-    return dict(DIM_WEIGHTS)

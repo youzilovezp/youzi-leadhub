@@ -22,7 +22,6 @@ from app.collectors import list_collectors
 from app.collectors.icp import ICP_STATUS_LABELS_ZH
 from app.collectors.recommend import detect_need_types, recommend_products, sales_suggestion
 from app.collectors.scenes import SAAS_LABELS_ZH, SCENE_LABELS_ZH
-from app.collectors.scoring import effective_dim_weights
 from app.core.config import settings
 from app.core.exceptions import BusinessError, NotFoundError, PermissionDeniedError
 from app.crud.contact import (
@@ -40,7 +39,6 @@ from app.crud.lead import (
     search_leads,
     upsert_lead,
 )
-from app.crud.lead_events import describe_dimensions
 from app.crud.task_crud import list_tasks as query_tasks
 from app.crud.task_crud import task_crud
 from app.models.collect_task import CollectTask, CollectTaskLog
@@ -136,7 +134,6 @@ async def _fill_lead_list_fields(db: SessionDep, items: list[Lead], outs: list[L
                 scenes=i.scenes,
                 saas_signals=i.saas_signals,
                 industry=i.industry,
-                dim_saas=describe_dimensions(i.score_signals).get("saas", 0),
                 sources=i.sources,
             )
         ]
@@ -375,8 +372,11 @@ async def export_leads(
     def _cell_factory(name_map: dict, contact_lines: dict):
         def _cell(lead: Lead, key: str) -> str:
             value: Any
-            if key.startswith("dim_"):
-                value = describe_dimensions(lead.score_signals).get(key[4:], "")
+            if key == "intent_detail":
+                value = "；".join(
+                    f"{it.get('label', it.get('key'))}+{it.get('points')}"
+                    for it in (lead.score_breakdown or {}).get("items", [])
+                )
             elif key == "contacts_count":
                 value = len(contact_lines.get(lead.id, "").split("; ")) if contact_lines.get(lead.id) else 0
             elif key == "contacts_summary":
@@ -391,7 +391,6 @@ async def export_leads(
                         scenes=lead.scenes,
                         saas_signals=lead.saas_signals,
                         industry=lead.industry,
-                        dim_saas=describe_dimensions(lead.score_signals).get("saas", 0),
                         sources=lead.sources,
                     )
                 )
@@ -645,7 +644,7 @@ async def daily_batch_endpoint(db: SessionDep, user: CurrentUser):
 @router.get(
     "/leads/{lead_id}",
     response_model=ResponseModel[LeadDetailOut],
-    summary="线索详情（企业画像：六维分/联系人/事件/推荐/销售建议）",
+    summary="线索详情（企业画像：意向分/联系人/事件/推荐/销售建议）",
 )
 async def get_lead_detail(db: SessionDep, user: CurrentUser, lead_id: int):
     lead = await db.get(Lead, lead_id)
@@ -682,7 +681,6 @@ async def get_lead_detail(db: SessionDep, user: CurrentUser, lead_id: int):
         .all()
     )
 
-    dims = describe_dimensions(lead.score_signals)
     recs = recommend_products(
         whatsapp_hit=lead.whatsapp_hit,
         whatsapp_url=lead.whatsapp_url,
@@ -690,7 +688,6 @@ async def get_lead_detail(db: SessionDep, user: CurrentUser, lead_id: int):
         scenes=lead.scenes,
         saas_signals=lead.saas_signals,
         industry=lead.industry,
-        dim_saas=dims.get("saas", 0),
         sources=lead.sources,
     )
     suggestion = sales_suggestion(
@@ -706,8 +703,6 @@ async def get_lead_detail(db: SessionDep, user: CurrentUser, lead_id: int):
     out.owner_name = (await _user_display_map(db, {lead.owner_id})).get(lead.owner_id)
     out.contacts_count = len(contacts)
     out.recommended_products = [r["name"] for r in recs]
-    out.dimensions = dims
-    out.dimension_weights = effective_dim_weights()
     out.contacts = [ContactOut.model_validate(c) for c in contacts]
     out.events = [LeadEventOut.model_validate(e) for e in events]
     fu_name_map = await _user_display_map(db, {f.user_id for f in follow_ups})

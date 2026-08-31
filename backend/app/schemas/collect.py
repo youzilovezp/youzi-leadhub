@@ -79,7 +79,7 @@ class LeadOut(BaseModel):
     job_urls: list[str]
     enriched_at: datetime | None
     score: int
-    score_signals: dict[str, int]  # 六维分 {维度键: 维度分}
+    score_signals: dict[str, int]  # v3 意向分 {命中信号键: 分值}
     grade: str = "C"  # S/A/B/C
     scenes: list[str] = []  # WhatsApp 场景（customer_service/marketing/transactional/saas）
     saas_signals: dict[str, int] = {}  # SaaS 需求信号 {键: 命中关键词数}
@@ -199,12 +199,7 @@ EXPORT_FIELDS: list[tuple[str, str]] = [
     ("email", "邮箱"),
     ("grade", "等级"),
     ("score", "Lead Score"),
-    ("dim_overseas", "出海指数"),
-    ("dim_whatsapp", "WhatsApp指数"),
-    ("dim_saas", "SaaS需求"),
-    ("dim_scale", "企业规模"),
-    ("dim_marketing", "营销活跃"),
-    ("dim_contact", "联系人质量"),
+    ("intent_detail", "意向分明细"),
     ("whatsapp_hit", "WhatsApp"),
     ("whatsapp_url", "WhatsApp链接"),
     ("whatsapp_numbers", "WhatsApp号码"),
@@ -280,10 +275,8 @@ class SignalEvidenceOut(BaseModel):
 
 
 class LeadDetailOut(LeadOut):
-    """企业画像详情：列表字段 + 六维分 + 联系人 + 事件 + 跟进 + 推荐 + 销售建议 + 商机。"""
+    """企业画像详情：列表字段 + 联系人 + 事件 + 跟进 + 推荐 + 销售建议 + 商机。"""
 
-    dimensions: dict[str, int] = {}  # 六维分（score_signals 的规范化形态）
-    dimension_weights: dict[str, int] = {}
     contacts: list[ContactOut] = []
     events: list[LeadEventOut] = []  # 最近 50 条
     follow_ups: list[FollowUpOut] = []  # 最近 50 条
@@ -293,7 +286,7 @@ class LeadDetailOut(LeadOut):
     need_types: list[dict[str, str]] = []
     # 出海信号（§4.2）：{currencies/languages/ecommerce/shipping/markets/export_words: [证据]}
     overseas_signals: dict[str, list[str]] = {}
-    # MVP 加分制明细（§五 13 条）：{"total": 参考总分, "items": [{key,label,points}]}
+    # 意向分明细（v3 加分制，§五 13 条）：{"total": 总分, "items": [{key,label,points}]}
     score_breakdown: dict[str, Any] = {}
     wa_business: bool = False
     # 招聘信号细分（§4.3）：{wa_ops/overseas_cs/...: {label, points}}
