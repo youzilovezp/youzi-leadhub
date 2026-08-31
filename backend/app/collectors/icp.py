@@ -90,7 +90,9 @@ _NON_BUYER_NAME_RE = re.compile(
     # 买家是品牌/卖家/工厂/游戏App + 建站工具 SaaS，不含劳动型服务商）
     r"|货代|货运|物流|船务|报关|仓储|快递|代运营|客服外包|呼叫中心"
     # 政务平台别名 / WhatsApp 软件页形态（2026-09-01 巡检：单一窗口/WhatsApp web 漏网）
-    r"|单一窗口|whatsapp web|whatsapp网页",
+    r"|单一窗口|whatsapp web|whatsapp网页"
+    # 2026-09-01 用户标准巡检：知识站/招聘平台/供应链/教育咨询（非四类目标的漏网形态）
+    r"|知识网|大全|招聘网|招聘平台|供应链|教育咨询",
     re.IGNORECASE,
 )
 

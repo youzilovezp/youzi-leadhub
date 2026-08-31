@@ -85,3 +85,23 @@ def test_detect_text_phones_international_format():
 
 def test_detect_tel_phones_still_works():
     assert detect_tel_phones(['<a href="tel:+8613736028159">Call</a>'])
+
+
+def test_inner_pages_prioritize_contact_over_product():
+    """F3b（2026-09-01 TMO 实测）：产品/服务链接在导航里先于「联系我们」出现，
+    旧逻辑 3 页上限先被产品页占满 → /contact/ 被丢 → 电话全漏。
+    联系页（联系方式是富化第一产出）必须优先于产品页入选。"""
+    from app.collectors.website_enrich import find_inner_page_urls
+
+    home = """
+    <nav>
+      <a href="/services/#product_registration">产品信息备案</a>
+      <a href="/services/#product_enrichment">产品信息优化</a>
+      <a href="/services/shopify/">Shopify开发</a>
+      <a href="/contact/">联系我们</a>
+    </nav>
+    """
+    inner = find_inner_page_urls(home, "https://tmotest.com/", "tmotest.com")
+    assert "https://tmotest.com/contact/" in inner
+    assert inner[0].endswith("/contact/")  # 联系页排第一
+    assert len(inner) <= 3

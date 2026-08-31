@@ -201,6 +201,8 @@ _SOCIAL_RES = [
 # 关键词匹配 href **或锚文本**（2026-08-31 审计：中文官网的招聘/联系栏目
 # 常是中文锚文本 + 拼音/数字路径，只匹配英文 href 词会漏掉大半内页）
 _INNER_ANCHOR_RE = re.compile(r'<a\b[^>]*href=["\']([^"\']{1,300})["\'][^>]*>(.*?)</a>', re.S | re.I)
+# 联系类内页关键词（优先级 1——联系方式是富化的第一产出）
+_INNER_CONTACT_WORDS_RE = re.compile(r"contact|kontak|hubungi|联系|about|关于|faq|help", re.I)
 _INNER_PAGE_WORDS_RE = re.compile(
     r"contact|kontak|about|hubungi|product|shop|store|catalog|collection|faq|help"
     r"|联系我们|联系方式|联系|关于我们|关于|产品|商品|店铺",
@@ -211,22 +213,29 @@ _MAX_INNER_PAGES = 3
 
 
 def find_inner_page_urls(homepage_html: str, base_url: str, base_domain: str | None) -> list[str]:
-    """首页 HTML → 同域内页 URL 列表（≤_MAX_INNER_PAGES，去重保序）。
+    """首页 HTML → 同域内页 URL 列表（≤_MAX_INNER_PAGES，联系页优先）。
 
     命中 = 内页关键词出现在 href **或** 锚文本里（中文锚文本「联系我们/
-    产品中心」与英文 href /contact 一并覆盖）。
+    产品中心」与英文 href /contact 一并覆盖）。**分两级选取**：联系类
+    （contact/联系/关于/faq）优先于产品类（product/shop/店铺）——
+    2026-09-01 TMO 实测：导航栏产品/服务链接在 DOM 里先出现，旧的先到先得
+    + 3 页上限把 /contact/ 挤掉，电话全漏（联系方式是富化的第一产出）。
     """
-    urls: list[str] = []
+    priority: list[str] = []
+    secondary: list[str] = []
     for m in _INNER_ANCHOR_RE.finditer(homepage_html or ""):
         href, text = m.group(1), m.group(2)
-        if not _INNER_PAGE_WORDS_RE.search(href) and not _INNER_PAGE_WORDS_RE.search(text):
+        contact_hit = _INNER_CONTACT_WORDS_RE.search(href) or _INNER_CONTACT_WORDS_RE.search(text)
+        page_hit = _INNER_PAGE_WORDS_RE.search(href) or _INNER_PAGE_WORDS_RE.search(text)
+        if not contact_hit and not page_hit:
             continue
         url = _resolve_url(base_url, href)
-        if url and url not in urls and extract_domain(url) == base_domain:
-            urls.append(url)
-        if len(urls) >= _MAX_INNER_PAGES:
-            break
-    return urls
+        if not url or url in priority or url in secondary:
+            continue
+        if extract_domain(url) != base_domain:
+            continue
+        (priority if contact_hit else secondary).append(url)
+    return (priority + secondary)[:_MAX_INNER_PAGES]
 
 
 def _classify_httpx_error(exc: Exception) -> str:
