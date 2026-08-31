@@ -77,6 +77,39 @@ async def test_daily_batch_and_claim(client, admin_credentials, db_session):
     # 晋级事件本身计入当日高价值预警切片（grade 升 S/A is_alert=True）
     assert any(a["lead_id"] == promote_id for a in data["alerts"])
 
+    # 三问齐备（v3 重设计）：行内带 three_questions 且 complete=True
+    fresh_row = next(x for x in data["new_leads"] if x["id"] == fresh.id)
+    tq = fresh_row["three_questions"]
+    assert tq["complete"] is True
+    assert len(tq["why"]) >= 2
+    assert tq["what"]["products"]
+    assert tq["who"]["contacts"] or tq["who"]["whatsapp_numbers"]
+
+    # 齐备门槛：够分（≥60 qualified）但三问不齐备 → 不进 new_leads。
+    # 构造：wa_ops 招聘 30 + 出海 15 + 独立站 10 + 3国 10 + 社媒 5 = 70/A，
+    # 但无 WA 入口/无 meta_ads/无 SaaS 信号 → recommend 全不命中 → products 空
+    weak, _ = await upsert_lead(
+        db_session,
+        LeadDraft(
+            name="今日批次不齐备科技（武汉）有限公司",
+            source="seed_import",
+            country="CN",
+            website="https://v3gate-weak3q.com",
+            is_cn=True,
+            whatsapp_job=True,
+            job_signals={"wa_ops": {"label": "WhatsApp 运营/客服", "points": 30}},
+            overseas_signals={"shipping": ["worldwide"]},
+            target_countries=["US", "GB", "AE"],
+            social={"facebook": "f", "instagram": "i"},
+        ),
+    )
+    await db_session.commit()
+    assert weak.score >= 60 and weak.icp_status == "qualified"
+    r = await client.get("/api/v1/collect/leads/daily-batch", headers=h)
+    data2 = r.json()["data"]
+    assert weak.id not in [x["id"] for x in data2["new_leads"]]
+    await client.delete(f"/api/v1/collect/leads/{weak.id}", headers=h)
+
     # 4) 领取：销售自助认领 → owner=自己、状态进「待跟进」
     r = await client.post(f"/api/v1/collect/leads/{fresh.id}/claim", headers=h)
     body = r.json()["data"]

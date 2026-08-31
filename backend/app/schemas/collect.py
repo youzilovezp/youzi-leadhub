@@ -289,6 +289,8 @@ class LeadDetailOut(LeadOut):
     overseas_signals: dict[str, list[str]] = {}
     # 意向分明细（v3 加分制，§五 13 条）：{"total": 总分, "items": [{key,label,points}]}
     score_breakdown: dict[str, Any] = {}
+    # 三问：why/what/who/complete，spec §六
+    three_questions: dict[str, Any] = {}
     wa_business: bool = False
     # 招聘信号细分（§4.3）：{wa_ops/overseas_cs/...: {label, points}}
     job_signals: dict[str, dict[str, object]] = {}
