@@ -214,8 +214,12 @@ def _keyword_hit(text: str, keyword: str) -> bool:
     return re.search(rf"\b{re.escape(keyword)}\b", text) is not None
 
 
-def page_text(html_list: list[str] | None) -> str:
-    """多页 HTML → 纯文本（小写）：剥 script/style → 剥标签 → 反转义 → 压空白。"""
+def page_text(html_list: list[str] | list[str | None] | None, *, keep_case: bool = False) -> str:
+    """多页 HTML → 纯文本：剥 script/style → 剥标签 → 反转义 → 压空白。
+
+    默认小写（关键词匹配用）；keep_case=True 保留大小写——国家代码类检测
+    需要（"US"/"USA" 大写才是国名，小写 "us" 是代词，不能混）。
+    """
     if not html_list:
         return ""
     raw = "\n".join(p for p in html_list if p)
@@ -223,7 +227,7 @@ def page_text(html_list: list[str] | None) -> str:
     text = _TAG_RE.sub(" ", text)
     text = html_lib.unescape(text)
     text = _WS_RE.sub(" ", text)
-    return text.lower()[:_MAX_TEXT]
+    return text[:_MAX_TEXT] if keep_case else text.lower()[:_MAX_TEXT]
 
 
 def detect_scenes(html_list: list[str] | None) -> list[str]:

@@ -367,12 +367,22 @@ async def _merge_into(
         ("address", draft.address),
         ("phone_raw", draft.phone_raw),
         ("website", draft.website),
-        ("domain", domain),
         ("email", draft.email),
         ("whatsapp_url", draft.whatsapp_url),
     ):
         if value and not getattr(existing, field):
             setattr(existing, field, value)
+    # domain 特殊：受 uq_leads_domain 唯一索引约束（迁移 f7c2a91d4e21）。
+    # OR 反查可能同时命中「低 id 的 namecity 行」与「高 id 的 domain 行」，
+    # 合并目标取低 id 后再补 domain 会撞索引——被他人持有就不写（该域归原持有者）
+    if domain and not existing.domain:
+        taken = (
+            await db.execute(
+                select(Lead.id).where(Lead.domain == domain, Lead.id != existing.id).limit(1)
+            )
+        ).scalar_one_or_none()
+        if taken is None:
+            existing.domain = domain
     if phone_e164 and not existing.phone_e164:
         existing.phone_e164 = phone_e164
     if namecity_key and not existing.namecity_key:

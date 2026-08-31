@@ -117,3 +117,45 @@ def compute_icp_status_of(lead: Any) -> str:
         sources=getattr(lead, "sources", None),
         website=getattr(lead, "website", None) or None,
     )
+
+
+# ---------- CN 证据分级（2026-08-31 审计：CJK 启发式的系统性误判通道） ----------
+#
+# is_cn 的写入方分两类：
+# - 强证据：country=CN / +86 号码 / 中国招聘站来源（job_posting、career_site）/
+#   人工录入与种子导入（manual、seed_import——显式人为断言）
+# - 弱证据：纯 CJK 启发式（web_search 中文标题 / meta_ads 中文页名文案 /
+#   官网中文内容 ≥30%）——东南亚华人本地企业同样命中，是 qualified 误判的
+#   主要入口。弱证据行不拒之门外（宁漏勿重反过来也伤召回），但必须可见、
+#   且质量抽检优先抽它们来量化误判率。
+
+CN_STRONG_SOURCES = ("job_posting", "career_site", "seed_import", "manual")
+
+
+def cn_evidence_of(
+    *,
+    is_cn: bool = False,
+    country: str | None = None,
+    phone_e164: str | None = None,
+    sources: list[dict[str, Any]] | None = None,
+) -> str:
+    """CN 证据强度：""（无）/ "weak"（仅 CJK 启发式）/ "strong"（硬证据）。"""
+    has_cn = has_cn_evidence(is_cn=is_cn, country=country, phone_e164=phone_e164)
+    if not has_cn:
+        return ""
+    if (country or "").upper() == "CN" or (phone_e164 or "").startswith("+86"):
+        return "strong"
+    source_names = {r.get("source") for r in (sources or []) if isinstance(r, dict)}
+    if source_names & set(CN_STRONG_SOURCES):
+        return "strong"
+    return "weak"
+
+
+def cn_evidence_of_lead(lead: Any) -> str:
+    """ORM Lead 行适配。"""
+    return cn_evidence_of(
+        is_cn=bool(getattr(lead, "is_cn", False)),
+        country=getattr(lead, "country", None),
+        phone_e164=getattr(lead, "phone_e164", None),
+        sources=getattr(lead, "sources", None),
+    )

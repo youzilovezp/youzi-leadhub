@@ -79,8 +79,10 @@ _ICP_LICENSE_RE = re.compile(
 )
 
 
-def detect_icp_license(html_list: list[str | None]) -> str | None:
+def detect_icp_license(html_list: list[str] | list[str | None] | None) -> str | None:
     """页面是否含 ICP 备案号（中国企业强证据）。返回命中的备案号原文。"""
+    if not html_list:
+        return None
     joined = "\n".join(h for h in html_list if h)
     if not joined:
         return None
@@ -88,7 +90,7 @@ def detect_icp_license(html_list: list[str | None]) -> str | None:
     return m.group(0) if m else None
 
 
-def detect_cn_content(html_list: list[str | None]) -> bool:
+def detect_cn_content(html_list: list[str] | list[str | None] | None) -> bool:
     """页面是否以中文为主（中国企业官网特征）：可见文本 CJK 占比 ≥ 30%。"""
     joined = page_text(html_list)
     if not joined:
@@ -97,16 +99,20 @@ def detect_cn_content(html_list: list[str | None]) -> bool:
     return cjk / len(joined) >= 0.30
 
 
-def detect_wa_business(html_list: list[str | None]) -> bool:
+def detect_wa_business(html_list: list[str] | list[str | None] | None) -> bool:
     """页面是否自述使用 WhatsApp Business（业务号）。"""
+    if not html_list:
+        return False
     joined = "\n".join(h for h in html_list if h)
     if not joined:
         return False
     return any(rx.search(joined) for rx in _WA_BUSINESS_RES)
 
 
-def detect_whatsapp_groups(html_list: list[str | None]) -> list[str]:
+def detect_whatsapp_groups(html_list: list[str] | list[str | None] | None) -> list[str]:
     """页面里的 WhatsApp 群邀请链接（去重保序）——私域运营证据。"""
+    if not html_list:
+        return []
     joined = "\n".join(h for h in html_list if h)
     groups: list[str] = []
     for m in _GROUP_LINK_RE.finditer(joined):
@@ -125,13 +131,36 @@ _SOCIAL_RES = [
     ("youtube", re.compile(r"https?://(?:www\.)?youtube\.com/(?:c|channel|user|@)[^\s\"'<>]+", re.I)),
 ]
 # Contact/About/Products 三类内页（官网四层抓取：首页 + 联系/关于/产品页）。
-# Products 层是 B2B/B2C/品类与交易场景关键词的主要来源（跨境电商站尤其）
-_INNER_PAGE_LINK_RE = re.compile(
-    r'href=["\']([^"\']*(?:contact|kontak|about|hubungi|product|shop|store|catalog|collection|faq|help)[^"\']*)["\']',
+# Products 层是 B2B/B2C/品类与交易场景关键词的主要来源（跨境电商站尤其）。
+# 关键词匹配 href **或锚文本**（2026-08-31 审计：中文官网的招聘/联系栏目
+# 常是中文锚文本 + 拼音/数字路径，只匹配英文 href 词会漏掉大半内页）
+_INNER_ANCHOR_RE = re.compile(r'<a\b[^>]*href=["\']([^"\']{1,300})["\'][^>]*>(.*?)</a>', re.S | re.I)
+_INNER_PAGE_WORDS_RE = re.compile(
+    r"contact|kontak|about|hubungi|product|shop|store|catalog|collection|faq|help"
+    r"|联系我们|联系方式|联系|关于我们|关于|产品|商品|店铺",
     re.I,
 )
 # 内页抓取上限（首页 + 最多 3 个内页；原来只 2 个联系页）
 _MAX_INNER_PAGES = 3
+
+
+def find_inner_page_urls(homepage_html: str, base_url: str, base_domain: str | None) -> list[str]:
+    """首页 HTML → 同域内页 URL 列表（≤_MAX_INNER_PAGES，去重保序）。
+
+    命中 = 内页关键词出现在 href **或** 锚文本里（中文锚文本「联系我们/
+    产品中心」与英文 href /contact 一并覆盖）。
+    """
+    urls: list[str] = []
+    for m in _INNER_ANCHOR_RE.finditer(homepage_html or ""):
+        href, text = m.group(1), m.group(2)
+        if not _INNER_PAGE_WORDS_RE.search(href) and not _INNER_PAGE_WORDS_RE.search(text):
+            continue
+        url = _resolve_url(base_url, href)
+        if url and url not in urls and extract_domain(url) == base_domain:
+            urls.append(url)
+        if len(urls) >= _MAX_INNER_PAGES:
+            break
+    return urls
 
 
 async def _fetch(client: httpx.AsyncClient, url: str) -> str | None:
@@ -232,17 +261,24 @@ def _is_email(addr: str) -> bool:
     return not any(domain == d or domain.endswith("." + d) for d in _EMAIL_DOMAIN_BLOCKLIST)
 
 
-def detect_email(homepage_html: str | None) -> str | None:
-    """mailto: 优先，其次正文邮箱正则。"""
-    if not homepage_html:
+def detect_email(html: str | list[str] | list[str | None] | None) -> str | None:
+    """公开邮箱检测。输入首页或页面列表（首页+联系/关于页）。
+
+    mailto 优先（跨全部页面先扫一遍），其次正文正则——企业邮箱主要挂在
+    联系页而非首页，2026-08-31 审计前只扫首页漏掉大半。
+    """
+    if not html:
         return None
-    for m in re.finditer(r'href=["\']mailto:([^"\'>]+)', homepage_html, re.I):
-        addr = m.group(1).strip()
-        if _is_email(addr):
-            return addr
-    for m in _EMAIL_RE.finditer(homepage_html):
-        if _is_email(m.group(0)):
-            return m.group(0)
+    pages = [html] if isinstance(html, str) else list(html)
+    for page in pages:
+        for m in re.finditer(r'href=["\']mailto:([^"\'>]+)', page or "", re.I):
+            addr = m.group(1).strip()
+            if _is_email(addr):
+                return addr
+    for page in pages:
+        for m in _EMAIL_RE.finditer(page or ""):
+            if _is_email(m.group(0)):
+                return m.group(0)
     return None
 
 
@@ -383,7 +419,27 @@ class WebsiteEnrichCollector(Collector):
                                         lead, "website", "web_discovery",
                                         confidence=60, now=datetime.now(timezone.utc),
                                     )
-                                    await session.commit()
+                                    # uq_leads_domain 唯一索引兜底（并发窗口下
+                                    # check-then-act 仍可能撞）：撞域回滚 + 负缓存
+                                    from sqlalchemy.exc import IntegrityError
+
+                                    try:
+                                        await session.commit()
+                                    except IntegrityError:
+                                        await session.rollback()
+                                        async with _session_factory()() as s2:
+                                            fresh = await s2.get(Lead, lid)
+                                            if fresh and not fresh.website:
+                                                touch_field_meta(
+                                                    fresh, "website", "web_discovery_dup",
+                                                    confidence=0, now=datetime.now(timezone.utc),
+                                                )
+                                                await s2.commit()
+                                        await ctx.log(
+                                            "info",
+                                            f"[lead {lid}] 🔍 官网发现撞域（唯一索引兜底）：{name} → {ws}",
+                                        )
+                                        continue
                                     discovered.append((lid, ws))
                                     await ctx.log("info", f"[lead {lid}] 🔍 官网发现：{name} → {ws}")
                     else:
@@ -565,11 +621,15 @@ async def _load_scope(session: AsyncSession, lead_ids: list[Any]) -> list[tuple[
             )
 
         c_days = max(1, settings.ENRICH_INTERVAL_HOURS // 24)
+        # 终态不再富化（2026-08-31 审计）：won=已是客户（该进客户成功流程），
+        # invalid=已判无效——两态继续重爬只浪费抓取配额。NULL（从未跟进）必须
+        # 用 or_ 显式放行：SQL 里 NULL NOT IN (...) 为假值，会把共享池全部滤掉
         stmt = select(Lead.id, Lead.website).where(
             Lead.website.is_not(None),
             Lead.website != "",
             Lead.icp_status != "foreign",
             or_(_stale("S", 1), _stale("A", 3), _stale("B", 7), _stale("C", c_days)),
+            or_(Lead.follow_status.is_(None), Lead.follow_status.notin_(["won", "invalid"])),
         )
     rows = (await session.execute(stmt)).all()
     return [(r[0], r[1]) for r in rows]
@@ -660,7 +720,6 @@ async def _enrich_one(
     只在「成功抓到首页」时更新 enriched_at；httpx 三通道全失败时尝试
     无头浏览器渲染兜底（反爬 403 的大站），仍失败留待下一轮自动重试。
     """
-    primary = clients[0]
     base = website if website.startswith(("http://", "https://")) else f"https://{website}"
     homepage = await _fetch_site(clients, base)
     if homepage is None:
@@ -681,24 +740,20 @@ async def _enrich_one(
 
     # 首页里找内页链接（联系/关于/产品，最多 3 个，域名相同才跟）
     base_domain = extract_domain(base)
-    inner_urls: list[str] = []
-    for m in _INNER_PAGE_LINK_RE.finditer(homepage):
-        url = _resolve_url(base, m.group(1))
-        if url and url not in inner_urls and extract_domain(url) == base_domain:
-            inner_urls.append(url)
-        if len(inner_urls) >= _MAX_INNER_PAGES:
-            break
+    inner_urls = find_inner_page_urls(homepage, base, base_domain)
     pages = [homepage]
     page_urls = [base]  # 与 pages 平行：每页 HTML 对应的 URL（证据链用）
     for url in inner_urls:
-        html = await _fetch(primary, url)
+        # 内页与首页同等待遇（2026-08-31 审计：此前只有主 client 单次机会——
+        # 代理软拦截/证书问题的站点首页成功、联系页全挂，而 WA/邮箱恰在联系页）
+        html = await _fetch_site(clients, url)
         if html:
             pages.append(html)
             page_urls.append(url)
 
     whatsapp_hit, whatsapp_url = detect_whatsapp(pages)
     wa_numbers = detect_whatsapp_numbers(pages)
-    email = detect_email(homepage)
+    email = detect_email(pages)
     social = detect_social(pages)
     scenes = detect_scenes(pages)
     saas_signals = detect_saas_signals(pages)
@@ -728,6 +783,23 @@ async def _enrich_one(
                 lead.whatsapp_url = whatsapp_url
             # WhatsApp 检测来源=官网，置信度高（§32）
             touch_field_meta(lead, "whatsapp_url", "website_enrich", confidence=98, now=now)
+        elif before.get("whatsapp_hit"):
+            # 负证据（2026-08-31 审计）：此前检测到官网 WA 入口、本轮成功抓到
+            # 首页但未复现。不翻 whatsapp_hit 布尔列（历史事实保留、评分不动），
+            # 只发 whatsapp_gone 事件进时间线——销售能看到"信号可能过期"，
+            # 建联前先核验。此前该事件类型只有词表没有写入方，负证据闭环缺失。
+            from app.crud.lead_events import add_event
+
+            add_event(
+                session,
+                lead,
+                "whatsapp_gone",
+                payload={"checked_pages": len(pages), "website": base},
+                note=(
+                    f"复查 {len(pages)} 个页面未复现 WhatsApp 入口"
+                    f"（原入口：{lead.whatsapp_url or '官网'}）——信号可能已过期，建联前建议核验"
+                ),
+            )
         if wa_numbers:
             # 多号码证据链（§4.1）：Sales/Support 分线 = 规模化私域，只增不减
             merged_numbers = list(lead.whatsapp_numbers or [])
