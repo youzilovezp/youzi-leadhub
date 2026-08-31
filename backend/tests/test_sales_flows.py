@@ -6,6 +6,32 @@ from app.collectors.website_enrich import detect_whatsapp_numbers
 # ---------- 单元：号码证据 + 需求类型 ----------
 
 
+def test_lead_context_intent_signals_prompt():
+    """LLM 上下文的意向信号拼接（v3）：零信号兜底文案，不产出悬挂分隔符。
+
+    T2 审查 Important #1：零信号线索（手工录入未富化、sales_script 首触常见形态）
+    此前产出退化行「等级：C（意向分 0；）」。
+    """
+    from types import SimpleNamespace
+
+    from app.services.llm import _lead_context
+
+    lead = SimpleNamespace(
+        name="Zero Signal Co", industry=None, country="MY", city=None,
+        grade="C", score=0, score_signals={},
+        whatsapp_hit=False, whatsapp_url=None, fb_whatsapp=False, whatsapp_job=False,
+        scenes=[], saas_signals={}, website=None, email=None, social={},
+    )
+    ctx = _lead_context(lead, [])
+    assert "等级：C（意向分 0；暂未检测到意向信号）" in ctx
+    # 有命中信号：中文标签 + 分值逐项拼接，兜底文案不出现
+    lead.score = 55
+    lead.score_signals = {"site_whatsapp": 25, "wa_ops_job": 30}
+    ctx2 = _lead_context(lead, [])
+    assert "等级：C（意向分 55；官网 WhatsApp 入口 25，在招 WhatsApp 运营岗 30）" in ctx2
+    assert "暂未检测到意向信号" not in ctx2
+
+
 def test_detect_whatsapp_numbers_dedup():
     html = """
     <a href="https://wa.me/60123456789">sales</a>

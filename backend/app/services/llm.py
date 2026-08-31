@@ -71,9 +71,12 @@ def _lead_context(lead: Any, contacts: list[Any]) -> str:
         f"企业：{lead.name}",
         f"行业：{lead.industry or '未知'}；国家：{lead.country or '未知'}；城市：{lead.city or '未知'}",
         f"等级：{lead.grade}（意向分 {lead.score}；"
-        + "，".join(
-            f"{INTENT_LABELS_ZH.get(k, k)} {v}"
-            for k, v in (lead.score_signals or {}).items()
+        + (
+            "，".join(
+                f"{INTENT_LABELS_ZH.get(k, k)} {v}"
+                for k, v in (lead.score_signals or {}).items()
+            )
+            or "暂未检测到意向信号"
         )
         + "）",
         f"WhatsApp：{'已发现 ' + (lead.whatsapp_url or '') if (lead.whatsapp_hit or lead.whatsapp_url) else '未发现'}；"
