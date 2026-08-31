@@ -156,11 +156,15 @@ async def auto_create_from_email(
     db: AsyncSession,
     lead: Lead,
     email: str,
+    *,
+    source: str = "website_enrich",
 ) -> LeadContact | None:
-    """富化抓到公开邮箱 → 自动生成「待补全」联系人（job_title 空，前端显示待补全）。
+    """富化/采集抓到公开邮箱 → 自动生成「待补全」联系人（job_title 空，前端显示待补全）。
 
     已存在同邮箱联系人时返回 None。只建记录 + 事件，不重评——调用方
     （website_enrich._enrich_one）在富化末尾统一 rescore_and_log。
+    source 透传（2026-08-31 审计：此前硬编码 website_enrich，meta_ads 抓的
+    邮箱建的联系人来源被误标）。
     """
     if not email:
         return None
@@ -174,7 +178,7 @@ async def auto_create_from_email(
         email=email,
         seniority=None,
         confidence=40,
-        source="website_enrich",
+        source=source,
     )
     db.add(contact)
     await db.flush()
@@ -182,8 +186,8 @@ async def auto_create_from_email(
         db,
         lead,
         "contact_added",
-        payload={"contact_id": contact.id, "email": email, "source": "website_enrich"},
-        note=f"富化发现公开邮箱，自动生成联系人：{email}",
+        payload={"contact_id": contact.id, "email": email, "source": source},
+        note=f"采集发现公开邮箱，自动生成联系人：{email}",
     )
     return contact
 
@@ -194,11 +198,14 @@ async def auto_create_from_phone(
     phone: str,
     *,
     source: str = "website_enrich",
+    is_wa: bool = True,
 ) -> LeadContact | None:
     """WhatsApp 号码/tel 电话 → 自动联系人（「找谁」的直接答案）。
 
-    同 lead 内同号码已存在（或号码已是线索电话）则不重复建。号码是 WhatsApp
-    入口时建联对象就是这个号——name 待补全，phone 存号码（补 + 存国际格式）。
+    同 lead 内同号码已存在则不重复建。号码是 WhatsApp 入口时建联对象就是
+    这个号——name 待补全，phone 存号码（补 + 存国际格式）。
+    is_wa 显式传（2026-08-31 审计：此前按 source 名猜置信度，meta_ads 主页
+    抠的 wa.me 号码被错标 60——两个调用方的号码都来自 wa.me 链接，默认 85）。
     """
     if not phone:
         return None
@@ -215,7 +222,6 @@ async def auto_create_from_phone(
     ).scalar_one_or_none()
     if dup is not None:
         return None
-    is_wa = source == "website_enrich"  # 富化来的号码来自 wa.me 链接
     contact = LeadContact(
         lead_id=lead.id,
         name=None,
@@ -232,6 +238,6 @@ async def auto_create_from_phone(
         lead,
         "contact_added",
         payload={"contact_id": contact.id, "phone": phone_val, "source": source},
-        note=f"{'富化发现 WhatsApp 号码' if is_wa else '采集发现电话'}，自动生成联系人：{phone_val}",
+        note=f"{'WhatsApp 号码' if is_wa else '电话号码'}，自动生成联系人：{phone_val}",
     )
     return contact

@@ -34,6 +34,8 @@ EVENT_TYPES: list[str] = [
     "grade_change",  # 等级变化（含 old/new）
     "contact_added",  # 新增联系人
     "assigned",  # 分配/转移/释放（PRD §24）
+    "status_change",  # 跟进状态跃迁（含 old/new；won 带 is_alert，2026-08-31 审计补）
+    "whatsapp_gone",  # 复查未复现已记录的 WhatsApp 入口（负证据，2026-08-31 审计补）
 ]
 
 EVENT_TYPE_LABELS_ZH: dict[str, str] = {
@@ -52,6 +54,8 @@ EVENT_TYPE_LABELS_ZH: dict[str, str] = {
     "grade_change": "等级变化",
     "contact_added": "新增联系人",
     "assigned": "分配变动",
+    "status_change": "跟进状态变化",
+    "whatsapp_gone": "WhatsApp 入口消失",
 }
 
 # 高价值预警事件类型（PRD §55）：等级升到 S/A、发现 WhatsApp、SaaS 信号出现

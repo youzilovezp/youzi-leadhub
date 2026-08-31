@@ -20,8 +20,14 @@ social_ops=海外社媒运营——在招海外岗位 = 出海业务在运转的
 官网发现命中率救不回这个缺口）。
 
 「有评估结论」= enriched_at 非空（官网已抓取且无中文/无 CN 特征）或
-来源含 meta_ads（页名与文案已做过中文判定）——只有评估过才有资格说 foreign，
-从未富化的行保持 unknown，不做有罪推定。
+来源含 meta_ads **且有官网**（页名文案已做中文判定）——只有评估过才有资格
+说 foreign，从未富化的行保持 unknown，不做有罪推定。
+
+2026-08-31 审计修正：meta_ads 来源 + 无官网 + 无 CN 证据此前直接判 foreign——
+中国出海大卖普遍英文品牌英文素材，探测失败（登录墙）拿不到官网时没有任何
+翻案通道（无官网=富化不了=永远 foreign），恰恰是最高价值客群被不可见地丢弃。
+现口径：无官网的 meta_ads 行保持 unknown（可见、待验证），等官网发现补全并
+富化后再评估。
 """
 
 from __future__ import annotations
@@ -74,8 +80,13 @@ def compute_icp_status(
     job_signals: dict[str, dict[str, Any]] | None = None,
     enriched_at: Any = None,
     sources: list[dict[str, Any]] | None = None,
+    website: str | None = None,
 ) -> str:
-    """ICP 资格判定纯函数（行属性输入，无 IO）。"""
+    """ICP 资格判定纯函数（行属性输入，无 IO）。
+
+    website 参与 evaluated 判定：meta_ads 来源无官网 = 没有富化翻案通道，
+    保持 unknown 不做有罪推定（2026-08-31 审计修正，详见模块 docstring）。
+    """
     cn = has_cn_evidence(is_cn=is_cn, country=country, phone_e164=phone_e164)
     overseas = has_overseas_evidence(
         overseas_signals=overseas_signals,
@@ -85,9 +96,10 @@ def compute_icp_status(
     )
     if cn:
         return "qualified" if overseas else "cn_domestic"
-    evaluated = enriched_at is not None or any(
+    meta_ads_seen = any(
         r.get("source") == "meta_ads" for r in (sources or []) if isinstance(r, dict)
     )
+    evaluated = enriched_at is not None or (meta_ads_seen and bool(website))
     return "foreign" if evaluated else "unknown"
 
 
@@ -103,4 +115,5 @@ def compute_icp_status_of(lead: Any) -> str:
         job_signals=getattr(lead, "job_signals", None) or None,
         enriched_at=getattr(lead, "enriched_at", None),
         sources=getattr(lead, "sources", None),
+        website=getattr(lead, "website", None) or None,
     )

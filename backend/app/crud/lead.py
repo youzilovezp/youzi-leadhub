@@ -89,18 +89,24 @@ async def assign_lead(
 
 
 async def release_lead(db: AsyncSession, lead: Lead, *, released_by: int | None = None) -> Lead:
-    """释放回共享池（主管可释放/重新分配 §44）。"""
+    """释放回共享池（主管可释放/重新分配 §44）。
+
+    终态保留（2026-08-31 审计）：won/invalid 不因释放被抹掉——释放一条已成交
+    线索直接回 unassigned 会静默丢失成交记录，且回池后可被重新分配重复跟进。
+    """
     from app.crud.lead_events import add_event
 
     old = lead.owner_id
+    terminal = lead.follow_status in ("won", "invalid")
     lead.owner_id = None
-    lead.follow_status = "unassigned"
+    if not terminal:
+        lead.follow_status = "unassigned"
     add_event(
         db,
         lead,
         "assigned",
         payload={"old": old, "new": None},
-        note=f"释放回共享池（原 #{old}）" if old else "释放回共享池",
+        note=f"释放回共享池（原 #{old}）" + ("，终态保留" if terminal else ""),
         created_by=released_by,
     )
     await db.flush()
@@ -249,7 +255,9 @@ async def _auto_contact_from_draft(db: AsyncSession, lead: Lead, draft: LeadDraf
 
     created = False
     if draft.email:
-        created = (await auto_create_from_email(db, lead, draft.email)) is not None or created
+        created = (
+            await auto_create_from_email(db, lead, draft.email, source=draft.source)
+        ) is not None or created
     for n in (draft.whatsapp_numbers or [])[:3]:
         created = (await auto_create_from_phone(db, lead, n, source=draft.source)) is not None or created
     if created:
@@ -436,9 +444,14 @@ async def _merge_into(
         # 广告累计只增不减
         existing.ad_count = max(existing.ad_count or 0, draft.ad_count)
     if draft.last_ad_at:
-        # 最近投放开始时间取 max（最近还在投 = 持续获客；2026-08-31 巡检接线）
+        # 最近投放开始时间取 max（最近还在投 = 持续获客；2026-08-31 巡检接线）。
+        # SQLite 读回 naive datetime、draft 侧 aware——直接 max 会 TypeError
+        # （2026-08-31 审计：make use-sqlite 下 meta_ads 二次采集合并即崩），比较前归一
+        def _utc(x: datetime) -> datetime:
+            return x if x.tzinfo else x.replace(tzinfo=timezone.utc)
+
         existing.last_ad_at = max(
-            x for x in (existing.last_ad_at, draft.last_ad_at) if x is not None
+            _utc(x) for x in (existing.last_ad_at, draft.last_ad_at) if x is not None
         )
     # 补空成功的字段记数据质量来源（§32）
     for field, value in (
