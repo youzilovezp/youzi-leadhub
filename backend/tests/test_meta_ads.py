@@ -67,11 +67,12 @@ def test_is_company_category():
     assert _is_company_category(None) is True
 
 
-# ---------- 评分（V2 六维）：FB 私域 + 中国出海把出海度拉满 ----------
+# ---------- 评分（v3 加分制）：FB 私域信号需在投证据才构成 CTWA ----------
 
 
 def test_score_fb_whatsapp_signal():
-    total, dims, grade = score_lead_inputs(
+    """fb_whatsapp 无在投证据 → 不构成 CTWA（组合信号）；仅官网 WA +25 → C。"""
+    total, items, grade = score_lead_inputs(
         is_cn=True,
         fb_whatsapp=True,
         country="MY",
@@ -81,20 +82,15 @@ def test_score_fb_whatsapp_signal():
         social={"facebook": "https://facebook.com/acme"},
         phone_raw="+8613800138000",
     )
-    # 出海55（FB私域30+目标区15+官网10——CN 资格由 ICP 门承担，不进出海维）
-    # WA75（FB私域25+hit35+url15） 规模30
-    assert dims["overseas"] == 55
-    assert dims["whatsapp"] == 75
-    assert dims["scale"] == 30
-    # (55*25 + 75*30 + 30*10) / 100 = 39.25 → 39
-    assert total == 39 and grade == "C"
+    assert {it["key"]: it["points"] for it in items} == {"site_whatsapp": 25}
+    assert total == 25 and grade == "C"
 
 
 def test_score_fb_whatsapp_absent_by_default():
     """全空输入 → 0 分 C 级。"""
-    total, dims, grade = score_lead_inputs()
+    total, items, grade = score_lead_inputs()
     assert total == 0 and grade == "C"
-    assert dims == {k: 0 for k in ("overseas", "whatsapp", "saas", "scale", "marketing", "contact")}
+    assert items == []
 
 
 # ---------- 落库：is_cn / fb_whatsapp 布尔 OR 合并 ----------
@@ -121,11 +117,10 @@ async def test_upsert_meta_ads_draft(db_session):
     assert lead.is_cn and lead.fb_whatsapp
     assert lead.phone_e164 == "+8613800138000"  # wa 号码直接可拨
     assert lead.domain == "anker.com"
-    # V2 六维：出海55（CN 资格移交 ICP 门）WA75 规模30 营销40
-    # → (1375+2250+300+400)/100 = 43.25 → 43（B 培育段）
-    assert lead.score == 43
-    assert lead.grade == "B"
-    assert lead.score_signals["overseas"] == 55
+    # v3 加分制：meta_ads 来源在投 + FB 主页挂 WA → CTWA +40；官网 WA 入口 +25 = 65 → A
+    assert lead.score == 65
+    assert lead.grade == "A"
+    assert lead.score_signals == {"ctwa_ad": 40, "site_whatsapp": 25}
     assert lead.sources[0]["source"] == "meta_ads"
 
     # 再来一条无信号的同企业（同 domain 反查命中）→ 布尔保持 True，评分不回退
@@ -133,7 +128,7 @@ async def test_upsert_meta_ads_draft(db_session):
     lead2, created2 = await upsert_lead(db_session, d2)
     await db_session.commit()
     assert not created2 and lead2.id == lead.id
-    assert lead2.is_cn and lead2.fb_whatsapp and lead2.score == 43
+    assert lead2.is_cn and lead2.fb_whatsapp and lead2.score == 65
 
 
 # ---------- 失败路径：无 token 直接 failed（不产出空结果假成功） ----------

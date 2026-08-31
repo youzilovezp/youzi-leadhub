@@ -61,7 +61,11 @@ async def test_create_emits_created_and_contact_events(db_session):
 
 
 async def test_merge_flip_emits_whatsapp_events(db_session):
-    """合并使 whatsapp_hit False→True：发 whatsapp_found + score_change，不发 grade_change（C→C）。"""
+    """合并使 whatsapp_hit False→True：发 whatsapp_found + score_change + grade_change。
+
+    v3 口径：官网 WA +25、在招 WA 岗 +30 = 55 → C 翻 B，grade_change 也发
+    （六维时代该画像 31 分停留 C 段不发）。
+    """
     lead = await _make_lead(db_session, name="Evmerge Sdn Bhd")
     count_before = len(await _events(db_session, lead.id))
 
@@ -88,7 +92,7 @@ async def test_merge_flip_emits_whatsapp_events(db_session):
     assert "social_found" in types
     assert "source_added" in types  # job_posting 新来源
     assert "score_change" in types
-    assert "grade_change" not in types  # C → C 不发
+    assert "grade_change" in types  # 0 → 55 分，C → B
     # payload 结构
     wa = next(e for e in events if e.event_type == "whatsapp_found")
     assert wa.payload["url"] == "https://wa.me/6019998888"
@@ -130,15 +134,14 @@ async def test_contact_crud_and_rescore(db_session):
     await db_session.commit()
     assert contact.seniority == "tier1"
     assert contact.source == "manual"
-    # tier1 联系人 → 联系人维度 70 → 总分上涨
+    # v3 口径：联系人不进意向分（回答「找谁」，进三问），tier1 也不抬分
     await db_session.refresh(lead)
-    assert lead.score > baseline
+    assert lead.score == baseline
     types = [e.event_type for e in await _events(db_session, lead.id)]
     assert "contact_added" in types
-    assert "score_change" in types
-    # grade 可能翻转到 B → 也要有 grade_change
-    if lead.grade != "C":
-        assert "grade_change" in types
+    # 分数没动就不发 score/grade 变化事件
+    assert "score_change" not in types
+    assert "grade_change" not in types
 
     # 同邮箱重复 → 40001
     with pytest.raises(Exception) as exc_info:

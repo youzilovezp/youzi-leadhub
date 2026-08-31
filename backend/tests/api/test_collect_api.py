@@ -59,9 +59,12 @@ async def test_lead_create_merge_and_filters(client, admin_credentials):
     assert len(lead["sources"]) == 1  # 同 source 不重复
 
     # 筛选：关键词 + min_score + has_website=false（P2 修复：false 不再被忽略）
-    # 六维口径下该画像 9 分（出海25×25%+规模20×10%+联系人10×5%），min_score 取 5
+    # v3 口径该画像 0 分（官网/邮箱不进意向分）——min_score=5 排除、min_score=0 含
     r = await client.get("/api/v1/collect/leads", headers=h,
                          params={"keyword": "apico", "min_score": 5})
+    assert not any(i["id"] == lead["id"] for i in r.json()["data"]["items"])
+    r = await client.get("/api/v1/collect/leads", headers=h,
+                         params={"keyword": "apico", "min_score": 0})
     assert any(i["id"] == lead["id"] for i in r.json()["data"]["items"])
     r = await client.get("/api/v1/collect/leads", headers=h, params={"has_website": False})
     assert all(not i["website"] for i in r.json()["data"]["items"])
@@ -187,8 +190,8 @@ async def test_lead_detail_contacts_events_export(client, admin_credentials):
         "email": "hi@profileco.com"})
     lead = r.json()["data"]
     assert lead["grade"] in ("S", "A", "B", "C")
-    assert set(lead["score_signals"]) == {
-        "overseas", "whatsapp", "saas", "scale", "marketing", "contact"}
+    # v3 口径：score_signals = {命中信号键: 分值}，该画像（仅官网/邮箱）无命中信号 → 空
+    assert lead["score_signals"] == {}
 
     # ---- 联系人 CRUD ----
     r = await client.post(f"/api/v1/collect/leads/{lead['id']}/contacts", headers=h,
