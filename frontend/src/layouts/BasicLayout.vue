@@ -21,6 +21,7 @@ import {
   FlashOutline,
   PulseOutline,
   NotificationsOutline,
+  ShieldCheckmarkOutline,
 } from '@vicons/ionicons5'
 import { useUserStore } from '@/stores/user'
 import { useAppStore, THEME_PRESETS } from '@/stores/app'
@@ -55,6 +56,7 @@ const menus: MenuOption[] = [
     children: [
       { label: '数据源管理', key: '/sales', icon: renderIcon(PulseOutline) },
       { label: '高价值预警', key: '/sales/alerts', icon: renderIcon(NotificationsOutline) },
+      { label: '质量抽检', key: '/quality', icon: renderIcon(ShieldCheckmarkOutline) },
     ],
   },
   {

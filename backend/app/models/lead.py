@@ -215,6 +215,40 @@ class LeadSignal(Base):
         return f"<LeadSignal id={self.id} lead_id={self.lead_id} {self.signal_type}={self.value!r}>"
 
 
+class LeadReview(Base):
+    """人工抽检标注（§十二 验证闭环，2026-08-31）。
+
+    度量三个准确率指标的原始数据（每条 = 某人某时对某线索某维度打的判定）：
+    - whatsapp：whatsapp_hit/号码证据是否真实有效（目标 ≥90%）
+    - overseas：qualified 判定是否属实（企业确实在做海外业务，目标 ≥80%）
+    - contact：联系人邮箱/电话是否有效可达（目标 ≥60%）
+    同一 (lead_id, field) 可多次标注（复审），统计取每人最新一条。
+    """
+
+    __tablename__ = "lead_reviews"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    lead_id: Mapped[int] = mapped_column(
+        ForeignKey("leads.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    field: Mapped[str] = mapped_column(String(16), index=True, nullable=False)  # whatsapp/overseas/contact
+    verdict: Mapped[str] = mapped_column(String(16), nullable=False)  # correct/incorrect/unsure
+    note: Mapped[str | None] = mapped_column(String(512))
+    # SET NULL：标注人账号删除后记录保留
+    reviewer_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+        index=True,
+    )
+
+    def __repr__(self) -> str:
+        return f"<LeadReview id={self.id} lead_id={self.lead_id} {self.field}={self.verdict}>"
+
+
 class LeadEvent(Base):
     """线索动态事件（不可变追加；详情页时间线数据源之一）。
 
