@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
@@ -105,6 +106,47 @@ def detect_text_phones(html_list: list[str]) -> list[str]:
     from app.collectors.scenes import page_text
 
     return [m.group(0).strip() for m in _TEXT_PHONE_RE.finditer(page_text(html_list, keep_case=True))]
+
+
+_JSONLD_RE = re.compile(
+    r"<script[^>]*type=[\"\']application/ld\+json[\"\'][^>]*>(.*?)</script>", re.S | re.I
+)
+
+
+def detect_jsonld_contacts(html_list: list[str]) -> dict[str, str]:
+    """schema.org JSON-LD 里声明的联系方式（Organization/LocalBusiness 标准字段）。
+
+    借标准格式而非引库：stdlib json 即可解析（extruct 等结构化库在本项目两个
+    实测失败页面上无联系字段可挖，2026-09-01 验证）。声明即权威——命中时
+    优先于正则启发（网站主自己写的机器可读数据，置信度最高）。
+    """
+    out: dict[str, str] = {}
+    joined = "\n".join(h for h in html_list if h)
+    for block in _JSONLD_RE.finditer(joined):
+        try:
+            data = json.loads(block.group(1).strip())
+        except ValueError:
+            continue
+        items = data if isinstance(data, list) else [data]
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            addr = it.get("address")
+            if isinstance(addr, dict):
+                parts = [addr.get(k) for k in ("streetAddress", "addressLocality", "addressRegion", "addressCountry")]
+                addr_text = " ".join(str(x) for x in parts if x)
+            elif isinstance(addr, str):
+                addr_text = addr
+            else:
+                addr_text = ""
+            for key, val in (
+                ("phone", it.get("telephone")),
+                ("email", it.get("email")),
+                ("address", addr_text),
+            ):
+                if val and isinstance(val, str) and not out.get(key):
+                    out[key] = val.strip()
+    return out
 
 
 def backfill_profile_fields(
@@ -910,6 +952,9 @@ async def _enrich_one(
     whatsapp_hit, whatsapp_url = detect_whatsapp(pages)
     wa_numbers = detect_whatsapp_numbers(pages)
     email = detect_email(pages)
+    # schema.org JSON-LD 声明的联系方式——网站主的机器可读数据，权威度高于正则
+    jsonld = detect_jsonld_contacts(pages)
+    email = email or jsonld.get("email")
     social = detect_social(pages)
     scenes = detect_scenes(pages)
     saas_signals = detect_saas_signals(pages)
@@ -1000,6 +1045,10 @@ async def _enrich_one(
             # 官网含显著中文内容——中文站服务海外市场 = 出海企业
             lead.is_cn = True
             touch_field_meta(lead, "is_cn", "website_enrich", confidence=85, now=now)
+        # JSON-LD 声明的地址优先于正则启发（无标签正文）
+        if not lead.address and jsonld.get("address"):
+            lead.address = jsonld["address"]
+            touch_field_meta(lead, "address", "website_enrich", confidence=95, now=now)
         # 基础画像补全（country/industry/address）——富化只补信号不补画像的空白
         backfill_profile_fields(lead, icp_license=icp_license, pages=pages, now=now)
         if overseas:
@@ -1088,7 +1137,8 @@ async def _enrich_one(
         # 明文国际格式电话（「CONTACT US +86 137 3602 8159」类——2026-09-01 实测
         # mugroup.com：多数联系页不写 tel: 链接，电话就是正文文本）
         text_phones = detect_text_phones(pages)
-        for raw in [*tel_phones, *text_phones]:
+        phone_candidates = [x for x in (jsonld.get("phone"), *tel_phones, *text_phones) if x]
+        for raw in phone_candidates:
             if lead.phone_e164:
                 break
             region = "CN" if (lead.is_cn or (lead.country or "").upper() == "CN") else None

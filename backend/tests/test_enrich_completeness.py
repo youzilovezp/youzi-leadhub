@@ -105,3 +105,24 @@ def test_inner_pages_prioritize_contact_over_product():
     assert "https://tmotest.com/contact/" in inner
     assert inner[0].endswith("/contact/")  # 联系页排第一
     assert len(inner) <= 3
+
+
+def test_detect_jsonld_contacts_schema_org():
+    """JSON-LD 声明即权威（2026-09-01）：网站主写的机器可读联系方式，
+    命中优先于正则启发。注：TMO/mugroup 实测页面无联系字段——本通道
+    覆盖的是「声明了」的站点，零依赖借 schema.org 标准。"""
+    from app.collectors.website_enrich import detect_jsonld_contacts
+
+    html = """
+    <script type="application/ld+json">
+    {"@type": "Organization", "name": "Acme",
+     "telephone": "+86-21-1234-5678", "email": "sales@acme.com",
+     "address": {"streetAddress": "1107 Guangfu West Rd", "addressLocality": "Shanghai",
+                  "addressCountry": "CN"}}
+    </script>
+    """
+    got = detect_jsonld_contacts([html])
+    assert got["phone"] == "+86-21-1234-5678"
+    assert got["email"] == "sales@acme.com"
+    assert "Guangfu West Rd" in got["address"]
+    assert detect_jsonld_contacts(["<p>无结构化数据</p>"]) == {}
