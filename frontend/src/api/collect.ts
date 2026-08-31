@@ -31,6 +31,9 @@ export interface Lead {
   saas_signals: Record<string, number>
   /** 页面出现的全部 WhatsApp 号码（多分线 = 规模化证据，§4.1） */
   whatsapp_numbers: string[]
+  /** 招聘信号细分 {键: {label, points}} + 累计在投广告数（今日商机「为什么值得联系」信号源） */
+  job_signals: Record<string, { label: string; points: number }>
+  ad_count: number
   sources: Array<{ source: string; first_seen: string; last_seen: string }>
   owner_id: number | null
   owner_name: string | null
@@ -136,18 +139,6 @@ export const FOLLOW_STATUS_OPTIONS: Array<{ value: FollowStatus; label: string }
   { value: 'paused', label: '暂不考虑' },
 ]
 
-/** 漏斗阶段顺序（统计/漏斗图口径） */
-export const FUNNEL_STAGES: FollowStatus[] = [
-  'unassigned',
-  'pending',
-  'contacted',
-  'replied',
-  'opportunity',
-  'quote',
-  'negotiation',
-  'won',
-]
-
 /** 状态 → 中文（null=未分配） */
 export function followStatusLabel(v: string | null): string {
   return FOLLOW_STATUS_OPTIONS.find((s) => s.value === v)?.label ?? '未分配'
@@ -225,15 +216,6 @@ export const ICP_STATUS_LABELS: Record<string, string> = {
   foreign: '非中国企业',
   unknown: '待验证',
 }
-
-export const ICP_STATUS_OPTIONS = [
-  { value: '', label: '默认（排除非中国企业）' },
-  { value: 'all', label: '全部（不过滤）' },
-  { value: 'qualified', label: '中国出海' },
-  { value: 'cn_domestic', label: '中国·未出海' },
-  { value: 'foreign', label: '非中国企业' },
-  { value: 'unknown', label: '待验证' },
-]
 
 export interface LeadCreatePayload {
   name: string
@@ -668,6 +650,14 @@ export interface CollectStats {
   due_follow_leads: number
   cn_leads: number
   fb_wa_leads: number
+  /** ICP 四态分布（§2.5 二重门） */
+  icp_counts: Record<IcpStatus, number>
+  /** 管道健康度：采集通道与调度状态（今日商机为空时用于给出原因） */
+  pipeline_health: {
+    meta_ads_ready: boolean
+    scheduler_enabled: boolean
+    qualified_leads: number
+  }
   /** 月度口径（§39） */
   month_new_leads: number
   month_won_count: number
@@ -675,4 +665,12 @@ export interface CollectStats {
 
 export function getStats() {
   return request.get<CollectStats, CollectStats>('/collect/stats')
+}
+
+/** 近 N 日新增线索趋势（dashboard 图，真实数据） */
+export function getLeadTrend(days = 7) {
+  return request.get<
+    Array<{ date: string; total: number; qualified: number }>,
+    Array<{ date: string; total: number; qualified: number }>
+  >('/collect/leads/trend', { params: { days } })
 }

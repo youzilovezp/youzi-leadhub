@@ -205,6 +205,7 @@ async def data_sources_endpoint(db: SessionDep, _user: User = RequireStatsRead):
                 "last_run_at": r[6] if r else None,
                 "status": "active" if (r and r[6]) else "idle",
                 "grade_dist": grade_by_source.get(info["name"], {"S": 0, "A": 0, "B": 0, "C": 0}),
+                "logic_note": info.get("logic_note", ""),
             }
         )
     return ResponseModel(data=out)

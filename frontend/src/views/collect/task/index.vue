@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { h, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, h, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { NButton, NIcon, NProgress, NTag, NTooltip, type DataTableColumns } from 'naive-ui'
+import { NAlert, NButton, NEmpty, NIcon, NProgress, NTag, NTooltip, type DataTableColumns } from 'naive-ui'
 import { HelpCircleOutline } from '@vicons/ionicons5'
 import * as collectApi from '@/api/collect'
 import type { CollectTask, CollectorInfo, CollectorParam, GeoOptions } from '@/api/collect'
@@ -80,6 +80,15 @@ function currentCollector(): CollectorInfo | undefined {
   return collectors.value.find((c) => c.name === form.collector)
 }
 
+/** 新建任务只列「发现类」采集器：网站富化是自动环节，出现手动入口只会造成困惑。
+ *  筛选下拉仍保留全部（能看到自动富化任务）。 */
+const DISCOVERY_COLLECTORS = ['web_search', 'job_posting', 'meta_ads']
+const isDiscovery = computed(() => DISCOVERY_COLLECTORS.includes(form.collector))
+/** 创建对话框的采集器选项（不含 website_enrich——它由系统自动执行） */
+const creatableCollectors = computed(() =>
+  collectors.value.filter(c => DISCOVERY_COLLECTORS.includes(c.name)),
+)
+
 /** 按 param_schema 初始化参数值（default 按 type 反序列化） */
 function initParamForm() {
   const info = currentCollector()
@@ -133,13 +142,24 @@ async function handleCreate() {
     params,
     cron_expr: form.cron_expr || undefined,
   })
-  message.success(task.cron_expr ? '定时任务已创建' : '任务已创建并开始排队执行')
+  if (task.cron_expr) {
+    message.success('定时任务已创建，每次跑完会自动做官网富化')
+  } else {
+    message.success('任务已开始执行，完成后会自动做官网富化（找官网、抓信号、重新评分）')
+  }
   dialogVisible.value = false
   fetchData()
 }
 
 function openCreate() {
-  Object.assign(form, { collector: collectors.value[0]?.name || 'job_posting', name: '', cron_expr: '' })
+  // 默认选 jobui：零配置开箱即用（广告库需先配 token，搜索引擎需挑对关键词）
+  Object.assign(form, {
+    collector:
+      creatableCollectors.value.find(c => c.name === 'job_posting')?.name
+      ?? creatableCollectors.value[0]?.name ?? 'job_posting',
+    name: '',
+    cron_expr: '',
+  })
   initParamForm()
   dialogVisible.value = true
 }
@@ -398,7 +418,20 @@ onUnmounted(() => {
         onChange: handlePageChange,
         onPageSizeChange: handlePageSizeChange,
       }"
-    />
+    >
+      <!-- 依赖关系可视化：流水线四段，发现类完成后自动进下一段 -->
+      <template #empty>
+        <n-empty description="暂无任务">
+          <template #extra>
+            <div style="font-size: 12px; color: #888; line-height: 1.9">
+              采集流水线：🔍 发现线索（搜索引擎 / 招聘监控 / 广告库）<br>
+              → 🔄 自动接力「网站富化」（官网发现 + 信号复核）<br>
+              → ⚖️ ICP 二重门 + 六维评分 → 🔥 今日商机 / 高价值预警
+            </div>
+          </template>
+        </n-empty>
+      </template>
+    </n-data-table>
 
     <n-modal
       v-model:show="dialogVisible"
@@ -413,9 +446,18 @@ onUnmounted(() => {
         <n-form-item label="采集器">
           <n-select
             v-model:value="form.collector"
-            :options="collectors.map((c) => ({ label: c.title, value: c.name }))"
+            :options="creatableCollectors.map((c) => ({ label: c.title, value: c.name }))"
           />
         </n-form-item>
+        <n-alert
+          v-if="isDiscovery"
+          type="success"
+          :bordered="false"
+          style="margin-bottom: 12px"
+        >
+          任务完成后系统会自动做<b>官网富化</b>：补官网、识别 WhatsApp 与出海信号、重新评分——
+          之后线索才会进入销售池排序。
+        </n-alert>
         <n-form-item label="任务名">
           <n-input
             v-model:value="form.name"

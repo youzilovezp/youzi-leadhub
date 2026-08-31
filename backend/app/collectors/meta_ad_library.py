@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import re
 import urllib.parse
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -191,6 +192,20 @@ def _looks_cn(texts: list[str | None]) -> bool:
     return any(t and _CJK_RE.search(t) for t in texts)
 
 
+def _parse_ad_time(raw: Any) -> datetime | None:
+    """ad_delivery_start_time（ISO 8601，可能只有日期）→ 带时区 datetime。
+
+    API 偶发异常值（空串/怪格式）返回 None——投放时间只是画像补充，不挡采集。
+    """
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
 async def _ads_get(
     clients: tuple[httpx.AsyncClient, httpx.AsyncClient], params: dict[str, Any]
 ) -> httpx.Response | None:
@@ -221,6 +236,19 @@ async def _fetch_page(
 class MetaAdsCollector(Collector):
     name = "meta_ads"
     title = "Meta 广告库（出海投放挖掘）"
+    logic_note = (
+        "【抓什么】查 Meta 官方广告资料库（免费）：哪些公司正在向海外投广告、投了几个国家，"
+        "再逐个看广告主的 Facebook 主页——主页上挂 WhatsApp 按钮的，能直接拿到对方的 "
+        "WhatsApp 号码和联系邮箱，是销售建联的第一入口。\n"
+        "【过滤规则】公众人物、自媒体、媒体、政府、学校等非企业主页整条跳过，只留公司。\n"
+        "【准确性】「主页挂 WhatsApp 按钮 + 广告持续在投」= 已在用 WhatsApp 做私域获客的"
+        "可靠信号（广告平台不直接提供按钮数据，这是公认的有效代理口径）。"
+        "凭据缺失或失效时任务直接失败并提示怎么处理，不会假装成功。\n"
+        "【自动接力】任务完成后系统自动执行「网站富化」，对挖到的官网进一步抓场景和需求信号。\n"
+        "【建议节奏】每天定时跑：在投广告数和最近投放时间只增不减，持续在投的公司证据会越来越足。\n"
+        "【使用条件】需要在 backend/.env 配置 META_ADS_ACCESS_TOKEN，"
+        "免费申请：facebook.com/ads/archive/api（只需只读权限，不用投放广告）。"
+    )
     param_schema = [
         {
             "key": "keywords",
@@ -331,8 +359,13 @@ class MetaAdsCollector(Collector):
                             "bodies": [],
                             "ad_count": 0,
                             "countries": [],
+                            "last_ad_at": None,
                         })
                         rec["ad_count"] += 1
+                        # 最近投放开始时间（§4.1 出海画像：广告活跃度的时间维度）
+                        start = _parse_ad_time(ad.get("ad_delivery_start_time"))
+                        if start and (rec["last_ad_at"] is None or start > rec["last_ad_at"]):
+                            rec["last_ad_at"] = start
                         # 累计投放国（ad_reached_countries 是 ISO2 列表）
                         for c in ad.get("ad_reached_countries") or []:
                             cu = str(c).upper()
@@ -379,6 +412,8 @@ class MetaAdsCollector(Collector):
                     target_countries=sorted(rec.get("countries") or []) or list(countries),
                     # 广告信号（§4.1）：本次搜索命中的在投广告数（合并语义取 max）
                     ad_count=int(rec.get("ad_count") or 0),
+                    # 最近投放开始时间（合并取 max——最近还在投 = 持续获客）
+                    last_ad_at=rec.get("last_ad_at"),
                 )
 
                 if probe and rec["page_profile_uri"]:

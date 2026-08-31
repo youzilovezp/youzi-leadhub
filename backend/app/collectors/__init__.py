@@ -24,12 +24,13 @@ def get_collector(name: str) -> Collector | None:
 
 
 def list_collectors() -> list[dict]:
-    """采集器元信息（前端创建任务表单动态渲染）。"""
+    """采集器元信息（前端创建任务表单动态渲染 + 数据源管理页展示爬取逻辑）。"""
     return [
         {
             "name": c.name,
             "title": c.title,
             "params": c.param_schema,
+            "logic_note": getattr(c, "logic_note", "") or "",
         }
         for c in _REGISTRY.values()
     ]

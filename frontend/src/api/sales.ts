@@ -86,6 +86,8 @@ export interface DataSourceStat {
   leads_merged: number
   last_run_at: string | null
   status: 'active' | 'idle'
+  /** 爬取逻辑与循环复核说明（抓什么/怎么滤/准确机制/复核节奏/边界） */
+  logic_note: string
 }
 
 export function getDataSources() {

@@ -26,11 +26,6 @@ FOLLOW_STATUS_OPTIONS: list[dict[str, str]] = [
 ]
 _FOLLOW_STATUS_VALUES = {o["value"] for o in FOLLOW_STATUS_OPTIONS}
 
-# 漏斗阶段顺序（统计口径：从池子到成交）
-FUNNEL_STAGES: list[str] = [
-    "unassigned", "pending", "contacted", "replied", "opportunity", "quote", "negotiation", "won",
-]
-
 
 class LeadCreate(BaseModel):
     """手工录入。"""
@@ -90,6 +85,9 @@ class LeadOut(BaseModel):
     saas_signals: dict[str, int] = {}  # SaaS 需求信号 {键: 命中关键词数}
     # 页面出现的全部 WhatsApp 号码（多分线 = 规模化证据，§4.1）
     whatsapp_numbers: list[str] = []
+    # 招聘信号细分 + 广告数（今日商机页「为什么值得联系」信号 chips 的数据源）
+    job_signals: dict[str, dict[str, Any]] = {}
+    ad_count: int = 0
     sources: list[dict[str, Any]]
     owner_id: int | None
     owner_name: str | None = None  # 跟进人姓名（列表接口批量注入；直接 model_validate 时缺省）
@@ -341,10 +339,6 @@ class ScriptOut(BaseModel):
     generated_by: str = "template"
 
 
-class NlSearchRequest(BaseModel):
-    text: str = Field(min_length=2, max_length=500)
-
-
 # ---------- 任务 ----------
 
 
@@ -423,3 +417,5 @@ class CollectorInfo(BaseModel):
     name: str
     title: str
     params: list[dict[str, Any]]
+    # 爬取逻辑与循环复核说明（数据源管理页展示，口径依据 docs/业务逻辑.md §4）
+    logic_note: str = ""

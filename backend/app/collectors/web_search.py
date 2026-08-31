@@ -51,6 +51,10 @@ _DDGLINK_RE = re.compile(
 )
 _DDGTAG_RE = re.compile(r"<[^>]+>")
 _DDGUDDG_RE = re.compile(r"[?&]uddg=([^&]+)")
+# 下一页链接（class="result__pagination"）里的 s= 偏移——单页 ~10-30 条不满
+# max_results 时按它翻页（2026-08-31：单页只有 ~10 条，20 条配额形同虚设）
+_DDGNEXT_RE = re.compile(r'class="result__pagination"[^>]*href="([^"]+)"')
+_DDG_S_RE = re.compile(r"[?&]s=(\d+)")
 
 
 # 文章/内容页启发词（标题或 URL 路径命中即弃——搜索「whatsapp 客服」类词
@@ -105,24 +109,45 @@ def parse_ddg_html(html: str) -> list[dict[str, Any]]:
     return items
 
 
-def results_to_drafts(items: list[dict[str, Any]], params_is_cn: Any = True) -> list[LeadDraft]:
-    """搜索结果项（{title|name, url|link}）→ 企业官网种子 Draft。
+def _has_cjk(text: str) -> bool:
+    return any("一" <= ch <= "鿿" for ch in text)
 
-    公司名取标题主体（剥 " - 后缀" / " | 后缀"），官网取 URL——
-    后续由 website_enrich 富化补全联系方式与信号。
+
+def drafts_with_stats(
+    items: list[dict[str, Any]], params_is_cn: Any = True
+) -> tuple[list[LeadDraft], dict[str, int]]:
+    """搜索结果项 → (企业官网种子 Draft 列表, 滤因统计)。
+
+    滤因统计供任务日志展示（「10 条结果 → 滤 6 平台域 / 2 内容页 → 2 种子」），
+    操作者能看懂为什么产出少，而不是以为逻辑坏了。
+
+    is_cn 语义（2026-08-31 巡检修 ICP 门完整性）：**参数开 ∧ 标题含中文**才算
+    CN 证据。此前参数开着就盲标——搜英文词（如 whatsapp/whatapps 拼错）时
+    meta.com、gizmodo.com 这类纯海外站也被标成「中国企业」，富化出海外信号
+    后会以 qualified 混进中国出海销售池，击穿 ICP 硬门。收紧后：中文标题
+    （中文关键词搜索的自然结果）→ 中国企业；英文标题 → is_cn=False 留给
+    富化判定（ICP 备案号 / 官网中文 ≥30%），unknown 不做有罪推定。
     """
     drafts: list[LeadDraft] = []
+    stats = {"platform_domain": 0, "article_page": 0, "dup_domain": 0}
     seen_domains: set[str] = set()
-    is_cn = str(params_is_cn).lower() != "false" if isinstance(params_is_cn, str) else bool(params_is_cn)
+    is_cn_param = (
+        str(params_is_cn).lower() != "false" if isinstance(params_is_cn, str) else bool(params_is_cn)
+    )
     for it in items:
         url = (it.get("url") or it.get("link") or "").strip()
         title = (it.get("name") or it.get("title") or "").strip()
-        if not url or not title or not _is_company_site(url):
+        if not url or not title:
+            continue
+        if not _is_company_site(url):
+            stats["platform_domain"] += 1
             continue
         if _looks_like_article(title, url):
-            continue  # 内容页（指南/测评/博客）不是企业官网种子
+            stats["article_page"] += 1  # 内容页（指南/测评/博客）不是企业官网种子
+            continue
         domain = extract_domain(url) or ""
         if not domain or domain in seen_domains:
+            stats["dup_domain"] += 1
             continue
         seen_domains.add(domain)
         # 种子入口归一为站点根：富化从首页开始，内页由链接发现逻辑自己找
@@ -132,9 +157,14 @@ def results_to_drafts(items: list[dict[str, Any]], params_is_cn: Any = True) -> 
                 title = title.split(sep)[0].strip() or title
                 break
         d = LeadDraft(source="web_search", name=title[:255], website=url)
-        d.is_cn = is_cn
+        d.is_cn = is_cn_param and _has_cjk(title)
         drafts.append(d)
-    return drafts
+    return drafts, stats
+
+
+def results_to_drafts(items: list[dict[str, Any]], params_is_cn: Any = True) -> list[LeadDraft]:
+    """drafts_with_stats 的列表形态（官网发现等只取 website 的调用方用）。"""
+    return drafts_with_stats(items, params_is_cn)[0]
 
 
 async def _search(
@@ -148,19 +178,44 @@ async def _search(
     if engine == "duckduckgo":
         err: str | None = None
         for client in clients:
-            try:
-                resp = await client.post(
-                    "https://html.duckduckgo.com/html/",
-                    data={"q": kw, "kl": "wt-wt"},
-                    headers={"User-Agent": _UA, "Referer": "https://duckduckgo.com/"},
-                )
-            except httpx.HTTPError as exc:
-                err = f"DDG 连接失败 {type(exc).__name__}"
+            collected: list[dict[str, Any]] = []
+            seen_urls: set[str] = set()
+            offset = 0
+            # 单页 ~10-30 条；翻页取满 limit（≤4 页，礼貌间隔 0.5s，无下一页即停）
+            for _page in range(4):
+                try:
+                    resp = await client.post(
+                        "https://html.duckduckgo.com/html/",
+                        data={"q": kw, "kl": "wt-wt", "s": offset},
+                        headers={"User-Agent": _UA, "Referer": "https://duckduckgo.com/"},
+                    )
+                except httpx.HTTPError as exc:
+                    err = f"DDG 连接失败 {type(exc).__name__}"
+                    break
+                if resp.status_code != 200:
+                    err = f"DDG {resp.status_code}"
+                    break
+                err = None
+                new = [x for x in parse_ddg_html(resp.text) if x["url"] not in seen_urls]
+                if not new:
+                    break
+                collected.extend(new)
+                seen_urls.update(x["url"] for x in new)
+                if len(collected) >= limit:
+                    break
+                m = _DDGNEXT_RE.search(resp.text)
+                next_s: int | None = None
+                if m:
+                    sm = _DDG_S_RE.search(m.group(1))
+                    next_s = int(sm.group(1)) if sm else None
+                if next_s is None or next_s <= offset:
+                    break
+                offset = next_s
+                await asyncio.sleep(0.5)
+            if collected:
+                return collected[:limit], None
+            if err:
                 continue
-            if resp.status_code != 200:
-                err = f"DDG {resp.status_code}"
-                continue
-            return parse_ddg_html(resp.text)[:limit], None
         return [], err or "DDG 不可达"
 
     if engine == "searxng":
@@ -208,6 +263,19 @@ async def _search(
 class WebSearchCollector(Collector):
     name = "web_search"
     title = "搜索引擎发现（DuckDuckGo / SearxNG）"
+    logic_note = (
+        "【抓什么】用搜索引擎（默认 DuckDuckGo，免费无 key）按关键词找企业官网，"
+        "作为线索种子入库。联系方式和购买意向不在这步判断——由下一步「网站富化」抓官网核实。\n"
+        "【过滤规则】① 电商平台和社交媒体的链接（facebook/amazon/alibaba 等 28 类）不算企业官网；"
+        "② 文章页（指南、测评、博客）丢弃；③ 同一网站只留一条，入口统一为网站首页。\n"
+        "【准确性】只在「结果标题含中文」时才标记为中国企业；英文标题的网站保持待验证，"
+        "等富化抓到 ICP 备案号或中文内容后再认定——避免把海外公司误当中国出海企业。\n"
+        "【自动接力】任务完成后系统自动执行「网站富化」（找官网、抓信号、重新评分），"
+        "一小时内的重复执行会自动跳过。\n"
+        "【关键词怎么填】用中文业务词组（如：whatsapp 客服 跨境电商、外贸 私域运营）。"
+        "只搜 whatsapp 一个词或英文拼错词，结果全是软件下载页，找不到客户。\n"
+        "【边界】搜索只负责发现候选，是否值得跟进由 ICP 准入和评分决定。"
+    )
     param_schema = [
         {
             "key": "keywords",
@@ -268,13 +336,17 @@ class WebSearchCollector(Collector):
                     await ctx.log("error", f"「{kw}」搜索失败：{err}")
                 else:
                     ok_queries += 1
-                    drafts = results_to_drafts(items, ctx.params.get("is_cn", True))
+                    drafts, fstats = drafts_with_stats(items, ctx.params.get("is_cn", True))
                     for d in drafts:
                         await ctx.emit(d)
                     if items:
+                        # 滤因透明化：产出少时操作者能看到是平台域/内容页/同域重复滤掉的
+                        cn_n = sum(1 for d in drafts if d.is_cn)
                         await ctx.log(
                             "info",
-                            f"「{kw}」{len(items)} 条结果 → {len(drafts)} 个企业官网种子（滤平台/社媒域）",
+                            f"「{kw}」{len(items)} 条结果 → {len(drafts)} 个企业官网种子"
+                            f"（滤 平台/社媒域 {fstats['platform_domain']} · 内容页 {fstats['article_page']}"
+                            f" · 同域重复 {fstats['dup_domain']}；标中国企业 {cn_n}）",
                         )
                 ctx.inc_progress(1)
                 await asyncio.sleep(1.0)  # 引擎礼貌间隔

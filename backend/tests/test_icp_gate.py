@@ -27,6 +27,24 @@ def test_compute_icp_status_matrix():
     # 出海证据也认 FB 私域与投放国家
     assert compute_icp_status(is_cn=True, fb_whatsapp=True) == "qualified"
     assert compute_icp_status(is_cn=True, target_countries=["US"]) == "qualified"
+    # 出海证据也认在招海外语义岗（2026-08-31 巡检：jobui 通道无官网企业
+    # 靠 overseas_cs/social_ops/wa_ops 进销售池；crm_ops 不算——不必然出海）
+    assert (
+        compute_icp_status(is_cn=True, job_signals={"overseas_cs": {"label": "海外客服", "points": 20}})
+        == "qualified"
+    )
+    assert (
+        compute_icp_status(is_cn=True, job_signals={"social_ops": {"label": "海外社媒运营", "points": 15}})
+        == "qualified"
+    )
+    assert (
+        compute_icp_status(is_cn=True, job_signals={"wa_ops": {"label": "WhatsApp 运营", "points": 30}})
+        == "qualified"
+    )
+    assert (
+        compute_icp_status(is_cn=True, job_signals={"crm_ops": {"label": "CRM 运营", "points": 12}})
+        == "cn_domestic"
+    )
     # cn_domestic：CN 证据但无出海信号
     assert compute_icp_status(is_cn=True) == "cn_domestic"
     # CN 证据兜底：国家码 CN / +86 号码

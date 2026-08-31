@@ -5,11 +5,12 @@ import { NButton, NTag } from 'naive-ui'
 import type { DataTableColumns, FormInst, FormRules } from 'naive-ui'
 import * as collectApi from '@/api/collect'
 import * as salesApi from '@/api/sales'
-import type { Contact, ContactPayload, LeadDetail } from '@/api/collect'
+import type { Contact, ContactPayload, FollowStatus, LeadDetail } from '@/api/collect'
 import type { AiAnalysis } from '@/api/sales'
 import {
   DIM_LABELS,
   EVENT_TYPE_LABELS,
+  FOLLOW_STATUS_OPTIONS,
   ICP_STATUS_LABELS,
   SAAS_LABELS,
   OVERSEAS_LABELS,
@@ -86,6 +87,52 @@ async function handleRelease() {
   await salesApi.releaseLead(leadId)
   message.success('已释放')
   fetchDetail()
+}
+
+// ---------- 领取 + 跟进（销售在详情页直接可操作，不必回列表页） ----------
+
+const claiming = ref(false)
+const followVisible = ref(false)
+const followSubmitting = ref(false)
+const followForm = reactive({
+  status: 'contacted' as FollowStatus,
+  note: '',
+  /** n-date-picker 的值是时间戳（毫秒），提交时转 ISO */
+  next_follow: null as number | null,
+})
+
+async function handleClaim() {
+  claiming.value = true
+  try {
+    await collectApi.claimLead(leadId)
+    message.success('已领取，请尽快跟进')
+    fetchDetail()
+  } finally {
+    claiming.value = false
+  }
+}
+
+function openFollow() {
+  followForm.status = detail.value?.follow_status ?? 'contacted'
+  followForm.note = ''
+  followForm.next_follow = null
+  followVisible.value = true
+}
+
+async function submitFollow() {
+  followSubmitting.value = true
+  try {
+    await collectApi.followUpLead(leadId, {
+      status: followForm.status,
+      note: followForm.note || undefined,
+      next_follow_at: followForm.next_follow ? new Date(followForm.next_follow).toISOString() : undefined,
+    })
+    message.success('跟进已记录')
+    followVisible.value = false
+    fetchDetail()
+  } finally {
+    followSubmitting.value = false
+  }
 }
 
 // ---------- 联系人 ----------
@@ -411,6 +458,24 @@ onMounted(fetchDetail)
             <div class="flex-1" />
             <span class="owner-label">跟进人：{{ detail.owner_name || '未分配（共享池）' }}</span>
             <n-button
+              v-if="!detail.owner_id"
+              size="small"
+              secondary
+              type="success"
+              :loading="claiming"
+              @click="handleClaim"
+            >
+              领取
+            </n-button>
+            <n-button
+              size="small"
+              secondary
+              type="primary"
+              @click="openFollow"
+            >
+              跟进
+            </n-button>
+            <n-button
               size="small"
               secondary
               @click="openAssign"
@@ -582,7 +647,10 @@ onMounted(fetchDetail)
                   </template>
                   <template v-else>—</template>
                 </span>
-                <template v-for="(vals, key) in detail.overseas_signals" :key="key">
+                <template
+                  v-for="(vals, key) in detail.overseas_signals"
+                  :key="key"
+                >
                   <span class="k">{{ OVERSEAS_LABELS[key] ?? key }}</span>
                   <span>
                     <n-tag
@@ -592,7 +660,10 @@ onMounted(fetchDetail)
                       type="warning"
                       class="mr-1"
                     >{{ v }}</n-tag>
-                    <span v-if="vals.length > 6" class="dim-weight">等 {{ vals.length }} 项</span>
+                    <span
+                      v-if="vals.length > 6"
+                      class="dim-weight"
+                    >等 {{ vals.length }} 项</span>
                   </span>
                 </template>
               </div>
@@ -679,7 +750,13 @@ onMounted(fetchDetail)
                 :key="sig.id"
                 class="signal-row"
               >
-                <n-tag size="small" :bordered="false" class="signal-type">{{ sig.signal_type_label || sig.signal_type }}</n-tag>
+                <n-tag
+                  size="small"
+                  :bordered="false"
+                  class="signal-type"
+                >
+                  {{ sig.signal_type_label || sig.signal_type }}
+                </n-tag>
                 <span class="signal-value">
                   {{ sig.value }}
                   <a
@@ -692,7 +769,10 @@ onMounted(fetchDetail)
                 </span>
                 <span class="dim-weight">{{ sig.confidence }}% · {{ sig.source || '未知来源' }} · {{ formatTime(sig.first_seen) }}</span>
               </div>
-              <div v-if="detail.signals.length > 12" class="dim-weight mt-2">
+              <div
+                v-if="detail.signals.length > 12"
+                class="dim-weight mt-2"
+              >
                 等 {{ detail.signals.length }} 条（按置信度排序，前 12 条）
               </div>
             </n-card>
@@ -787,7 +867,9 @@ onMounted(fetchDetail)
                 v-if="generatedScript"
                 class="script-block"
               >
-                <div class="script-text">{{ generatedScript }}</div>
+                <div class="script-text">
+                  {{ generatedScript }}
+                </div>
                 <div class="flex items-center gap-2 mt-2">
                   <n-button
                     size="tiny"
@@ -1042,6 +1124,61 @@ onMounted(fetchDetail)
                 @click="submitAssign"
               >
                 分配
+              </n-button>
+            </div>
+          </template>
+        </n-modal>
+
+        <!-- 跟进弹窗 -->
+        <n-modal
+          v-model:show="followVisible"
+          preset="card"
+          :title="`跟进 · ${detail.name}`"
+          style="width: 480px"
+        >
+          <n-form
+            label-placement="left"
+            label-width="90"
+          >
+            <n-form-item
+              label="跟进状态"
+              required
+            >
+              <n-select
+                v-model:value="followForm.status"
+                :options="FOLLOW_STATUS_OPTIONS"
+              />
+            </n-form-item>
+            <n-form-item label="跟进备注">
+              <n-input
+                v-model:value="followForm.note"
+                type="textarea"
+                :rows="3"
+                maxlength="2000"
+                show-count
+                placeholder="本次沟通情况，如：已发 WhatsApp，对方明天回复"
+              />
+            </n-form-item>
+            <n-form-item label="下次跟进">
+              <n-date-picker
+                v-model:value="followForm.next_follow"
+                type="datetime"
+                clearable
+                style="width: 100%"
+              />
+            </n-form-item>
+          </n-form>
+          <template #footer>
+            <div class="flex justify-end gap-3">
+              <n-button @click="followVisible = false">
+                取消
+              </n-button>
+              <n-button
+                type="primary"
+                :loading="followSubmitting"
+                @click="submitFollow"
+              >
+                记录跟进
               </n-button>
             </div>
           </template>

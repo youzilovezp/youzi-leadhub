@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
 # ---------- 货币（代码 / 符号） ----------
 # 命中的证据串取「代码」，符号只做辅助确认（$ 太常见，单符号不算证据）。
@@ -216,3 +217,69 @@ def detect_overseas_signals(html_list: list[str | None]) -> dict[str, list[str]]
 def overseas_signal_count(signals: dict[str, list[str]] | None) -> int:
     """出海信号强度：命中类数（0-6），评分维度输入。"""
     return len(signals or {})
+
+
+# ---------- 出海业务类型（PRD §8 出海画像，2026-08-31 巡检接线） ----------
+
+# 行业里的电商语义词（export_type 判定用；与 recommend 的推荐词表口径一致但独立维护——
+# 一个是画像分类，一个是产品推荐条件，耦合后改哪个都会误伤另一个）
+_ECOM_INDUSTRY_TOKENS = (
+    "电商", "零售", "电子", "美妆", "服装", "家居", "玩具", "母婴", "箱包",
+    "e-commerce", "retail", "shopping", "consumer",
+)
+# 海外语义招聘信号（与 icp.OVERSEAS_JOB_KEYS 同口径，本地定义避免 collectors 互相 import）
+_SERVICE_JOB_KEYS = ("overseas_cs", "overseas_sales")
+_MARKETING_JOB_KEYS = ("social_ops", "wa_ops")
+
+
+def derive_export_type(
+    *,
+    industry: str | None = None,
+    overseas_signals: dict[str, list[str]] | None = None,
+    target_countries: list[str] | None = None,
+    job_signals: dict[str, Any] | None = None,
+    sources: list[dict[str, Any]] | None = None,
+) -> str | None:
+    """出海业务类型（跨境电商 / 品牌出海 / 出海服务 / 出海营销），行属性纯函数。
+
+    前置：必须有出海证据（官网信号 / 投放国 / 海外岗 / 在投广告），否则返回
+    None 不硬分类——cn_domestic 与 foreign 行不做画像。优先级：
+    电商栈或电商行业 → 跨境电商；多语言/多市场/在投广告 → 品牌出海；
+    海外客服/海外销售岗 → 出海服务；海外社媒/WA 运营岗 → 出海营销。
+    在 apply_score 与评分/ICP 同点重算，保证与行属性始终一致。
+    """
+    signals = overseas_signals or {}
+    job_keys = set(job_signals or {})
+    source_names = {r.get("source") for r in (sources or []) if isinstance(r, dict)}
+
+    overseas_jobs = job_keys & {*_SERVICE_JOB_KEYS, *_MARKETING_JOB_KEYS}
+    has_reach = (
+        bool(signals)
+        or bool(target_countries)
+        or bool(overseas_jobs)
+        or "meta_ads" in source_names
+    )
+    if not has_reach:
+        return None
+
+    ecommerce_hit = bool(signals.get("ecommerce")) or any(
+        tok in (industry or "").lower() for tok in _ECOM_INDUSTRY_TOKENS
+    )
+    if ecommerce_hit:
+        return "跨境电商"
+
+    market_reach = (
+        len(signals.get("languages") or []) >= 2
+        or len(signals.get("markets") or []) >= 2
+        or len(target_countries or []) >= 2
+        or "meta_ads" in source_names
+        or bool(signals.get("export_words"))
+    )
+    if market_reach:
+        return "品牌出海"
+
+    if job_keys & set(_SERVICE_JOB_KEYS):
+        return "出海服务"
+    if job_keys & set(_MARKETING_JOB_KEYS):
+        return "出海营销"
+    return None

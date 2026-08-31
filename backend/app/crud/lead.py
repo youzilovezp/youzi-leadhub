@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.collectors.base import LeadDraft
+from app.collectors.icp import ICP_STATUS_VALUES, has_cn_evidence
 from app.collectors.normalize import (
     extract_domain,
     make_dedupe_key,
@@ -20,7 +21,6 @@ from app.collectors.normalize import (
     normalize_phone,
 )
 from app.collectors.scoring import apply_score
-from app.collectors.icp import ICP_STATUS_VALUES, has_cn_evidence
 from app.crud.lead_events import rescore_and_log, snapshot_lead
 from app.models.lead import Lead, LeadEvent
 
@@ -227,11 +227,28 @@ async def upsert_lead(db: AsyncSession, draft: LeadDraft) -> tuple[Lead, bool]:
                 )
             )
             await db.flush()
+            await _auto_contact_from_draft(db, lead, draft)
             return lead, True
 
     await _merge_into(db, existing, draft, domain, phone_e164, namecity_key, now)
     await db.flush()
+    await _auto_contact_from_draft(db, existing, draft)
     return existing, False
+
+
+async def _auto_contact_from_draft(db: AsyncSession, lead: Lead, draft: LeadDraft) -> None:
+    """采集器抓到公开邮箱 → 自动生成「待补全」联系人（找谁，核心价值三问之一）。
+
+    与 website_enrich 的 auto_create_from_email 同语义；此前只有富化路径这么做，
+    meta_ads 的邮箱只落 lead.email 列——联系人维恒 0 分、详情页「应该找谁」空白
+    （2026-08-31 巡检）。手工录入不自动生成（用户自己维护联系人表）。
+    """
+    if not draft.email or draft.source == "manual":
+        return
+    from app.crud.contact import auto_create_from_email
+
+    if await auto_create_from_email(db, lead, draft.email):
+        await rescore_and_log(db, lead)  # 联系人维变化 → 重评（可能升分/升级）
 
 
 def _identity_conds(
@@ -292,6 +309,7 @@ def _new_lead(
         overseas_signals=dict(draft.overseas_signals or {}),
         job_signals=dict(draft.job_signals or {}),
         ad_count=draft.ad_count or 0,
+        last_ad_at=draft.last_ad_at,
         sources=[{"source": draft.source, "first_seen": now.isoformat(), "last_seen": now.isoformat()}],
         dedupe_key=dedupe_key,
         namecity_key=namecity_key,
@@ -412,6 +430,11 @@ async def _merge_into(
     if draft.ad_count:
         # 广告累计只增不减
         existing.ad_count = max(existing.ad_count or 0, draft.ad_count)
+    if draft.last_ad_at:
+        # 最近投放开始时间取 max（最近还在投 = 持续获客；2026-08-31 巡检接线）
+        existing.last_ad_at = max(
+            x for x in (existing.last_ad_at, draft.last_ad_at) if x is not None
+        )
     # 补空成功的字段记数据质量来源（§32）
     for field, value in (
         ("website", draft.website),
