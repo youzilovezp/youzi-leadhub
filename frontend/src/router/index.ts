@@ -69,6 +69,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '高价值预警' },
       },
       {
+        path: 'quality',
+        name: 'QualityCenter',
+        component: () => import('@/views/quality/index.vue'),
+        meta: { title: '质量抽检' },
+      },
+      {
         path: 'collect/lead/:id',
         name: 'CollectLeadDetail',
         component: () => import('@/views/collect/lead/detail.vue'),
