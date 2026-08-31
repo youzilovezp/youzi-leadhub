@@ -5,7 +5,7 @@ import { type FormInst, type FormRules } from 'naive-ui'
 import { PersonOutline, LockClosedOutline, ArrowForwardOutline } from '@vicons/ionicons5'
 import { useUserStore } from '@/stores/user'
 import { sanitizeRedirect } from '@/utils/redirect'
-import { message } from '@/utils/feedback'
+import { destroyAllDialogs, message } from '@/utils/feedback'
 import { APP_TITLE } from '@/config'
 
 const router = useRouter()
@@ -36,6 +36,9 @@ const features = [
 
 // 修复：已登录用户访问 /login 应自动跳走，否则会再次提交无效登录请求
 onMounted(() => {
+  // 清残留的全局弹窗（如其他页面 401 弹的「会话过期」）：discrete 弹窗不随
+  // 路由销毁，遮罩会拦截登录按钮的首次点击——实测"首次点击登录不跳转"的根因
+  destroyAllDialogs()
   if (userStore.isLogin) {
     router.replace('/dashboard')
   }

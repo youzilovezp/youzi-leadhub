@@ -40,6 +40,12 @@ function gotoLoginWithRedirect(): void {
 
 function showSessionExpiredDialog() {
   if (authDialogShown) return
+  // 已在登录页（守卫正在踢回/用户主动来登录）：不弹「会话过期」——弹窗是
+  // 全局的、不随路由销毁，会盖在登录表单上拦截首次点击登录（实测 bug）
+  if (window.location.pathname.startsWith('/login')) {
+    localStorage.removeItem(TOKEN_KEY)
+    return
+  }
   authDialogShown = true
   // 用户已确认退出前**不**清 token —— 让当前页面的请求还能跑完，否则会陷入"清掉 → 再 401 → 再弹"的死循环
   try {
