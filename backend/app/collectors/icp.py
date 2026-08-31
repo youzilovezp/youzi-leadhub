@@ -76,6 +76,7 @@ NON_BUYER_DOMAINS: tuple[str, ...] = (
     # 出海媒体/素材站/博客（2026-09-01 实测批次：白鲸出海/出海网/海外网/昵图网/出海匠/个人博客）
     "baijing.cn", "chwang.com", "haiwainet.cn", "nipic.com",
     "chuhaijiang.com", "onexiaobai.com",
+    "kugou.com", "zdic.net",
 )
 
 # 名称词表（域边界锚定不适用于中文，用子串；宁可窄不可误杀正常企业）
