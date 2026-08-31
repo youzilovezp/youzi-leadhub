@@ -217,6 +217,22 @@ SAAS_SIGNALS: list[tuple[str, str, list[str]]] = [
 
 SAAS_LABELS_ZH: dict[str, str] = {key: label for key, label, _ in SAAS_SIGNALS}
 
+# SaaS 买入强度表（单一来源：scoring 的意向分信号与 recommend 的推荐阈值共用）。
+# 含义 = 该工具类目的「买入确定性」：crm/helpdesk 是重采购决策（22），chatbot/AI
+# 是轻量工具（18），wa_bsp 是 WhatsApp SaaS 竞品在用（30，最直接），brand_stack
+# 是通用 SaaS 技术栈指纹（12—— Zendesk/HubSpot/Intercom 等官网 widget 嵌入，
+# 2026-09-01 复核补：此前 0 分导致双栈买家被当单工具用户）。
+SAAS_CATEGORY_POINTS: dict[str, int] = {
+    "crm": 22,
+    "helpdesk": 22,
+    "chatbot": 18,
+    "ai_service": 18,
+    "marketing_automation": 12,
+    "omnichannel": 8,
+    "wa_bsp": 30,
+    "brand_stack": 12,
+}
+
 # 页面文本提取上限（400k 字符，超长截断，防正则回溯拖垮 worker）
 _MAX_TEXT = 400_000
 

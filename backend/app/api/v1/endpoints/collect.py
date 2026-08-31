@@ -133,6 +133,7 @@ async def _fill_lead_list_fields(db: SessionDep, items: list[Lead], outs: list[L
             for r in recommend_products(
                 whatsapp_hit=i.whatsapp_hit,
                 whatsapp_url=i.whatsapp_url,
+                whatsapp_numbers=i.whatsapp_numbers,
                 whatsapp_job=i.whatsapp_job,
                 scenes=i.scenes,
                 saas_signals=i.saas_signals,
@@ -722,6 +723,7 @@ async def get_lead_detail(db: SessionDep, user: CurrentUser, lead_id: int):
     recs = recommend_products(
         whatsapp_hit=lead.whatsapp_hit,
         whatsapp_url=lead.whatsapp_url,
+        whatsapp_numbers=lead.whatsapp_numbers,
         whatsapp_job=lead.whatsapp_job,
         scenes=lead.scenes,
         saas_signals=lead.saas_signals,

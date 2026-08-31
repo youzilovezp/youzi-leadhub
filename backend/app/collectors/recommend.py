@@ -9,19 +9,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.collectors.scenes import SAAS_LABELS_ZH
+from app.collectors.scenes import SAAS_CATEGORY_POINTS, SAAS_LABELS_ZH
 
-# ---------- SaaS 买入强度（只服务推荐阈值，不进意向分主分） ----------
-
-SAAS_CATEGORY_POINTS: dict[str, int] = {
-    "crm": 22,
-    "helpdesk": 22,
-    "chatbot": 18,
-    "ai_service": 18,
-    "marketing_automation": 12,
-    "omnichannel": 8,
-    "wa_bsp": 30,
-}
+__all__ = [
+    "SAAS_CATEGORY_POINTS",  # 从 scenes 重导出：历史 import 方（tests 等）不断
+    "NEED_TYPES",
+    "PRODUCTS",
+    "detect_need_types",
+    "recommend_products",
+    "sales_suggestion",
+]
 
 # ---------- 产品目录（双业务线：WA 消息/SaaS + 广告代理） ----------
 
@@ -73,7 +70,10 @@ def detect_need_types(
     """
     scene_set = set(scenes or [])
     saas = set(saas_signals or {})
-    uses_wa = bool(whatsapp_hit or whatsapp_url)
+    # F3（2026-09-01 深度复核）：WA 使用判定必须含 whatsapp_numbers——
+    # meta_ads 主通道形态 = 官网 whatsapp_hit=False + 主页探测多条号码 +
+    # fb_whatsapp，旧口径把 CTWA 大卖判成「不用 WA」，需求类型 B/C/E 全漏
+    uses_wa = bool(whatsapp_hit or whatsapp_url or whatsapp_numbers)
     multi_line = len(whatsapp_numbers or []) >= 2
     ad_running = any(r.get("source") == "meta_ads" for r in (sources or []))
     using_bsp = "wa_bsp" in saas  # 已在用 WhatsApp SaaS 竞品（§4.1 替换商机）
@@ -111,8 +111,9 @@ def detect_need_types(
 _ECOMMERCE_TOKENS = ("电商", "零售", "电子", "美妆", "服装", "家居", "e-commerce", "retail", "shopping")
 
 
-def _uses_whatsapp(whatsapp_hit: bool, whatsapp_url: str | None) -> bool:
-    return bool(whatsapp_hit or whatsapp_url)
+def _uses_whatsapp(whatsapp_hit: bool, whatsapp_url: str | None, whatsapp_numbers: list[str] | None = None) -> bool:
+    """WA 使用判定（F3）：hit/url/numbers 三口径任一——numbers 覆盖 meta_ads 主页探测形态。"""
+    return bool(whatsapp_hit or whatsapp_url or whatsapp_numbers)
 
 
 def recommend_products(
@@ -124,6 +125,7 @@ def recommend_products(
     saas_signals: dict[str, Any] | None,
     industry: str | None = None,
     sources: list[dict[str, Any]] | None = None,
+    whatsapp_numbers: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """返回 [{key, name, reason, priority(1=最强)}]，按 priority 升序，可为空。
 
@@ -133,7 +135,7 @@ def recommend_products(
     scene_set = set(scenes or [])
     saas = set(saas_signals or {})
     saas_strength = sum(SAAS_CATEGORY_POINTS.get(k, 0) for k in saas)
-    wa = _uses_whatsapp(whatsapp_hit, whatsapp_url)
+    wa = _uses_whatsapp(whatsapp_hit, whatsapp_url, whatsapp_numbers)
     ad_running = any(r.get("source") == "meta_ads" for r in (sources or []))
     recs: list[dict[str, Any]] = []
 

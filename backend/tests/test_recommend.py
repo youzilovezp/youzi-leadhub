@@ -1,6 +1,6 @@
 """产品推荐 & 销售建议规则。"""
 
-from app.collectors.recommend import recommend_products, sales_suggestion
+from app.collectors.recommend import detect_need_types, recommend_products, sales_suggestion
 
 
 def test_rule_wa_customer_service():
@@ -163,3 +163,39 @@ def test_recommend_products_no_dim_saas_param():
         scenes=[], saas_signals={"wa_bsp": 1},
     )
     assert all(r["key"] != "overseas_saas" for r in bsp_only)
+
+
+def test_uses_wa_covers_meta_ads_shape():
+    """F3（2026-09-01 深度复核）：meta_ads 主通道形态 = 官网 whatsapp_hit=False
+    （那是官网口径）+ 主页探测 whatsapp_numbers 多条 + fb_whatsapp。
+    旧 uses_wa 只看 hit/url → CTWA 大卖被判「不用 WA」，需求类型 C/E 全不触发。"""
+    needs = detect_need_types(
+        whatsapp_hit=False,
+        whatsapp_url=None,
+        whatsapp_numbers=["8613800138000", "8613800138001"],
+        sources=[{"source": "meta_ads"}],
+        scenes=["customer_service"],
+        saas_signals={},
+    )
+    types = [n["type"] for n in needs]
+    assert "ads" in types            # 广告线（在投）
+    assert "customer_service" in types  # 多分线 + 客服场景 → 客服需求（旧代码漏）
+
+    recs = recommend_products(
+        whatsapp_hit=False,
+        whatsapp_url=None,
+        whatsapp_job=False,
+        whatsapp_numbers=["8613800138000", "8613800138001"],
+        scenes=["customer_service"],
+        saas_signals={},
+        sources=[{"source": "meta_ads"}],
+    )
+    assert any(r["key"] == "wa_cs" for r in recs)  # F3：numbers 也算「在用 WA」→ 客服 SaaS 推荐不再漏
+
+
+def test_saas_strength_includes_brand_stack():
+    """F5：brand_stack 进强度表——Intercom+HubSpot 双栈（brand_stack+crm）
+    不该只算单工具 22 分。"""
+    from app.collectors.recommend import SAAS_CATEGORY_POINTS
+
+    assert SAAS_CATEGORY_POINTS.get("brand_stack") == 12
