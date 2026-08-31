@@ -5,7 +5,14 @@
 - 证据链词表补 domain_tld
 """
 
-from app.collectors.website_enrich import detect_email, find_inner_page_urls
+from app.collectors.website_enrich import (
+    detect_email,
+    detect_tel_phones,
+    detect_text_phones,
+    detect_whatsapp,
+    detect_whatsapp_numbers,
+    find_inner_page_urls,
+)
 
 _HOME = "<html><body><h1>Acme Corp</h1><p>Welcome to our site.</p></body></html>"
 _CONTACT = (
@@ -53,3 +60,28 @@ def test_signal_label_covers_domain_tld():
     from app.crud.lead_signals import SIGNAL_TYPE_LABELS_ZH
 
     assert SIGNAL_TYPE_LABELS_ZH.get("domain_tld") == "海外域名"
+
+
+def test_detect_whatsapp_web_domain_send_link():
+    """web.whatsapp.com/send?phone= 形态（2026-09-01 实测 mugroup.com 漏检根因：
+    人工放的「通过 WhatsApp 分享」链接是 web. 子域，旧正则只认 api/wp/wa.me，
+    结果 whatsapp_hit=True 却拿不到号码——wa_url/号码/自动联系人全空）。"""
+    html = '<a href="https://web.whatsapp.com/send?phone=8613736028159">WhatsApp</a>'
+    hit, url = detect_whatsapp([html])
+    assert hit is True
+    assert url == "https://wa.me/8613736028159"
+    assert detect_whatsapp_numbers([html]) == ["8613736028159"]
+
+
+def test_detect_text_phones_international_format():
+    """明文国际电话（2026-09-01 实测 mugroup.com：「CONTACT US +86 137 3602 8159」，
+    多数联系页不写 tel: 链接，电话就是正文文本；裸座机号不碰——只认 +区号前缀）。"""
+    html = "<html><body>CONTACT US +86 137 3602 8159 marketing@mu.com</body></html>"
+    assert detect_text_phones([html]) == ["+86 137 3602 8159"]
+    # 无国际前缀的座机形态不产出（误报面大）
+    assert detect_text_phones(["<p>0755-12345678</p>"]) == []
+    assert detect_text_phones(["<p>价格 +86 元起</p>"]) == []
+
+
+def test_detect_tel_phones_still_works():
+    assert detect_tel_phones(['<a href="tel:+8613736028159">Call</a>'])
