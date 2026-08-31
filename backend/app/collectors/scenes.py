@@ -190,6 +190,30 @@ SAAS_SIGNALS: list[tuple[str, str, list[str]]] = [
             "whatsapp business partner",
         ],
     ),
+    # 通用 SaaS 技术栈（PRD §六：Zendesk/HubSpot/Intercom 等）：
+    # 品牌 widget 嵌在 script/link 标签（intercom.io/zdassets/hs-scripts），
+    # page_text 剥 script 后无痕——与 wa_bsp 同走 raw HTML 指纹匹配。
+    # 命中 = 该公司在为海外客服/营销买 SaaS 工具（"应该卖什么"的强素材）
+    (
+        "brand_stack",
+        "通用 SaaS 技术栈",
+        [
+            "intercom",
+            "gorgias",
+            "zdassets",       # Zendesk widget CDN
+            "zendesk",
+            "hubspot",
+            "hs-scripts",     # HubSpot 埋点
+            "salesforce",
+            "zoho",
+            "freshdesk",
+            "crisp.chat",
+            "tawk.to",
+            "livechat",
+            "livechatinc",
+            "drift",
+        ],
+    ),
 ]
 
 SAAS_LABELS_ZH: dict[str, str] = {key: label for key, label, _ in SAAS_SIGNALS}
@@ -256,7 +280,7 @@ def detect_saas_signals(html_list: list[str] | None) -> dict[str, int]:
         for kw in keywords:
             if text and _keyword_hit(text, kw):
                 count += 1
-            elif key == "wa_bsp" and kw in raw:
+            elif key in ("wa_bsp", "brand_stack") and kw in raw:
                 # 品牌词足够独特（wati.io/360dialog/gupshup…），raw 子串命中
                 count += 1
         if count:

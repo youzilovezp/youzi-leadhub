@@ -73,3 +73,18 @@ def test_page_text_empty_inputs():
     assert page_text([]) == ""
     assert detect_scenes(None) == []
     assert detect_saas_signals([]) == {}
+
+
+def test_detect_brand_stack_in_raw_html():
+    """品牌 widget 嵌在 script 标签里（正文剥掉后无痕），必须在 raw HTML 命中。"""
+    html = """<html><body>Our shop
+    <script src="https://widget.intercom.io/widget/abc123"></script>
+    <script src="https://static.zdassets.com/ekr/snippet.js"></script>
+    </body></html>"""
+    hits = detect_saas_signals([html])
+    assert "brand_stack" in hits
+
+
+def test_brand_stack_not_matched_by_plain_text_brand_words():
+    """正文里没有品牌词、raw 里也没有 → 不命中（空页面不误报）。"""
+    assert "brand_stack" not in detect_saas_signals(["<p>we sell shoes</p>"])
