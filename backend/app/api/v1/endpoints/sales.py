@@ -80,12 +80,14 @@ async def list_alerts(
 ):
     scope_owner_ids, _ = await scope_filter_params(db, user)
     scope_cond = _lead_scope_cond(Lead, scope_owner_ids)
+    # ICP 门内才预警（2026-08-31 验证轮：foreign 企业的 WA 发现不该进销售视野）
+    icp_cond = Lead.icp_status != "foreign"
     stmt = select(LeadEvent, Lead.name, Lead.grade).join(Lead, LeadEvent.lead_id == Lead.id).where(
-        LeadEvent.is_alert
+        LeadEvent.is_alert, icp_cond
     )
     count_stmt = select(func.count()).select_from(LeadEvent).join(
         Lead, LeadEvent.lead_id == Lead.id
-    ).where(LeadEvent.is_alert)
+    ).where(LeadEvent.is_alert, icp_cond)
     if scope_cond is not None:
         stmt = stmt.where(scope_cond)
         count_stmt = count_stmt.where(scope_cond)
