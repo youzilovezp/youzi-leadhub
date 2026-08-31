@@ -71,3 +71,9 @@ export function dialogWarning(o: DialogOptions & { onPositive?: () => void; onCl
     onClose: o.onClose,
   })
 }
+
+/** 销毁全部全局弹窗（discrete API 的 dialog 不随路由卸载——切到登录页时
+ * 清残留的「会话过期」弹窗，否则其遮罩会拦截登录按钮的首次点击） */
+export function destroyAllDialogs() {
+  if (api) api.dialog.destroyAll()
+}
