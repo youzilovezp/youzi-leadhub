@@ -11,7 +11,6 @@ import {
   EVENT_TYPE_LABELS,
   FOLLOW_STATUS_OPTIONS,
   ICP_STATUS_LABELS,
-  SAAS_LABELS,
   OVERSEAS_LABELS,
   SCENE_LABELS,
   SENIORITY_LABELS,
@@ -288,6 +287,13 @@ function bonusTagType(points: number): 'error' | 'warning' | 'default' {
   return 'default'
 }
 
+// ---------- 销售三问（为什么需要你/应该卖什么/应该找谁） ----------
+
+/** 打开三问证据链接（`<script setup>` 模板里不能直接用 window） */
+function openEvidence(url?: string | null) {
+  if (url) window.open(url, '_blank')
+}
+
 // ---------- 字段级数据质量（§32） ----------
 
 const FIELD_LABELS: Record<string, string> = {
@@ -495,7 +501,7 @@ onMounted(fetchDetail)
             <!-- 意向分明细（v3 加分制主分：信号级可解释） -->
             <n-card
               size="small"
-              title="意向分构成（加分制）"
+              title="意向分构成"
             >
               <template #header-extra>
                 <n-tag size="small">
@@ -524,7 +530,7 @@ onMounted(fetchDetail)
                 暂无命中信号（跑一轮富化/采集后产生）
               </div>
               <div class="bonus-note">
-                加分制主分：命中信号分值直接相加，每 1 分可溯源到一条证据
+                每 1 分对应一条可核查证据，分值表见数据源管理页
               </div>
             </n-card>
 
@@ -774,20 +780,20 @@ onMounted(fetchDetail)
               size="small"
               title="SaaS 需求"
             >
-              <template v-if="Object.keys(detail.saas_signals).length">
-                <div
-                  v-for="(count, key) in detail.saas_signals"
-                  :key="key"
-                  class="saas-row"
-                >
-                  <span class="dim-label">{{ SAAS_LABELS[key] ?? key }}</span>
-                  <n-rate
-                    :value="Math.min(5, count + 2)"
-                    readonly
-                    allow-half
-                    class="saas-rate"
-                  />
-                  <span class="dim-weight">命中 {{ count }} 个关键词</span>
+              <template v-if="detail.three_questions.what.saas_signals.length">
+                <div class="flex flex-wrap gap-1">
+                  <n-tag
+                    v-for="s in detail.three_questions.what.saas_signals"
+                    :key="s"
+                    size="small"
+                    type="info"
+                    :bordered="false"
+                  >
+                    {{ s }}
+                  </n-tag>
+                </div>
+                <div class="bonus-note">
+                  命中关键词越多需求越强，分值表见数据源管理页
                 </div>
               </template>
               <div
@@ -942,6 +948,105 @@ onMounted(fetchDetail)
                 size="small"
                 :scroll-x="760"
               />
+            </n-card>
+
+            <!-- 销售三问（PRD 核心价值：开聊前先答为什么需要你/应该卖什么/应该找谁） -->
+            <n-card
+              size="small"
+              title="销售三问"
+            >
+              <template #header-extra>
+                <n-tag
+                  size="small"
+                  :bordered="false"
+                  :type="detail.three_questions.complete ? 'success' : 'warning'"
+                >
+                  {{ detail.three_questions.complete ? '三问齐备' : '待补全' }}
+                </n-tag>
+              </template>
+              <n-descriptions
+                :column="3"
+                bordered
+                size="small"
+              >
+                <n-descriptions-item label="为什么需要你">
+                  <div
+                    v-for="w in detail.three_questions.why"
+                    :key="w.key"
+                    class="tq-why-row"
+                  >
+                    <n-tag
+                      size="small"
+                      type="success"
+                      :bordered="false"
+                    >
+                      +{{ w.points }}
+                    </n-tag>
+                    <span>{{ w.label }}</span>
+                    <n-button
+                      v-if="w.evidence_url"
+                      text
+                      type="primary"
+                      size="tiny"
+                      @click="openEvidence(w.evidence_url)"
+                    >
+                      证据
+                    </n-button>
+                  </div>
+                  <div
+                    v-if="!detail.three_questions.why.length"
+                    class="empty-hint"
+                  >
+                    暂无命中信号
+                  </div>
+                </n-descriptions-item>
+                <n-descriptions-item label="应该卖什么">
+                  <div
+                    v-for="p in detail.three_questions.what.products"
+                    :key="p.key"
+                  >
+                    {{ p.name }}
+                  </div>
+                  <div
+                    v-if="detail.three_questions.what.scenes.length"
+                    class="dim-weight"
+                  >
+                    场景：{{ detail.three_questions.what.scenes.join('、') }}
+                  </div>
+                  <div
+                    v-if="!detail.three_questions.what.products.length"
+                    class="empty-hint"
+                  >
+                    暂无推荐
+                  </div>
+                </n-descriptions-item>
+                <n-descriptions-item label="应该找谁">
+                  <template
+                    v-if="detail.three_questions.who.contacts.length || detail.three_questions.who.whatsapp_numbers.length"
+                  >
+                    <div
+                      v-for="c in detail.three_questions.who.contacts"
+                      :key="c.email || c.name"
+                      class="tq-who-row"
+                    >
+                      {{ c.name }}{{ c.title ? `（${c.title}）` : '' }} {{ c.email }}
+                    </div>
+                    <div
+                      v-for="n in detail.three_questions.who.whatsapp_numbers"
+                      :key="n"
+                      class="tq-who-row"
+                    >
+                      WA：{{ n }}
+                    </div>
+                  </template>
+                  <div
+                    v-else
+                    class="dim-weight"
+                  >
+                    建议找：{{ detail.three_questions.who.roles.map((r) => r.role).join(' / ') }}
+                  </div>
+                </n-descriptions-item>
+              </n-descriptions>
             </n-card>
 
             <n-card
@@ -1209,11 +1314,6 @@ onMounted(fetchDetail)
   color: var(--yz-primary, #2080f0);
   word-break: break-all;
 }
-.dim-label {
-  width: 108px;
-  flex-shrink: 0;
-  font-size: 13px;
-}
 .dim-weight {
   color: var(--yz-text-secondary, #999);
   font-size: 12px;
@@ -1274,14 +1374,21 @@ onMounted(fetchDetail)
   word-break: break-all;
 }
 
-.saas-row {
+/* 销售三问：why 行 = +分 tag + 标签 + 证据链接（可换行）；who 行逐条列 */
+.tq-why-row {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 4px 0;
+  flex-wrap: wrap;
+  gap: 4px;
+  font-size: 12px;
 }
-.saas-rate {
-  flex: 1;
+.tq-why-row + .tq-why-row {
+  margin-top: 4px;
+}
+.tq-who-row {
+  font-size: 12px;
+  line-height: 1.7;
+  word-break: break-all;
 }
 .ai-block {
   font-size: 13px;

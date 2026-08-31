@@ -67,7 +67,7 @@ const query = reactive({
   owner_id: null as number | null,
   due_follow: false,
   is_cn: false,
-  /** ICP 二重门筛选：null=默认（排除非中国企业） */
+  /** ICP 二重门+买家门筛选：null=默认（排除非中国企业与非目标买家） */
   icp: null as IcpStatus | 'all' | null,
 })
 
@@ -78,10 +78,10 @@ function whatsappFilter(): boolean | undefined {
   return !query.whatsapp ? undefined : query.whatsapp === 'hit'
 }
 
-/** ICP 二重门筛选项（null=默认排除非中国企业，见后端 icp 参数） */
+/** ICP 二重门+买家门筛选项（null=默认排除非中国企业与非目标买家，见后端 icp 参数） */
 const icpFilterOptions = [
   { label: '全部（不过滤）', value: 'all' },
-  ...(['qualified', 'cn_domestic', 'foreign', 'unknown'] as const).map((v) => ({
+  ...(['qualified', 'cn_domestic', 'foreign', 'non_buyer', 'unknown'] as const).map((v) => ({
     label: ICP_STATUS_LABELS[v] ?? v,
     value: v,
   })),
@@ -455,8 +455,8 @@ const columns: DataTableColumns<Lead> = [
         row.whatsapp_job
           ? h(NTag, { size: 'small', type: 'warning', style: 'margin-left:4px' }, { default: () => '在招' })
           : null,
-        // ICP 二重门资格标：qualified=出海（默认口径）/ cn_domestic=国内待培育 /
-        // foreign=非中国企业（默认列表已排除，显式筛才见）
+        // ICP 二重门+买家门资格标：qualified=出海（默认口径）/ cn_domestic=国内待培育 /
+        // foreign=非中国企业、non_buyer=非目标买家（默认列表已排除，显式筛才见）
         row.icp_status === 'qualified'
           ? h(NTag, { size: 'small', bordered: false, style: 'margin-left:4px' }, { default: () => '出海' })
           : null,
@@ -465,6 +465,9 @@ const columns: DataTableColumns<Lead> = [
           : null,
         row.icp_status === 'foreign'
           ? h(NTag, { size: 'small', bordered: false, type: 'error', style: 'margin-left:4px' }, { default: () => '非中国企业' })
+          : null,
+        row.icp_status === 'non_buyer'
+          ? h(NTag, { size: 'small', bordered: false, type: 'error', style: 'margin-left:4px' }, { default: () => '非目标买家' })
           : null,
       ]),
   },
@@ -833,7 +836,7 @@ onUnmounted(() => {
           :options="icpFilterOptions"
           clearable
           size="small"
-          placeholder="ICP：默认排除非中国企业"
+          placeholder="ICP：默认排除非中国企业与非目标买家"
           style="width: 190px"
         />
         <n-button

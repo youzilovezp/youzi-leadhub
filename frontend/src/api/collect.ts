@@ -22,7 +22,7 @@ export interface Lead {
   job_urls: string[]
   enriched_at: string | null
   score: number
-  /** v3 意向分 {命中信号键: 分值} */
+  /** v3 意向分 {命中信号键: 分值}（score_breakdown.items 是同一事实的明细形态） */
   score_signals: Record<string, number>
   grade: Grade
   /** WhatsApp 场景（website_enrich 关键词检测） */
@@ -41,7 +41,7 @@ export interface Lead {
   last_followed_at: string | null
   next_follow_at: string | null
   is_cn: boolean
-  /** ICP 二重门：qualified=中国出海 / cn_domestic=中国·未出海 / foreign=非中国企业 / unknown=待验证 */
+  /** ICP 二重门+买家门：qualified=中国出海 / cn_domestic=中国·未出海 / foreign=非中国企业 / non_buyer=非目标买家 / unknown=待验证 */
   icp_status: IcpStatus
   fb_whatsapp: boolean
   /** 投放/目标国家（meta_ads 累计，§8） */
@@ -53,11 +53,13 @@ export interface Lead {
   /** 有决策层联系人（CEO/总经理等）——「找谁」的第一答案 */
   has_tier1: boolean
   recommended_products: string[]
+  /** 五类目标行业组键（读取时派生；展示名映射见后端 industry_labels.INDUSTRY_GROUP_LABELS_ZH，空=未归类） */
+  industry_group: string
   created_at: string
   updated_at: string
 }
 
-/** 等级（意向分：80+=S 60-79=A 40-59=B <40=C） */
+/** 等级（意向分 v3：80+=S 60-79=A 40-59=B <40=C） */
 export type Grade = 'S' | 'A' | 'B' | 'C'
 
 export const GRADE_OPTIONS: Array<{ value: Grade; label: string }> = [
@@ -195,17 +197,18 @@ export interface LeadQuery {
   due_follow?: boolean
   /** 只看中国出海企业 */
   is_cn?: boolean
-  /** ICP 资格筛选：缺省=排除非中国企业；all=不过滤 */
+  /** ICP 资格筛选：缺省=排除非中国企业与非目标买家；all=不过滤 */
   icp?: IcpStatus | 'all'
 }
 
-/** ICP 二重门资格（后端 collectors/icp.py 同口径） */
-export type IcpStatus = 'qualified' | 'cn_domestic' | 'foreign' | 'unknown'
+/** ICP 二重门+买家门资格（后端 collectors/icp.py 同口径） */
+export type IcpStatus = 'qualified' | 'cn_domestic' | 'foreign' | 'non_buyer' | 'unknown'
 
 export const ICP_STATUS_LABELS: Record<string, string> = {
   qualified: '中国出海',
   cn_domestic: '中国·未出海',
   foreign: '非中国企业',
+  non_buyer: '非目标买家',
   unknown: '待验证',
 }
 
@@ -314,6 +317,25 @@ export interface SignalEvidence {
   stale_days: number | null
 }
 
+/** 销售三问（PRD 核心价值：为什么需要你 / 应该卖什么 / 应该找谁；后端 intent.build_three_questions 组装） */
+export interface ThreeQuestions {
+  why: Array<{ key: string; label: string; points: number; evidence_url?: string | null }>
+  what: {
+    need_types: Array<{ type: string; label: string; selling: string }>
+    products: Array<{ key: string; name: string; reason: string; priority: number }>
+    scenes: string[]
+    saas_signals: string[]
+  }
+  who: {
+    contacts: Array<{ name: string; title?: string | null; seniority?: string | null; email?: string | null }>
+    whatsapp_numbers: string[]
+    whatsapp_url?: string | null
+    roles: Array<{ role: string; hint: string }>
+  }
+  /** 齐备度：why≥2 证据 ∧ what≥1 产品 ∧ who 有任一答案（今日商机只收齐备行） */
+  complete: boolean
+}
+
 export interface LeadDetail extends Lead {
   /** CN 证据强度：strong=硬证据 / weak=仅 CJK 启发式（待核验）/ 空=非 CN */
   cn_evidence: string
@@ -337,6 +359,8 @@ export interface LeadDetail extends Lead {
   signals: SignalEvidence[]
   /** 加分制明细（§五 MVP 口径）：{total, items}——items 只含命中项 [{key,label,points}] */
   score_breakdown: { total: number; items: Array<{ key: string; label: string; points: number }> }
+  /** 三问（为什么需要你/应该卖什么/应该找谁/齐备度） */
+  three_questions: ThreeQuestions
   /** WhatsApp Business 账号（号码级验证命中） */
   wa_business: boolean
 }
@@ -465,13 +489,16 @@ export interface DailyAlertItem {
   created_at: string
 }
 
+/** 今日商机行（LeadOut + 后端逐行挂载的 three_questions；不齐备的行已被后端过滤） */
+export type DailyBatchRow = Lead & { three_questions?: ThreeQuestions }
+
 /** 今日商机批次（业务主线：销售每天直接收到一批值得联系的客户） */
 export interface DailyBatch {
   date: string
   /** 今日新晋 S/A（grade_change 事件触发） */
-  promoted: Lead[]
+  promoted: DailyBatchRow[]
   /** 今日新增高分商机（qualified 且 ≥60 分，与 promoted 不重叠） */
-  new_leads: Lead[]
+  new_leads: DailyBatchRow[]
   /** 今日高价值预警事件 */
   alerts: DailyAlertItem[]
 }
