@@ -192,6 +192,68 @@ DEMO_USERS = [
 ]
 
 
+async def seed_business_data() -> None:
+    """业务种子（2026-08-31，导出自 dev 库）：其他电脑首次启动导入。
+
+    只初始化一次：leads 表非空直接跳过——已有任何线索的库（跑过采集/
+    导入过种子）绝不触碰；导入走 upsert_lead（与采集器同路径），dedupe_key/
+    评分/ICP 状态在新机器上自动重算。cron 采集任务按 collector 判存在。
+    """
+    from sqlalchemy import func as sa_func
+
+    from app.collectors.base import LeadDraft
+    from app.crud.lead import upsert_lead
+    from app.db.seed_data import SEED_LEAD_COUNT, SEED_PAYLOAD
+    from app.models.collect_task import CollectTask
+    from app.models.lead import Lead
+
+    async with async_session() as session:
+        existing = (
+            await session.execute(select(sa_func.count()).select_from(Lead))
+        ).scalar_one()
+        if existing > 0:
+            logger.info(f"⏭️  业务种子跳过：leads 已有 {existing} 条（只初始化一次）")
+            return
+
+        from datetime import datetime, timezone
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        created = merged = 0
+        for row in SEED_PAYLOAD["leads"]:
+            sources = row.get("sources") or ["seed_import"]
+            payload = {k: v for k, v in row.items() if k != "sources"}
+            draft = LeadDraft(source=sources[0], **payload)
+            lead, is_new = await upsert_lead(session, draft)
+            # 多来源行（历史上 jobui 与种子合并过）直接追加来源记录——
+            # 不再走第二次 upsert（空 draft 会造出重复行）
+            recs = list(lead.sources or [])
+            for extra in sources[1:]:
+                if not any(r.get("source") == extra for r in recs):
+                    recs.append({"source": extra, "first_seen": now_iso, "last_seen": now_iso})
+            if len(recs) != len(lead.sources or []):
+                lead.sources = recs
+            created += int(is_new)
+            merged += int(not is_new)
+        await session.commit()
+        logger.info(f"🌱 业务种子导入：{created} 新建 / {merged} 合并（共 {SEED_LEAD_COUNT} 条）")
+
+        # cron 采集任务：同 collector 已有任务则不重建
+        for t in SEED_PAYLOAD.get("tasks", []):
+            stmt = select(CollectTask).where(CollectTask.collector == t["collector"])
+            if (await session.execute(stmt)).scalar_one_or_none() is not None:
+                continue
+            session.add(
+                CollectTask(
+                    name=t["name"],
+                    collector=t["collector"],
+                    params=t.get("params") or {},
+                    cron_expr=t.get("cron_expr"),
+                )
+            )
+        await session.commit()
+        logger.info("🌱 采集任务种子完成（按 collector 判存在）")
+
+
 async def create_initial_data() -> None:
     """插入种子数据：PRD 五角色（含权限码）+ 1 管理员 + 3 demo 用户。
 
@@ -360,3 +422,9 @@ async def init_db() -> None:
             await create_initial_data()
         except Exception as exc:
             logger.warning(_diag_once(_diagnose_alembic_error(f"初始数据写入失败 {type(exc).__name__}: {exc}")))
+
+        # 业务种子（2026-08-31）：中国企业出海线索 + 采集任务，仅空库导入一次
+        try:
+            await seed_business_data()
+        except Exception as exc:
+            logger.warning(f"⚠️ 业务种子导入失败（不影响启动）：{type(exc).__name__}: {exc}")
