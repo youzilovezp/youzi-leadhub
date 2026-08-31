@@ -59,3 +59,41 @@ INDUSTRY_LABELS_ZH: dict[str, str] = {
     "fitness_centre": "健身房", "sports_centre": "运动中心", "fitness_station": "健身角", "dance": "舞蹈中心",
     "amusement_arcade": "游戏厅", "escape_game": "密室逃脱", "bowling_alley": "保龄球馆",
 }
+
+
+# ---------- PRD §二 五类目标行业（spec §四白名单映射；归类标签不是 ICP 硬门） ----------
+
+INDUSTRY_GROUPS: dict[str, tuple[str, ...]] = {
+    # 组键 → （industry token / 公司名子串，大小写不敏感）
+    # 注意：不用裸「跨境」——跨境物流/货代会被抢先误归电商；组间按插入顺序首匹配
+    "cross_border_ecom": ("跨境电商", "电商", "e-commerce", "ecommerce", "retail", "shopping",
+                          "独立站", "品牌出海"),
+    "game_app": ("游戏", "game", "gaming", "移动应用", "出海app"),
+    "manufacturing": ("制造", "工厂", "factory", "工业", "器械", "设备", "汽配", "新能源"),
+    "overseas_service": ("货代", "物流", "freight", "logistics", "营销", "广告", "advertising",
+                         "客服外包", "外包", "consulting", "咨询"),
+    "overseas_saas": ("saas", "软件", "software", "科技", "technology", "互联网"),
+}
+
+INDUSTRY_GROUP_LABELS_ZH: dict[str, str] = {
+    "cross_border_ecom": "跨境电商/品牌DTC",
+    "game_app": "出海游戏/App",
+    "manufacturing": "制造业出海",
+    "overseas_service": "出海服务",
+    "overseas_saas": "出海SaaS",
+}
+
+
+def industry_group_of(industry: str | None, name: str | None = None) -> str:
+    """行业 token / 公司名 → 五类目标行业组键（命中多个取先匹配的；不命中返回 ""）。
+
+    只是归类展示标签（销售按行业看名单），不是 ICP 硬门——industry 常缺失，
+    硬门会杀召回；买家排除只走 is_non_buyer 黑名单。
+    """
+    text = f"{industry or ''} {name or ''}".lower()
+    if not text.strip():
+        return ""
+    for group, tokens in INDUSTRY_GROUPS.items():
+        if any(t.lower() in text for t in tokens):
+            return group
+    return ""

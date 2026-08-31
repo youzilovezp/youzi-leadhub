@@ -95,7 +95,7 @@ class CareerSiteCollector(Collector):
             "label": "每轮巡检企业数",
             "required": False,
             "type": "number",
-            "placeholder": "按分数倒序取前 N 家（有官网、非 foreign）",
+            "placeholder": "按分数倒序取前 N 家（有官网、ICP 门内）",
             "default": "20",
         },
         {
@@ -129,14 +129,18 @@ class CareerSiteCollector(Collector):
             rows = (
                 await s.execute(
                     select(Lead.id, Lead.name, Lead.website, Lead.city, Lead.country, Lead.is_cn)
-                    .where(Lead.website.is_not(None), Lead.website != "", Lead.icp_status != "foreign")
+                    .where(
+                        Lead.website.is_not(None),
+                        Lead.website != "",
+                        Lead.icp_status.notin_(("foreign", "non_buyer")),
+                    )
                     .order_by(Lead.score.desc(), Lead.id)
                     .offset(skip)
                     .limit(limit)
                 )
             ).all()
         if not rows:
-            await ctx.log("info", "没有符合条件的线索（需有官网且非 foreign）")
+            await ctx.log("info", "没有符合条件的线索（需有官网且在 ICP 门内）")
             return
         ctx.set_total(len(rows))
         await ctx.log("info", f"待巡检企业 {len(rows)} 家（score 倒序，跳过前 {skip}）")

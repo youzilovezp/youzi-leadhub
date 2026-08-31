@@ -19,7 +19,8 @@ from sqlalchemy import select, tuple_
 from app.api.deps import CurrentUser, SessionDep, SuperUser
 from app.api.perms import lead_visible, require_permission, scope_filter_params
 from app.collectors import list_collectors
-from app.collectors.icp import ICP_STATUS_LABELS_ZH
+from app.collectors.icp import ICP_STATUS_LABELS_ZH, ICP_STATUS_VALUES
+from app.collectors.industry_labels import industry_group_of
 from app.collectors.recommend import detect_need_types, recommend_products, sales_suggestion
 from app.collectors.scenes import SAAS_LABELS_ZH, SCENE_LABELS_ZH
 from app.core.config import settings
@@ -125,6 +126,7 @@ async def _fill_lead_list_fields(db: SessionDep, items: list[Lead], outs: list[L
         o.owner_name = name_map.get(i.owner_id)
         o.contacts_count = counts.get(i.id, 0)
         o.has_tier1 = i.id in tier1_ids
+        o.industry_group = industry_group_of(i.industry, i.name)
         o.recommended_products = [
             r["name"]
             for r in recommend_products(
@@ -159,8 +161,8 @@ async def list_leads(
     is_cn: bool | None = None,
     icp: str | None = Query(
         default=None,
-        pattern="^(qualified|cn_domestic|foreign|unknown|all)$",
-        description="ICP 资格：缺省=排除非中国企业；all=不过滤",
+        pattern="^(qualified|cn_domestic|foreign|non_buyer|unknown|all)$",
+        description="ICP 资格：缺省=排除非中国企业与非目标买家；all=不过滤",
     ),
 ):
     # 数据权限（§43）：own/team 级强制限定可见 owner，接口层无旁路
@@ -321,8 +323,8 @@ async def export_leads(
     is_cn: bool | None = None,
     icp: str | None = Query(
         default=None,
-        pattern="^(qualified|cn_domestic|foreign|unknown|all)$",
-        description="ICP 资格：缺省=排除非中国企业；all=不过滤（与列表同口径）",
+        pattern="^(qualified|cn_domestic|foreign|non_buyer|unknown|all)$",
+        description="ICP 资格：缺省=排除非中国企业与非目标买家；all=不过滤（与列表同口径）",
     ),
 ):
     """注意：本路由必须声明在 GET /leads/{lead_id} 之前（否则 "export" 被当作 lead_id）。"""
@@ -606,7 +608,11 @@ async def daily_batch_endpoint(db: SessionDep, user: CurrentUser):
         await db.execute(
             select(LeadEvent)
             .join(Lead, LeadEvent.lead_id == Lead.id)
-            .where(LeadEvent.is_alert, LeadEvent.created_at >= today, Lead.icp_status != "foreign")
+            .where(
+                LeadEvent.is_alert,
+                LeadEvent.created_at >= today,
+                Lead.icp_status.notin_(("foreign", "non_buyer")),
+            )
             .order_by(LeadEvent.created_at.desc())
             .limit(100)
         )
@@ -702,6 +708,7 @@ async def get_lead_detail(db: SessionDep, user: CurrentUser, lead_id: int):
     out = LeadDetailOut.model_validate(lead)
     out.owner_name = (await _user_display_map(db, {lead.owner_id})).get(lead.owner_id)
     out.contacts_count = len(contacts)
+    out.industry_group = industry_group_of(lead.industry, lead.name)
     out.recommended_products = [r["name"] for r in recs]
     out.contacts = [ContactOut.model_validate(c) for c in contacts]
     out.events = [LeadEventOut.model_validate(e) for e in events]
@@ -1433,11 +1440,12 @@ async def collect_stats(db: SessionDep, _user: CurrentUser):
     fb_wa_leads = (
         await db.execute(select(func.count()).select_from(Lead).where(Lead.fb_whatsapp))
     ).scalar_one()
-    # ICP 二重门分布：qualified（销售池）/ cn_domestic（培育）/ foreign / unknown
+    # ICP 二重门分布：qualified（销售池）/ cn_domestic（培育）/ foreign /
+    # non_buyer（非目标买家，2026-08-31 第五态）/ unknown
     icp_rows = (
         await db.execute(select(Lead.icp_status, func.count()).group_by(Lead.icp_status))
     ).all()
-    icp_counts = {s: 0 for s in ("qualified", "cn_domestic", "foreign", "unknown")}
+    icp_counts = {s: 0 for s in ICP_STATUS_VALUES}
     for s, cnt in icp_rows:
         icp_counts[s] = cnt
     # 月度口径：本月新增线索 + 本月成交（follow_status=won 的数据飞轮回传，

@@ -414,7 +414,7 @@ class WebsiteEnrichCollector(Collector):
                         await session.execute(
                             select(func.count()).select_from(LeadModel).where(
                                 (LeadModel.website.is_(None)) | (LeadModel.website == ""),
-                                LeadModel.icp_status != "foreign",
+                                LeadModel.icp_status.notin_(("foreign", "non_buyer")),
                             )
                         )
                     ).scalar_one()
@@ -616,7 +616,7 @@ def _discovery_cooldown(meta: dict | None, now: datetime | None = None) -> bool:
 
 
 async def _load_discoverable(session: AsyncSession, limit: int) -> list[tuple[int, str]]:
-    """无官网且非 foreign 的线索（分数倒序——高分商机优先补全）。
+    """无官网且在 ICP 门内（foreign/non_buyer 排除）的线索（分数倒序——高分商机优先补全）。
 
     多取 3 倍候选，内存里滤掉冷却中的（失败/撞域名 7 天内不再消耗搜索配额）；
     SQL 侧不比较 JSON——PG json 类型无 = 操作符。
@@ -626,7 +626,10 @@ async def _load_discoverable(session: AsyncSession, limit: int) -> list[tuple[in
     rows = (
         await session.execute(
             select(Lead.id, Lead.name, Lead.field_meta)
-            .where((Lead.website.is_(None)) | (Lead.website == ""), Lead.icp_status != "foreign")
+            .where(
+                (Lead.website.is_(None)) | (Lead.website == ""),
+                Lead.icp_status.notin_(("foreign", "non_buyer")),
+            )
             .order_by(Lead.score.desc())
             .limit(limit * 3 + 30)
         )
@@ -654,7 +657,7 @@ async def _load_scope(session: AsyncSession, lead_ids: list[Any]) -> list[tuple[
     else:
         # 分级增量重爬（补充需求 §九）：高价值线索检查更勤——S 每天 / A 3 天 / B 7 天 / C 30 天；
         # ENRICH_INTERVAL_HOURS 作为 C 级（兜底档）的可配置上限。
-        # foreign 行不在服务范围（ICP 门已排除销售池），不消耗抓取配额
+        # foreign/non_buyer 行不在服务范围（ICP 门已排除销售池），不消耗抓取配额
         from sqlalchemy import or_
 
         def _stale(grade: str, days: int):
@@ -670,7 +673,7 @@ async def _load_scope(session: AsyncSession, lead_ids: list[Any]) -> list[tuple[
         stmt = select(Lead.id, Lead.website).where(
             Lead.website.is_not(None),
             Lead.website != "",
-            Lead.icp_status != "foreign",
+            Lead.icp_status.notin_(("foreign", "non_buyer")),
             or_(_stale("S", 1), _stale("A", 3), _stale("B", 7), _stale("C", c_days)),
             or_(Lead.follow_status.is_(None), Lead.follow_status.notin_(["won", "invalid"])),
         )

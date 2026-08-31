@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import datetime, timezone
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -532,14 +533,16 @@ def _lead_conditions(
 ) -> list:
     """线索筛选条件构造（列表与导出共用，保证两边口径一致）。
 
-    icp（ICP 二重门）：None=默认排除 foreign（不进销售池口径）；
-    "all"=不过滤；其余值 = 精确匹配 icp_status。
+    icp（ICP 二重门 + 买家门）：None=默认排除 foreign/non_buyer
+    （不进销售池口径）；"all"=不过滤；其余值 = 精确匹配 icp_status。
     """
     from sqlalchemy import Text, func, or_
 
-    conds = []
+    # list[Any]（同 auto_assign_leads）：notin_/or_ 产出 ColumnElement，
+    # 裸 [] 会让 mypy 按首个 append 反推元素类型、后续全部 arg-type 误报
+    conds: list[Any] = []
     if icp is None:
-        conds.append(Lead.icp_status != "foreign")
+        conds.append(Lead.icp_status.notin_(("foreign", "non_buyer")))
     elif icp != "all":
         if icp not in ICP_STATUS_VALUES:
             raise ValueError(f"invalid icp filter: {icp}")
