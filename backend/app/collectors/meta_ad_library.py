@@ -187,9 +187,20 @@ def _extract_site(html: str) -> str | None:
     return None
 
 
+_KANA_RE = re.compile(r"[\u3040-\u30FF]")  # 平假名/片假名（日文判定用）
+
+
 def _looks_cn(texts: list[str | None]) -> bool:
-    """中国出海特征：品牌名或广告文案含中文（跨境大卖的素材普遍双语）。"""
-    return any(t and _CJK_RE.search(t) for t in texts)
+    """中国出海特征：品牌名或广告文案含中文（跨境大卖的素材普遍双语）。
+
+    同段文本含假名 → 日文（「山田商事」全汉字名会撞 CJK 区间），
+    判非中文（2026-08-31 审计：JP/KR 在目标市场下拉里，该场景真实可达）。
+    """
+    for t in texts:
+        if t and _CJK_RE.search(t):
+            if not _KANA_RE.search(t):
+                return True
+    return False
 
 
 def _parse_ad_time(raw: Any) -> datetime | None:
@@ -311,6 +322,7 @@ class MetaAdsCollector(Collector):
         # page_id 去重（一次运行里同一广告主多个广告只处理一次）
         seen_pages: dict[str, dict[str, Any]] = {}
         query_ok = 0
+        failed_kws: list[str] = []  # 部分失败点名（2026-08-31 审计：限流/抖动时半截覆盖不得静默假成功）
         headers = {"User-Agent": _UA}
 
         # 双通道：代理优先（国内网络 Meta 域直连被墙，实测直连 000），直连兜底（海外部署）
@@ -339,11 +351,13 @@ class MetaAdsCollector(Collector):
                     resp = await _ads_get(clients, params)
                     if resp is None:
                         await ctx.log("error", f"「{kw}」请求失败：代理/直连两条通道都不通（检查网络或代理）")
+                        failed_kws.append(kw)
                         break
                     if resp.status_code != 200:
                         # token 无效/过期是常见配置问题，给可直接行动的提示
                         hint = "（token 无效或过期，去 Ads Library API 重新生成）" if '"code":190' in resp.text else ""
                         await ctx.log("error", f"「{kw}」API {resp.status_code}{hint}：{resp.text[:200]}")
+                        failed_kws.append(kw)
                         break
                     data = resp.json()
                     for ad in data.get("data", []):
@@ -388,8 +402,17 @@ class MetaAdsCollector(Collector):
 
             if query_ok == 0:
                 raise BusinessError(code=40001, message="全部关键词查询失败，任务判 failed（不产出空结果假成功）")
+            if failed_kws:
+                await ctx.log(
+                    "warn",
+                    f"⚠️ {len(failed_kws)}/{len(keywords)} 个关键词查询失败（限流或网络抖动）："
+                    f"{'、'.join(failed_kws[:10])}——本次结果为部分覆盖，建议稍后单独重跑这些词",
+                )
 
             await ctx.log("info", f"去重后共 {len(seen_pages)} 个广告主，开始产出线索" + ("并探测主页" if probe else ""))
+            # 进度第二阶段（2026-08-31 审计）：探测期此前恒满格、任务还能跑几十分钟
+            if probe:
+                ctx.set_total(len(keywords) + len(seen_pages))
 
             # 第二阶段：产出 + 主页探测。多国投放时 country 记第一个（列是单值）
             primary_country = countries[0] if countries else None
@@ -406,8 +429,10 @@ class MetaAdsCollector(Collector):
                     name=name,
                     country=primary_country,
                     social={"facebook": profile_uri},
-                    # 出海画像：该广告主实际投放的国家全量（country 只是第一个投放国）
-                    target_countries=sorted(rec.get("countries") or []) or list(countries),
+                    # 出海画像：该广告主实际投放的国家全量（country 只是第一个投放国）。
+                    # API 未返回投放国时不虚标（2026-08-31 审计：回退继承请求参数
+                    # 会让线索凭空获得出海证据过 ICP 门）
+                    target_countries=sorted(rec.get("countries") or []),
                     # 广告信号（§4.1）：本次搜索命中的在投广告数（合并语义取 max）
                     ad_count=int(rec.get("ad_count") or 0),
                     # 最近投放开始时间（合并取 max——最近还在投 = 持续获客）
@@ -462,31 +487,42 @@ class MetaAdsCollector(Collector):
                 )
                 lead_id, _created = await ctx.emit(draft)
 
-                # 信号级证据链（§4.1）：广告在投 / FB WA 按钮 / 主页号码
+                # 信号级证据链（§4.1）：广告在投 / FB WA 按钮 / 主页号码。
+                # value 固定 page_id（2026-08-31 审计：旧值嵌可变计数「5 条在投
+                # （MY,SG）」→ 计数变化即新行、旧行 last_seen 冻结像失效广告；
+                # 可变信息挪进 evidence_raw）；证据写失败降级 warn 不放大为任务失败
                 from app.crud.lead_signals import upsert_signal
                 from app.db.session import async_session
 
-                async with async_session() as session:
-                    await upsert_signal(
-                        session, lead_id, "meta_ad",
-                        f"{rec['ad_count']} 条在投（{','.join(sorted(rec.get('countries') or []))}）",
-                        source="meta_ads", evidence_url=profile_uri,
-                        evidence_raw=(rec.get("bodies") or [""])[0][:200] or None,
-                        confidence=95,
-                    )
-                    if draft.fb_whatsapp:
+                try:
+                    async with async_session() as session:
+                        last = rec.get("last_ad_at")
                         await upsert_signal(
-                            session, lead_id, "fb_whatsapp", draft.phone_raw or "button",
+                            session, lead_id, "meta_ad", str(pid),
                             source="meta_ads", evidence_url=profile_uri,
-                            evidence_raw=draft.whatsapp_url, confidence=90,
+                            evidence_raw=(
+                                f"{rec['ad_count']} 条在投（{','.join(sorted(rec.get('countries') or []))}）"
+                                + (f"，最近投放 {last:%Y-%m-%d}" if last else "")
+                            ),
+                            confidence=95,
                         )
-                        for n in draft.whatsapp_numbers or []:
+                        if draft.fb_whatsapp:
                             await upsert_signal(
-                                session, lead_id, "whatsapp_number", n,
+                                session, lead_id, "fb_whatsapp", draft.phone_raw or "button",
                                 source="meta_ads", evidence_url=profile_uri,
-                                evidence_raw=f"https://wa.me/{n}", confidence=90,
+                                evidence_raw=draft.whatsapp_url, confidence=90,
                             )
-                    await session.commit()
+                            for n in draft.whatsapp_numbers or []:
+                                await upsert_signal(
+                                    session, lead_id, "whatsapp_number", n,
+                                    source="meta_ads", evidence_url=profile_uri,
+                                    evidence_raw=f"https://wa.me/{n}", confidence=90,
+                                )
+                        await session.commit()
+                except Exception as exc:  # noqa: BLE001  证据缺失可接受，任务假失败不可接受
+                    await ctx.log("warn", f"[{name}] 信号证据写库失败（忽略）：{type(exc).__name__}: {str(exc)[:60]}")
+                if probe:
+                    ctx.inc_progress(1)
 
             if probe and probe_fail:
                 await ctx.log("warn", f"主页探测失败 {probe_fail} 个（登录墙/网络），线索已按无探测信息落库")

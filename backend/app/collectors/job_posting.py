@@ -305,21 +305,28 @@ class JobPostingCollector(Collector):
                         drafts = cfg["parse"](html, url)
                         for d in drafts:
                             lead_id, _created = await ctx.emit(d)
-                            # 信号级证据（§4.1）：招聘信号带岗位帖 URL 作证据
+                            # 信号级证据（§4.1）：招聘信号带岗位帖 URL 作证据；
+                            # 写失败降级 warn 不放大为任务失败（2026-08-31 审计）
                             if d.job_signals:
                                 from app.crud.lead_signals import upsert_signal
                                 from app.db.session import async_session
 
-                                async with async_session() as session:
-                                    for sig_key, meta in d.job_signals.items():
-                                        await upsert_signal(
-                                            session, lead_id, "job_signal",
-                                            f"{sig_key}: {meta.get('label', sig_key)}（{d.name}）",
-                                            source="job_posting",
-                                            evidence_url=(d.job_urls or [None])[0],
-                                            evidence_raw=str(meta), confidence=85,
-                                        )
-                                    await session.commit()
+                                try:
+                                    async with async_session() as session:
+                                        for sig_key, meta in d.job_signals.items():
+                                            await upsert_signal(
+                                                session, lead_id, "job_signal",
+                                                f"{sig_key}: {meta.get('label', sig_key)}（{d.name}）",
+                                                source="job_posting",
+                                                evidence_url=(d.job_urls or [None])[0],
+                                                evidence_raw=str(meta), confidence=85,
+                                            )
+                                        await session.commit()
+                                except Exception as exc:  # noqa: BLE001
+                                    await ctx.log(
+                                        "warn",
+                                        f"「{d.name}」信号证据写库失败（忽略）：{type(exc).__name__}: {str(exc)[:60]}",
+                                    )
                         wa_n = sum(1 for d in drafts if d.whatsapp_job)
                         sig_n = sum(1 for d in drafts if d.job_signals)
                         await ctx.log(

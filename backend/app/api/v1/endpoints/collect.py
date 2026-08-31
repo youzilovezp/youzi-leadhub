@@ -44,7 +44,7 @@ from app.crud.lead_events import describe_dimensions
 from app.crud.task_crud import list_tasks as query_tasks
 from app.crud.task_crud import task_crud
 from app.models.collect_task import CollectTask, CollectTaskLog
-from app.models.lead import Lead, LeadContact, LeadEvent, LeadFollowUp
+from app.models.lead import Lead, LeadContact, LeadEvent, LeadFollowUp, LeadReview, LeadSignal
 from app.models.user import User
 from app.schemas.collect import (
     EXPORT_FIELD_KEYS,
@@ -555,7 +555,13 @@ async def daily_batch_endpoint(db: SessionDep, user: CurrentUser):
     scope_ids, include_unassigned = await scope_filter_params(db, user)
 
     def _base_conds() -> list:
-        conds = [Lead.icp_status == "qualified", Lead.score >= 60]
+        # 终态排除（2026-08-31 审计）：已成交/已无效线索不回流今日商机——
+        # 销售不该再被推去联系已成交或已判无效的客户
+        conds = [
+            Lead.icp_status == "qualified",
+            Lead.score >= 60,
+            Lead.follow_status.notin_(["won", "invalid"]),
+        ]
         if scope_ids is not None:
             from sqlalchemy import or_
 
@@ -996,6 +1002,10 @@ async def delete_lead(db: SessionDep, _user: SuperUser, lead_id: int):
     if lead is None:
         raise NotFoundError("线索不存在")
     # SQLite 默认不开外键级联，子表显式删（PG 下双保险；同 delete_task 的日志处理）
+    # 2026-08-31 审计补 LeadSignal/LeadReview——此前漏删，SQLite 下留孤儿行，
+    # 已删线索的抽检标注继续污染 quality 准确率统计
+    await db.execute(sa_delete(LeadSignal).where(LeadSignal.lead_id == lead_id))
+    await db.execute(sa_delete(LeadReview).where(LeadReview.lead_id == lead_id))
     await db.execute(sa_delete(LeadContact).where(LeadContact.lead_id == lead_id))
     await db.execute(sa_delete(LeadEvent).where(LeadEvent.lead_id == lead_id))
     await db.execute(sa_delete(LeadFollowUp).where(LeadFollowUp.lead_id == lead_id))
@@ -1099,6 +1109,16 @@ async def create_follow_up(
     if lead.owner_id not in (None, user.id) and not has_assign:
         raise PermissionDeniedError("该线索已由其他销售跟进，不能直接跟进")
 
+    # 终态保护（2026-08-31 审计）：won/invalid 是成交回传与无效判定的唯一数据源，
+    # 普通操作不可改出（月度成交统计会被一次误操作污染）；主管可显式纠正
+    if lead.follow_status in ("won", "invalid") and payload.status != lead.follow_status and not has_assign:
+        label = "已成交" if lead.follow_status == "won" else "已标记无效"
+        raise BusinessError(
+            code=40001,
+            message=f"线索{label}（终态），改为其他状态需主管权限（assign:lead）",
+        )
+
+    old_status = lead.follow_status
     db.add(
         LeadFollowUp(
             lead_id=lead.id,
@@ -1112,6 +1132,20 @@ async def create_follow_up(
     lead.follow_status = payload.status
     lead.last_followed_at = datetime.now(timezone.utc)
     lead.next_follow_at = payload.next_follow_at
+    # 状态跃迁留痕（2026-08-31 审计）：此前跟进状态只在 LeadFollowUp 表，
+    # 事件时间线看不到状态变化——成交这样关键节点必须可追溯（won 进预警中心）
+    if payload.status != old_status:
+        from app.crud.lead_events import add_event
+
+        add_event(
+            db,
+            lead,
+            "status_change",
+            payload={"old": old_status or "unassigned", "new": payload.status},
+            note=f"跟进状态：{old_status or 'unassigned'} → {payload.status}",
+            created_by=user.id,
+            is_alert=(payload.status == "won"),
+        )
     await db.commit()
     await db.refresh(lead)
 

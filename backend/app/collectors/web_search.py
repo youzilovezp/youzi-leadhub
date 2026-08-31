@@ -49,7 +49,30 @@ _NON_SITE_DOMAINS = (
     "jd.com", "tmall.com", "taobao.com", "toutiao.com", "36kr.com", "csdn.net",
     "bilibili.com", "douyin.com", "xiaohongshu.com", "ifeng.com", "cnblogs.com",
     "jianshu.com", "oschina.net", "gitee.com",
+    # 平台补漏（2026-08-31 审计）：微信/ Etsy / Temu / B2B 平台 / Pinterest 等
+    "wechat.com", "etsy.com", "temu.com", "1688.com", "made-in-china.com",
+    "globalsources.com", "pinterest.com", "t.me", "threads.net", "discord.com",
 )
+
+
+def _is_blocked_domain(domain: str) -> bool:
+    """平台/社媒域判定（域边界锚定，2026-08-31 审计修复）。
+
+    旧实现两处误杀：endswith 未加 "." 前缀（"x.com" 杀 netflix.com、
+    "jd.com" 杀 3jd.com）；裸子串 `d in domain`（"ebay." 杀 bluebay.com）。
+    带尾点的条目（"amazon."）本意是「任意 TLD 的区域站」（amazon.de/
+    shopee.sg）——归一为裸标签按前缀匹配。与 meta_ads 的判定统一锚定域边界。
+    """
+    d = domain.lower()
+    for entry in _NON_SITE_DOMAINS:
+        b = entry.rstrip(".").lower()
+        if d == b or d.endswith("." + b):
+            return True
+        # 裸标签（原带尾点，如 amazon./ebay./shopee./lazada./blogspot./searx）：
+        # 匹配「标签.任意TLD」与「子域.标签.任意TLD」（amazon.de / shop.baidu.gg）
+        if "." not in b and (d.startswith(b + ".") or d.endswith("." + b + ".")):
+            return True
+    return False
 
 # DDG HTML 结果：标题链接与跳转参数
 _DDGLINK_RE = re.compile(
@@ -87,11 +110,17 @@ def _looks_like_article(title: str, url: str) -> bool:
 
 
 def _is_company_site(url: str) -> bool:
-    """搜索结果 URL 是否企业官网（滤平台/社媒/文档站）。"""
-    domain = extract_domain(url) or ""
+    """搜索结果 URL 是否企业官网（滤平台/社媒/文档站）。
+
+    匹配必须锚定域边界（2026-08-31 审计修复）：旧实现 endswith 未加 "." 前缀，
+    "x.com" 会误杀 netflix.com/dropbox.com、"jd.com" 误杀 3jd.com；裸子串
+    `d in domain` 同样误杀（bluebay.com 含 "ebay."）。与 meta_ads 的
+    `host == d or host.endswith("." + d)` 统一。
+    """
+    domain = (extract_domain(url) or "").lower()
     if not domain:
         return False
-    return not any(domain.endswith(d.rstrip(".")) or d in domain for d in _NON_SITE_DOMAINS)
+    return not _is_blocked_domain(domain)
 
 
 def _ddg_unwrap(href: str) -> str:

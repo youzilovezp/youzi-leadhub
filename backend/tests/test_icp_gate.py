@@ -50,11 +50,15 @@ def test_compute_icp_status_matrix():
     # CN 证据兜底：国家码 CN / +86 号码
     assert compute_icp_status(country="CN") == "cn_domestic"
     assert compute_icp_status(phone_e164="+8613800138000") == "cn_domestic"
-    # foreign：非 CN 且有评估结论（已富化 / meta_ads 来源做过中文判定）
+    # foreign：非 CN 且有评估结论（已富化 / meta_ads 来源且有官网做过中文判定）
     assert compute_icp_status(enriched_at=object()) == "foreign"
     assert (
-        compute_icp_status(sources=[{"source": "meta_ads"}]) == "foreign"
+        compute_icp_status(sources=[{"source": "meta_ads"}], website="https://x.com")
+        == "foreign"
     )
+    # 2026-08-31 审计修正：meta_ads 无官网（探测失败/登录墙）= 没有富化翻案通道，
+    # 保持 unknown 不做有罪推定——英文品牌中国大卖不得被不可见地丢弃
+    assert compute_icp_status(sources=[{"source": "meta_ads"}]) == "unknown"
     # unknown：非 CN 但从未评估（不做有罪推定）
     assert compute_icp_status() == "unknown"
     assert compute_icp_status(sources=[{"source": "manual"}]) == "unknown"
