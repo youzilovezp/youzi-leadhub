@@ -97,11 +97,12 @@ async def _user_display_map(db: SessionDep, user_ids: set[int | None]) -> dict[i
 
 
 async def _fill_lead_list_fields(db: SessionDep, items: list[Lead], outs: list[LeadOut]) -> None:
-    """列表行批量注入 owner_name / contacts_count / recommended_products（防 N+1）。"""
+    """列表行批量注入 owner_name / 联系人摘要 / recommended_products（防 N+1）。"""
     from sqlalchemy import func
 
     name_map = await _user_display_map(db, {i.owner_id for i in items})
     counts: dict[int, int] = {}
+    tier1_ids: set[int] = set()
     if items:
         rows = (
             await db.execute(
@@ -111,9 +112,21 @@ async def _fill_lead_list_fields(db: SessionDep, items: list[Lead], outs: list[L
             )
         ).all()
         counts = {r[0]: r[1] for r in rows}
+        # 决策层联系人（tier1：CEO/创始人/总经理）——「找谁」的第一答案
+        tier1_ids = set(
+            (
+                await db.execute(
+                    select(LeadContact.lead_id).where(
+                        LeadContact.lead_id.in_([i.id for i in items]),
+                        LeadContact.seniority == "tier1",
+                    )
+                )
+            ).scalars()
+        )
     for i, o in zip(items, outs, strict=True):
         o.owner_name = name_map.get(i.owner_id)
         o.contacts_count = counts.get(i.id, 0)
+        o.has_tier1 = i.id in tier1_ids
         o.recommended_products = [
             r["name"]
             for r in recommend_products(

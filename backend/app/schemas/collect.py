@@ -101,6 +101,7 @@ class LeadOut(BaseModel):
     export_type: str | None = None  # 出海业务类型
     field_meta: dict[str, Any] = {}  # 字段级数据质量 {字段: {source, updated_at, confidence}}（§32）
     contacts_count: int = 0  # 联系人数（列表接口批量注入）
+    has_tier1: bool = False  # 有决策层联系人（CEO/总经理等，列表「找谁」直读）
     recommended_products: list[str] = []  # 推荐产品名（列表接口按行计算，纯函数）
     created_at: datetime
     updated_at: datetime

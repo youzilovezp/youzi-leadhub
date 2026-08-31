@@ -114,15 +114,18 @@ const columns: DataTableColumns<Lead> = [
   {
     title: '应该找谁',
     key: 'contacts',
-    width: 150,
+    width: 170,
     render: (row) =>
-      h('span', { style: 'font-size:12px' }, [
-        row.contacts_count > 0 ? `${row.contacts_count} 个联系人` : '联系人待补全',
-        row.email ? ' · 邮箱' : '',
+      h('span', { style: 'font-size:12px;display:inline-flex;align-items:center;gap:4px' }, [
+        row.contacts_count > 0
+          ? h('span', `${row.contacts_count} 人`)
+          : h('span', { style: 'color:#999' }, '联系人待补'),
+        row.has_tier1 ? h(NTag, { size: 'tiny', type: 'success', bordered: false }, () => '决策层') : null,
+        row.email ? h(NTag, { size: 'tiny', bordered: false }, () => '邮箱') : null,
         row.whatsapp_url
           ? h(
               NButton,
-              { size: 'tiny', quaternary: true, type: 'primary', style: 'margin-left:4px', onClick: () => window.open(row.whatsapp_url!, '_blank') },
+              { size: 'tiny', quaternary: true, type: 'primary', onClick: () => window.open(row.whatsapp_url!, '_blank') },
               () => 'WA 建联',
             )
           : null,

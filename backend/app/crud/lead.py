@@ -237,17 +237,22 @@ async def upsert_lead(db: AsyncSession, draft: LeadDraft) -> tuple[Lead, bool]:
 
 
 async def _auto_contact_from_draft(db: AsyncSession, lead: Lead, draft: LeadDraft) -> None:
-    """采集器抓到公开邮箱 → 自动生成「待补全」联系人（找谁，核心价值三问之一）。
+    """采集器抓到的联系方式 → 自动生成「待补全」联系人（「找谁」的直接答案）。
 
-    与 website_enrich 的 auto_create_from_email 同语义；此前只有富化路径这么做，
-    meta_ads 的邮箱只落 lead.email 列——联系人维恒 0 分、详情页「应该找谁」空白
-    （2026-08-31 巡检）。手工录入不自动生成（用户自己维护联系人表）。
+    邮箱（auto_create_from_email）+ WhatsApp 号码（auto_create_from_phone，
+    meta_ads 主页探测的 wa.me 号码是销售建联的第一入口）。手工录入不自动生成
+    （用户自己维护联系人表）。
     """
-    if not draft.email or draft.source == "manual":
+    if draft.source == "manual":
         return
-    from app.crud.contact import auto_create_from_email
+    from app.crud.contact import auto_create_from_email, auto_create_from_phone
 
-    if await auto_create_from_email(db, lead, draft.email):
+    created = False
+    if draft.email:
+        created = (await auto_create_from_email(db, lead, draft.email)) is not None or created
+    for n in (draft.whatsapp_numbers or [])[:3]:
+        created = (await auto_create_from_phone(db, lead, n, source=draft.source)) is not None or created
+    if created:
         await rescore_and_log(db, lead)  # 联系人维变化 → 重评（可能升分/升级）
 
 
@@ -625,7 +630,8 @@ async def search_leads(
         stmt = stmt.where(cond)
         count_stmt = count_stmt.where(cond)
     total = (await db.execute(count_stmt)).scalar_one()
-    stmt = stmt.order_by(Lead.score.desc(), Lead.id.desc())
+    # 列表默认时间倒序：最新爬到的排最前（销售先看新线索；要看优先级用等级/最低分筛选）
+    stmt = stmt.order_by(Lead.created_at.desc(), Lead.id.desc())
     stmt = stmt.offset((page - 1) * page_size).limit(page_size)
     items = list((await db.execute(stmt)).scalars().all())
     return items, total
