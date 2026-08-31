@@ -223,12 +223,14 @@ class TaskRunner:
         cancel_event = self._cancel_events.setdefault(task_id, asyncio.Event())
         counters = {"added": 0, "merged": 0}
 
-        async def emit(draft: LeadDraft) -> tuple[int, bool]:
+        async def emit(draft: LeadDraft, *, create_if_missing: bool = True) -> tuple[int, bool]:
             if not draft.name or not draft.name.strip():
                 return 0, False
             async with async_session() as s:
-                lead, created = await _upsert(s, draft)
+                lead, created = await _upsert(s, draft, create_if_missing=create_if_missing)
                 await s.commit()
+            if lead is None:  # 巡检模式库外公司：跳过不算新增/合并
+                return 0, False
             counters["added" if created else "merged"] += 1
             return lead.id, created
 
@@ -333,10 +335,10 @@ class TaskRunner:
             await s.commit()
 
 
-async def _upsert(s, draft: LeadDraft):
+async def _upsert(s, draft: LeadDraft, *, create_if_missing: bool = True):
     from app.crud.lead import upsert_lead
 
-    return await upsert_lead(s, draft)
+    return await upsert_lead(s, draft, create_if_missing=create_if_missing)
 
 
 task_runner = TaskRunner()

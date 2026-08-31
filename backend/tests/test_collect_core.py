@@ -470,6 +470,62 @@ def test_job_posting_stub_sites_rejected():
     c.validate_params({})  # 缺省 jobui
 
 
+async def test_upsert_patrol_mode_no_create(client, admin_credentials, db_session):
+    """巡检模式（Task 7）：库外公司不建行（返回 None），库内公司照常合并信号。
+
+    job_posting 降级为信号巡检器——招聘数据的价值是给库内公司补信号，
+    不是发现新公司（92% 无官网 → 富化无米下锅 → 全员 C 的教训）。
+    """
+    from sqlalchemy import func, select
+
+    from app.db.init_db import init_db
+    from app.models.lead import Lead
+
+    await init_db()
+    # 库外公司 → 不创建（返回 (None, False)，不抛错）
+    lead, created = await upsert_lead(
+        db_session,
+        LeadDraft(
+            source="job_posting", name="巡检模式外部公司（成都）有限公司",
+            country="CN", city="成都", is_cn=True,
+            job_signals={"wa_ops": {"label": "WhatsApp 运营/客服", "points": 30}},
+            job_urls=["https://jobui.com/job/1/"],
+        ),
+        create_if_missing=False,
+    )
+    assert lead is None and created is False
+    assert (
+        await db_session.execute(
+            select(func.count()).select_from(Lead).where(Lead.name == "巡检模式外部公司（成都）有限公司")
+        )
+    ).scalar_one() == 0
+
+    # 先建一条库内公司，再以巡检模式合并 → 信号进来了
+    seeded, _ = await upsert_lead(
+        db_session,
+        LeadDraft(source="seed_import", name="巡检模式库内公司（杭州）有限公司",
+                  country="CN", website="https://patrol-seeded.com", is_cn=True),
+    )
+    await db_session.commit()
+    merged, created = await upsert_lead(
+        db_session,
+        LeadDraft(
+            source="job_posting", name="巡检模式库内公司（杭州）有限公司",
+            website="https://patrol-seeded.com", country="CN", is_cn=True,
+            job_signals={"overseas_cs": {"label": "海外/英文客服", "points": 20}},
+            job_urls=["https://jobui.com/job/2/"],
+        ),
+        create_if_missing=False,
+    )
+    await db_session.commit()
+    assert merged is not None and merged.id == seeded.id and created is False
+    assert "overseas_cs" in (merged.job_signals or {})
+
+    # 清理（共享测试库）：与 test_daily_batch.py 同款 DELETE 端点
+    h = {"Authorization": f"Bearer {(await client.post('/api/v1/auth/login', json=admin_credentials)).json()['data']['access_token']}"}
+    await client.delete(f"/api/v1/collect/leads/{seeded.id}", headers=h)
+
+
 def test_career_site_link_and_signal_extraction():
     """企业招聘官网巡检：首页找「招聘」链接（锚文本/URL 命中，外链 ATS 域放行）
     + 招聘页文本逐条过分类器（分类器即过滤器）。"""

@@ -63,7 +63,9 @@ class TaskContext:
 
     task_id: int
     params: dict[str, Any]
-    emit: Callable[[LeadDraft], Awaitable[tuple[int, bool]]]  # 落库，返回 (lead_id, 是否新建)
+    # 落库，返回 (lead_id, 是否新建)；可选关键字参数 create_if_missing=False
+    # 透传给 upsert_lead（巡检模式：库外公司不入库 → (0, False)）
+    emit: Callable[..., Awaitable[tuple[int, bool]]]
     log: Callable[[str, str], Awaitable[None]]  # (level, message)
     set_total: Callable[[int], None]
     inc_progress: Callable[[int], None]  # 增量

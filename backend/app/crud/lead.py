@@ -180,8 +180,14 @@ async def auto_assign_leads(
     return assigned, counts
 
 
-async def upsert_lead(db: AsyncSession, draft: LeadDraft) -> tuple[Lead, bool]:
+async def upsert_lead(
+    db: AsyncSession, draft: LeadDraft, *, create_if_missing: bool = True
+) -> tuple[Lead | None, bool]:
     """归一化 → dedupe_key → 新建或合并。返回 (lead, 是否新建)。
+
+    create_if_missing=False（巡检模式，job_posting 信号巡检用）：
+    三身份列反查不中 → (None, False)，不建行——招聘数据的价值是给库内
+    公司补信号，不是发现新公司（92% 无官网 → 富化无米下锅 → 全员 C 的教训）。
 
     并发安全：两个 worker 同时新建同一 dedupe_key 时，后 insert 的一方命中唯一约束。
     用 savepoint 包住 insert，IntegrityError 后重查存量并退化为合并（此时必命中）。
@@ -212,6 +218,8 @@ async def upsert_lead(db: AsyncSession, draft: LeadDraft) -> tuple[Lead, bool]:
     now = datetime.now(timezone.utc)
 
     if existing is None:
+        if not create_if_missing:
+            return None, False
         lead = _new_lead(draft, dedupe_key, namecity_key, domain, phone_e164, now)
         from sqlalchemy.exc import IntegrityError
 
@@ -222,6 +230,10 @@ async def upsert_lead(db: AsyncSession, draft: LeadDraft) -> tuple[Lead, bool]:
         except IntegrityError:
             existing = await _find_existing(db, conds)
             if existing is None:  # 冲突来自别的唯一列等意外——不吞
+                # 巡检模式实际到不了这（未 insert 不会 IntegrityError），
+                # 防御性跳过而非抛错——巡检缺一家信号好过炸整个任务
+                if not create_if_missing:
+                    return None, False
                 raise
         else:
             # 新建事件在 savepoint 成功后追加，避免 IntegrityError 重试路径残留
