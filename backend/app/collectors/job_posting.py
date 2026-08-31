@@ -107,7 +107,10 @@ class JobPostingCollector(Collector):
             "required": False,
             "type": "tags",
             "placeholder": "岗位关键词回车，如 whatsapp / 海外客服 / 跨境电商运营",
-            "default": "whatsapp,海外客服",
+            # 注意：jobui 站内搜索不吃英文词——「whatsapp运营」会联想跑偏到
+            # UI 设计师类岗位（2026-08-31 实测 20 岗全跑偏、零信号命中）；
+            # 「whatsapp 客服」带空格直接 0 结果。用有效中文词组合
+            "default": "海外客服,跨境电商客服,海外社媒运营,私域运营,外贸业务员",
         },
         {
             "key": "max_pages",
