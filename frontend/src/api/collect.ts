@@ -97,16 +97,6 @@ export const SCENE_LABELS: Record<string, string> = {
   saas: 'SaaS',
 }
 
-/** SaaS 需求信号键 → 中文（后端 SAAS_LABELS_ZH 一致） */
-export const SAAS_LABELS: Record<string, string> = {
-  crm: 'CRM',
-  helpdesk: '工单/客服系统',
-  chatbot: '聊天机器人',
-  ai_service: 'AI 客服',
-  marketing_automation: '营销自动化',
-  omnichannel: '全渠道',
-}
-
 /** 跟进状态（后端 FOLLOW_STATUS_OPTIONS 同词表；PRD §23 十态） */
 export type FollowStatus =
   | 'unassigned'
