@@ -56,6 +56,10 @@ _NON_SITE_DOMAINS = (
     # 与 collectors/icp.py NON_BUYER_DOMAINS 同源——这里入库拦截，那边存量兜底）
     "ikjzd.com", "wearesellers.com", "cifnews.com", "kuajingyan.com",
     "kjtong.com", "mckinsey.com.cn", "gizmodo.com", "whatsappbusiness.com",
+    # 36氪出海（2026-09-01 实测：36kr.com 在清单里但独立域漏网，混入还拿 qualified）
+    "letschuhai.com",
+    # 词典站（同日实测：爱词霸词条页整条入库）
+    "iciba.com",
 )
 
 
@@ -98,18 +102,28 @@ _ARTICLE_TITLE_WORDS = (
     "vs ", "tips", "checklist", "解密", "深度", "解析", "入门", "实战",
     # 内容门户/知识站（2026-08-31 实测漏网：「外贸知识大全-外贸知识网」混进线索池）
     "大全", "知识网", "百科", "资讯网", "论坛", "问答", "导航",
+    # 词典/翻译/释义页（2026-09-01 实测漏网：「制造是什么意思_制造的翻译_音标_读音_
+    # 用法_例句_爱词霸」整条当线索入库——品类词搜索结果页全是这类页，不是企业官网）
+    "是什么", "什么意思", "翻译", "音标", "读音", "例句", "词典", "辞典", "释义", "词霸",
+    "definition", "meaning", "translation", "pronunciation",
 )
 _ARTICLE_PATH_WORDS = (
     "/blog", "/article", "/articles", "/news", "/docs", "/doc/", "/archives",
     "/zh_cn/", "/zh-cn/", "/support/", "/help/", "/learn/", "/resources",
     "/post/", "/dy/article", "/p/", ".html", ".htm", ".php",
 )
+# 聚合内容页分隔符（爱词霸式「词_翻译_音标_例句」堆叠栏标题）；
+# 不含 "-"——合法品牌名带连字符常见（Coca-Cola），误杀面不可接受
+_AGGREGATE_SEPARATORS = ("_", "|", "｜", "·")
 
 
 def _looks_like_article(title: str, url: str) -> bool:
-    """标题/URL 是否内容页（文章/文档/博客）而非企业官网页面。"""
+    """标题/URL 是否内容页（文章/文档/词典/聚合页）而非企业官网页面。"""
     t = title.lower()
     if any(w in t for w in _ARTICLE_TITLE_WORDS):
+        return True
+    # 标题堆 ≥2 个聚合分隔符 = 词典/列表页标题形态，不是公司名
+    if sum(t.count(sep) for sep in _AGGREGATE_SEPARATORS) >= 2:
         return True
     path = urllib.parse.urlparse(url).path.lower()
     return any(w in path for w in _ARTICLE_PATH_WORDS)
@@ -266,6 +280,11 @@ def drafts_with_stats(
             if sep in title:
                 title = title.split(sep)[0].strip() or title
                 break
+        # 泛标题（「首页/Home」类）拿不到公司名，入库就是垃圾行
+        # （2026-09-01 实测：gy2025.com 以 name=「首页」入库）
+        if title.strip().lower() in ("首页", "home", "index", "main", "主页"):
+            stats["generic_title"] = stats.get("generic_title", 0) + 1
+            continue
         d = LeadDraft(source="web_search", name=title[:255], website=url)
         d.is_cn = is_cn_param and _has_cjk(title)
         drafts.append(d)
@@ -421,9 +440,10 @@ class WebSearchCollector(Collector):
             "required": True,
             "type": "tags",
             "placeholder": "五行业定向词（跨境电商/品牌DTC/游戏/制造/出海服务），中文长尾业务词有效",
-            # 预填默认词：五行业定向词库，打开就能一键创建。中文长尾业务词是
-            # 有效口径（英文词/单词会搜到软件页面而非企业）
-            "default": "跨境电商 独立站 品牌,出海品牌 独立站,DTC 出海 品牌 官网,跨境 电商平台 卖家 服务,出海 游戏 公司,制造业 出海 工厂 外贸",
+            # 预填默认词：打开就能一键创建。口径 = 中文长尾**业务词**（客服/
+            # 私域/官网类组合）——名词类品类词（制造业/品牌）的搜索结果页全是
+            # 词典与文章页，不是企业官网（2026-09-01 实测教训）
+            "default": "跨境电商 独立站 客服,外贸 whatsapp 私域,海外私域运营 whatsapp,跨境 电商 官网 客服,出海品牌 独立站 客服",
         },
         {
             "key": "max_results",

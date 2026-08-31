@@ -185,3 +185,38 @@ def test_blocked_domains_include_cn_trade_media():
               "kjtong.com", "mckinsey.com.cn", "www.cifnews.com"):
         assert _is_blocked_domain(d), d
     assert not _is_blocked_domain("anker.com")
+
+
+def test_dictionary_pages_filtered_as_content():
+    """词典/翻译/释义页不是企业官网（2026-09-01 实测：「制造是什么意思_制造的翻译_
+    音标_读音_用法_例句_爱词霸」整条当线索入库——品类词搜索结果页全是这类页）。"""
+    from app.collectors.web_search import _is_blocked_domain, _looks_like_article
+
+    # 用户实报的完整标题
+    assert _looks_like_article(
+        "制造是什么意思_制造的翻译_音标_读音_用法_例句_爱词霸", "https://gy2025.com/"
+    )
+    # 词表命中：单个词也拦
+    for title in ("跨境电商百科大全", "whatsapp 中文翻译", "品牌 meaning 是什么"):
+        assert _looks_like_article(title, "https://x.com/"), title
+    # 分隔符堆叠形态（词典页标题栏）
+    assert _looks_like_article("公司_简介_产品_联系", "https://a.com/")
+    # 正常公司名不误杀（含连字符的合法品牌名尤其不能拦）
+    for title in ("Anker 官方商城", "SHEIN 全球快时尚", "Coca-Cola China"):
+        assert not _looks_like_article(title, "https://a.com/"), title
+    # 36氪出海独立域（2026-09-01 实测漏网，混入且拿 qualified）
+    assert _is_blocked_domain("letschuhai.com")
+
+
+def test_generic_titles_skipped():
+    """泛标题（首页/Home）拿不到公司名，不该建行（2026-09-01 实测 gy2025.com name=「首页」）。"""
+    from app.collectors.web_search import drafts_with_stats
+
+    items = [
+        {"title": "首页", "url": "https://generic-title-a.com/"},
+        {"title": "Home", "url": "https://generic-title-a2.com/"},
+        {"title": "安克创新官方商城", "url": "https://generic-title-b.com/"},
+    ]
+    drafts, stats = drafts_with_stats(items)
+    assert [d.name for d in drafts] == ["安克创新官方商城"]
+    assert stats.get("generic_title") == 2

@@ -90,6 +90,55 @@ def detect_icp_license(html_list: list[str] | list[str | None] | None) -> str | 
     return m.group(0) if m else None
 
 
+def backfill_profile_fields(
+    lead: Any,
+    *,
+    icp_license: str | None,
+    pages: list[str],
+    now: Any,
+) -> bool:
+    """基础画像补全（2026-09-01 用户反馈：web_search 线索基础信息大面积空白）。
+
+    - country：来源没给国家、但本轮拿到 CN 硬证据（ICP 备案号）或既有强证据
+      （+86/中国招聘站/种子）→ CN。仅 CJK 启发式（弱证据）**不**回填——
+      东南亚华人本地企业同样命中，回填即误标
+    - industry：空则按公司名五类归类回填中文标签（粗粒度但非空；来源已给的不覆盖）
+    - address：页面「地址 / Address」行，抓到才补，没有不硬造
+    返回是否补了任一字段（调用方无需额外处理，field_meta 已在函数内记录）。
+    """
+    from app.collectors.icp import cn_evidence_of_lead
+    from app.collectors.industry_labels import INDUSTRY_GROUP_LABELS_ZH, industry_group_of
+    from app.collectors.scenes import page_text
+    from app.crud.lead import touch_field_meta
+
+    touched = False
+    if not lead.country and lead.is_cn and (
+        icp_license or cn_evidence_of_lead(lead) == "strong"
+    ):
+        lead.country = "CN"
+        touch_field_meta(lead, "country", "website_enrich", confidence=85, now=now)
+        touched = True
+    if not lead.industry:
+        group = industry_group_of(None, lead.name)
+        if group:
+            lead.industry = INDUSTRY_GROUP_LABELS_ZH[group]
+            touch_field_meta(lead, "industry", "website_enrich", confidence=60, now=now)
+            touched = True
+    if not lead.address:
+        m = re.search(
+            r"(?:地\s*址|address|addr)\s*[：:\s]\s*"
+            r"([一-鿿a-zA-Z0-9.,·\-（）()\s]{4,60}?)"
+            r"(?=\s*(?:电话|邮箱|传真|邮编|地图|tel|fax|email|map|$))",
+            page_text(pages, keep_case=True),
+            re.IGNORECASE,
+        )
+        if m and (addr := m.group(1).strip()):
+            lead.address = addr
+            touch_field_meta(lead, "address", "website_enrich", confidence=70, now=now)
+            touched = True
+    return touched
+
+
 def detect_cn_content(html_list: list[str] | list[str | None] | None) -> bool:
     """页面是否以中文为主（中国企业官网特征）：可见文本 CJK 占比 ≥ 30%。"""
     joined = page_text(html_list)
@@ -925,6 +974,8 @@ async def _enrich_one(
             # 官网含显著中文内容——中文站服务海外市场 = 出海企业
             lead.is_cn = True
             touch_field_meta(lead, "is_cn", "website_enrich", confidence=85, now=now)
+        # 基础画像补全（country/industry/address）——富化只补信号不补画像的空白
+        backfill_profile_fields(lead, icp_license=icp_license, pages=pages, now=now)
         if overseas:
             merged_ov = dict(lead.overseas_signals or {})
             for k, vals in overseas.items():
