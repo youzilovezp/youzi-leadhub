@@ -213,7 +213,7 @@ async function handleClaim(row: Lead) {
   fetchData()
 }
 
-// ---------- 批量检测 WhatsApp（隐式任务） ----------
+// ---------- 富化选中（隐式 website_enrich 任务：WhatsApp/电话/邮箱/地址/出海信号全补） ----------
 async function handleCheckWhatsApp() {
   const ids = checkedKeys.value
   if (!ids.length) {
@@ -221,7 +221,7 @@ async function handleCheckWhatsApp() {
     return
   }
   const task = await collectApi.checkWhatsApp(ids)
-  message.success(`已创建检测任务 #${task.id}，进度在任务详情页查看`)
+  message.success(`已创建富化任务 #${task.id}，进度在任务详情页查看`)
   router.push(`/collect/task/${task.id}`)
 }
 
@@ -867,7 +867,7 @@ onUnmounted(() => {
           secondary
           @click="handleCheckWhatsApp"
         >
-          检测 WhatsApp（{{ checkedKeys.length }}）
+          富化选中（{{ checkedKeys.length }}）
         </n-button>
         <n-button
           secondary

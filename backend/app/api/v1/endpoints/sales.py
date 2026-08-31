@@ -186,6 +186,11 @@ async def data_sources_endpoint(db: SessionDep, _user: User = RequireStatsRead):
         last_id = chunk[-1][0]
     out = []
     for info in list_collectors():
+        # 数据源 = 发现通道（产新线索/新信号）。website_enrich 是内部复核步骤
+        # （自动接力 + 每日 cron + 列表勾选富化三入口），不进数据源列表
+        # （2026-09-01 用户口径：富化不是数据源，列表里不该出现）
+        if info["name"] == "website_enrich":
+            continue
         r = stats_by_collector.get(info["name"])
         tasks = r[1] if r else 0
         completed = r[3] if r else 0
