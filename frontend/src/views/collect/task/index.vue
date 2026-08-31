@@ -80,13 +80,17 @@ function currentCollector(): CollectorInfo | undefined {
   return collectors.value.find((c) => c.name === form.collector)
 }
 
-/** 新建任务只列「发现类」采集器：网站富化是自动环节，出现手动入口只会造成困惑。
- *  筛选下拉仍保留全部（能看到自动富化任务）。 */
+/** 采集器分组：发现类在前（默认选），富化类在后可手动补跑——
+ *  网站富化平时由「发现任务完成 → 自动接力」执行，但调度关闭/只想补信号时
+ *  必须能手动跑（2026-09-01 巡检：藏掉手动入口导致调度关闭时富化永远不执行）。 */
 const DISCOVERY_COLLECTORS = ['web_search', 'job_posting', 'meta_ads']
+const ENRICH_COLLECTORS = ['website_enrich']
 const isDiscovery = computed(() => DISCOVERY_COLLECTORS.includes(form.collector))
-/** 创建对话框的采集器选项（不含 website_enrich——它由系统自动执行） */
+/** 创建对话框的采集器选项：发现类（默认）+ 富化类（手动补跑，含官网发现补全链） */
 const creatableCollectors = computed(() =>
-  collectors.value.filter(c => DISCOVERY_COLLECTORS.includes(c.name)),
+  collectors.value.filter(
+    c => DISCOVERY_COLLECTORS.includes(c.name) || ENRICH_COLLECTORS.includes(c.name),
+  ),
 )
 
 /** 按 param_schema 初始化参数值（default 按 type 反序列化） */
