@@ -29,13 +29,15 @@ def _evidence_url(lead: Any, key: str) -> str | None:
 
 
 # who 角色派生：信号 → 该找谁（PRD §七 联系人三级优先级的运营化落地）
+# 注意：这里的键只匹配 job_signals / saas_signals 两个 dict 的键；
+# fb_whatsapp 是 Lead 布尔列而非 dict 键，单独走 _FB_ROLE 分支。
 _ROLE_RULES: list[tuple[tuple[str, ...], str, str]] = [
     (("wa_ops",), "WhatsApp/私域运营负责人", "在招 WhatsApp 运营岗 → 招聘页/官网联系页"),
     (("overseas_cs",), "海外客服负责人", "在招海外/英文客服岗 → 招聘页/官网联系页"),
-    (("crm", "helpdesk", "chatbot", "ai_service", "marketing_automation", "omnichannel", "brand_stack"),
-     "CRM/客服系统负责人", "检测到 SaaS 工具栈 → 官网联系页"),
-    (("fb_whatsapp",), "海外营销负责人", "FB 主页挂 WhatsApp 私域 → FB 主页/官网联系页"),
+    (("crm", "crm_ops", "helpdesk", "chatbot", "ai_service", "marketing_automation", "omnichannel", "brand_stack"),
+     "CRM/客服系统负责人", "检测到 SaaS 工具栈或 CRM 招聘 → 官网联系页/招聘页"),
 ]
+_FB_ROLE = ("海外营销负责人", "FB 主页挂 WhatsApp 私域 → FB 主页/官网联系页")
 _FALLBACK_ROLE = ("海外业务负责人", "官网联系页 / 招聘页")
 
 
@@ -47,6 +49,9 @@ def _derive_roles(lead: Any) -> list[dict[str, str]]:
         if any(k in job_keys or k in saas_keys for k in keys):
             if all(r["role"] != role for r in roles):
                 roles.append({"role": role, "hint": hint})
+    fb = bool(getattr(lead, "fb_whatsapp", False))  # 布尔列，读值而非查 dict 键
+    if fb and all(r["role"] != _FB_ROLE[0] for r in roles):
+        roles.append({"role": _FB_ROLE[0], "hint": _FB_ROLE[1]})
     roles.append({"role": _FALLBACK_ROLE[0], "hint": _FALLBACK_ROLE[1]})
     return roles
 
