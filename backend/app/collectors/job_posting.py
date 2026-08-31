@@ -37,7 +37,7 @@ from app.collectors.job_signals import classify_job_title
 from app.core.exceptions import BusinessError
 
 _JOBUl_BASE = "https://www.jobui.com"
-_PAGE_GAP = 1.5  # 翻页礼貌间隔（秒）
+_PAGE_GAP = 5.0  # 翻页礼貌间隔（秒）——1.5s 连续渲染 ~4 页即被 jobui 重置连接（2026-08-31 实测）
 
 # ---------- 职位卡解析（jobui SSR 页，实测结构） ----------
 
@@ -172,10 +172,24 @@ class JobPostingCollector(Collector):
                         ctx.check_cancelled()
                         url = f"{_JOBUl_BASE}/jobs?jobKw={urllib.parse.quote(kw)}&page={pg}"
                         await ctx.log("info", f"搜索：「{kw}」第 {pg} 页")
+                        html = None
                         try:
                             html = await _render_page(page, url)
                         except Exception as exc:  # noqa: BLE001  渲染失败（挑战/超时）
-                            await ctx.log("error", f"「{kw}」第 {pg} 页渲染失败：{type(exc).__name__}: {str(exc)[:60]}")
+                            # 连接被重置 = 连续渲染触发站点限流（2026-08-31 验证轮
+                            # 实测：~4 页/6s 即被切）：退避 25s 重试一次，仍失败才放弃本页
+                            if "ERR_CONNECTION" in str(exc) or "ERR_TIMED_OUT" in str(exc):
+                                await ctx.log(
+                                    "warn", f"「{kw}」第 {pg} 页被限流（{type(exc).__name__}），退避 25s 重试"
+                                )
+                                await asyncio.sleep(25)
+                                try:
+                                    html = await _render_page(page, url)
+                                except Exception as exc2:  # noqa: BLE001
+                                    await ctx.log("error", f"「{kw}」第 {pg} 页重试仍失败：{str(exc2)[:60]}")
+                            else:
+                                await ctx.log("error", f"「{kw}」第 {pg} 页渲染失败：{type(exc).__name__}: {str(exc)[:60]}")
+                        if html is None:
                             continue
                         ok_pages += 1
                         drafts = parse_jobui_html(html, url)

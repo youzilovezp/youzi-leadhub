@@ -220,6 +220,8 @@ async def test_upsert_merge(db_session):
     assert lead1.grade == "C"
 
     # 同一企业 second source：有官网 + WhatsApp 链接（同城 → namecity 反查命中）
+    # whatsapp_job=True 必须伴随 wa_ops 信号（job_posting 生产者不变式；
+    # 合并自愈会把无 wa_ops 证据的 True 重置——2026-08-31 验证轮修脏数据）
     d2 = LeadDraft(
         source="job_posting",
         name="ACME SDN. BHD.",
@@ -228,6 +230,7 @@ async def test_upsert_merge(db_session):
         website="https://www.acme.com",
         whatsapp_url="https://wa.me/60123456789",
         whatsapp_job=True,
+        job_signals={"wa_ops": {"label": "WhatsApp 运营/客服", "points": 30}},
         job_urls=["https://kalibrr.com/c/acme/jobs/1/x"],
     )
     lead2, created2 = await upsert_lead(db_session, d2)

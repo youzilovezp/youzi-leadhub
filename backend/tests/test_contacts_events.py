@@ -72,6 +72,7 @@ async def test_merge_flip_emits_whatsapp_events(db_session):
         city="KL",
         whatsapp_url="https://wa.me/6019998888",
         whatsapp_job=True,
+        job_signals={"wa_ops": {"label": "WhatsApp 运营/客服", "points": 30}},
         email="hi@eventful.com",
         social={"facebook": "https://facebook.com/eventful"},
     )
