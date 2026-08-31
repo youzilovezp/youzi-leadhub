@@ -22,11 +22,26 @@
 
 ## 🚀 30 秒上手
 
+**第 1 步 · 把系统下载到电脑**（同一台电脑只做一次）：把下面整行复制进终端（Terminal）回车
+
 ```bash
-make dev    # 装依赖 + 准备中间件 + 启动前后端，Ctrl+C 一起停
+git clone git@github.com:youzilovezp/youzi-leadhub.git   # 下载系统，会在当前位置生成 youzi-leadhub 文件夹
+cd youzi-leadhub                                          # 进入这个文件夹，后面的命令都在这里执行
 ```
 
-打开 **http://localhost:3000**，账号 `admin` / 密码见 `backend/.env` 的 `INITIAL_ADMIN_PASSWORD`（默认 `admin`），登录成功 ✅
+> 💡 如果第一条命令报错 `Permission denied (publickey)`，说明这台电脑还没配过 GitHub 密钥——没关系，换成下面这条再执行，效果完全一样：
+>
+> ```bash
+> git clone https://github.com/youzilovezp/youzi-leadhub.git
+> ```
+
+**第 2 步 · 一键启动**：
+
+```bash
+make dev    # 自动装依赖 + 启动前后端，Ctrl+C 一起停
+```
+
+**第 3 步 · 打开网页登录**：访问 **http://localhost:3000**，账号 `admin` / 密码见 `backend/.env` 的 `INITIAL_ADMIN_PASSWORD`（默认 `admin`），登录成功 ✅
 
 > 💡 默认密码方便本地开发。**生产前必须改密码：`make admin-pass NEW='<强密码>'`。**
 
