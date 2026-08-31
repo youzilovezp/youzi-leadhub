@@ -16,7 +16,6 @@ from app.api.deps import CurrentUser, SessionDep
 from app.api.perms import lead_visible, require_permission, scope_filter_params
 from app.collectors import list_collectors
 from app.core.exceptions import NotFoundError
-from app.crud.lead_events import describe_dimensions
 from app.models.collect_task import CollectTask
 from app.models.lead import Lead, LeadEvent
 from app.models.user import User
@@ -123,8 +122,7 @@ async def ai_analysis_endpoint(db: SessionDep, user: CurrentUser, lead_id: int):
     from app.crud.contact import list_contacts
 
     contacts = await list_contacts(db, lead_id)
-    dims = describe_dimensions(lead.score_signals)
-    result = await llm.ai_analysis(lead, dims, contacts)
+    result = await llm.ai_analysis(lead, contacts)
     return ResponseModel(data=AiAnalysisOut(**result))
 
 

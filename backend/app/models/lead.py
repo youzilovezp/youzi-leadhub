@@ -70,8 +70,8 @@ class Lead(Base, TimestampMixin):
     # 行的主键可能是 domain:/tel:，另一来源只有名称+城市进来时靠这列命中。
     namecity_key: Mapped[str | None] = mapped_column(String(64), index=True)
     score: Mapped[int] = mapped_column(Integer, default=0, index=True)
-    score_signals: Mapped[dict[str, int]] = mapped_column(JSON, default=dict)  # {维度键: 维度分}（六维）
-    # MVP 加分制明细（PRD §五 13 条）：{"total": 参考总分, "items": [{key,label,points}]}
+    score_signals: Mapped[dict[str, int]] = mapped_column(JSON, default=dict)  # v3 意向分 {命中信号键: 分值}
+    # 意向分明细（v3 加分制，PRD §五 13 条）：{"total": 总分, "items": [{key,label,points}]}
     score_breakdown: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     grade: Mapped[str] = mapped_column(String(2), default="C", server_default="C", index=True)  # S/A/B/C
 

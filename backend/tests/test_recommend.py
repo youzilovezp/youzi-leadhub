@@ -39,24 +39,23 @@ def test_rule_marketing_message_needs_ecommerce_or_transactional():
     assert "marketing_message" in keys and "transactional_message" in keys
 
 
-def test_rule_ai_cs_needs_dim_saas():
+def test_rule_ai_cs_needs_saas_strength():
+    """v3：SaaS 买入强度内部计算（SAAS_CATEGORY_POINTS 求和 ≥40 才推 AI 客服）。"""
     recs = recommend_products(
         whatsapp_hit=True,
         whatsapp_url=None,
         whatsapp_job=False,
         scenes=["customer_service"],
-        saas_signals={"ai_service": 1},
-        dim_saas=45,
+        saas_signals={"ai_service": 1, "crm": 1},  # 18+22=40
     )
     assert "ai_cs" in [r["key"] for r in recs]
-    # SaaS 维不够 → 不推
+    # 强度不够 → 不推
     recs = recommend_products(
         whatsapp_hit=True,
         whatsapp_url=None,
         whatsapp_job=False,
         scenes=["customer_service"],
-        saas_signals={"ai_service": 1},
-        dim_saas=18,  # 只有 ai_service 18 分
+        saas_signals={"ai_service": 1},  # 只有 ai_service 18 分
     )
     assert "ai_cs" not in [r["key"] for r in recs]
 
@@ -144,3 +143,23 @@ def test_rule_overseas_saas_line():
         saas_signals={"crm": 1},
     )
     assert "overseas_saas" not in [r["key"] for r in recs]
+
+
+def test_recommend_products_no_dim_saas_param():
+    """v3 后 SaaS 强度内部计算：单类 crm 不触发 SaaS 方案，两类触发（原 dim_saas>=40 口径）。"""
+    one = recommend_products(
+        whatsapp_hit=False, whatsapp_url=None, whatsapp_job=False,
+        scenes=[], saas_signals={"crm": 1},
+    )
+    assert all(r["key"] != "overseas_saas" for r in one)
+    two = recommend_products(
+        whatsapp_hit=False, whatsapp_url=None, whatsapp_job=False,
+        scenes=[], saas_signals={"crm": 1, "helpdesk": 1},
+    )
+    assert any(r["key"] == "overseas_saas" for r in two)
+    # wa_bsp 一类即 30 分强度（>=40 不满足）→ 不触发；wa_bsp+crm 满足
+    bsp_only = recommend_products(
+        whatsapp_hit=False, whatsapp_url=None, whatsapp_job=False,
+        scenes=[], saas_signals={"wa_bsp": 1},
+    )
+    assert all(r["key"] != "overseas_saas" for r in bsp_only)

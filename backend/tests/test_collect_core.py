@@ -371,6 +371,32 @@ async def test_source_filter_regression(client, admin_credentials):
     assert r2.status_code == 200 and r2.json()["data"]["items"] == []
 
 
+async def test_export_intent_detail_field(client, admin_credentials):
+    """v3 导出：dim_* 六列已删，intent_detail 输出命中信号明细文本。"""
+    r = await client.post("/api/v1/auth/login", json=admin_credentials)
+    h = {"Authorization": f"Bearer {r.json()['data']['access_token']}"}
+    await client.post("/api/v1/collect/leads", headers=h, json={
+        "name": "IntentDetail Co", "country": "MY", "website": "https://intentdetail.com"})
+    r = await client.get(
+        "/api/v1/collect/leads/export",
+        headers=h,
+        params={"keyword": "IntentDetail", "fields": "name,score,intent_detail", "limit": 10},
+    )
+    assert r.status_code == 200
+    assert "意向分明细" in r.content.decode("utf-8-sig")
+    lines = [ln for ln in r.content.decode("utf-8-sig").splitlines() if ln]
+    assert lines[0] == "企业名称,Lead Score,意向分明细"
+    # 手工录入画像无命中信号 → 明细列为空（不炸、不输出 None）
+    assert lines[1] == "IntentDetail Co,0,"
+    # dim_* 已不在字段目录（传了也被过滤 → 有效字段为空报 40001）
+    r = await client.get(
+        "/api/v1/collect/leads/export",
+        headers=h,
+        params={"keyword": "IntentDetail", "fields": "dim_overseas,dim_saas"},
+    )
+    assert r.status_code == 400 and r.json()["code"] == 40001
+
+
 def test_job_posting_liepin_parsing():
     """猎聘职位卡解析（2026-08-31 实测结构）：job-card-pc-container 锚点 +
     title 属性职位名 + company-info 公司名；匿名代发（某…公司）跳过；

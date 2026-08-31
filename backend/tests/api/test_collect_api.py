@@ -211,8 +211,9 @@ async def test_lead_detail_contacts_events_export(client, admin_credentials):
     # ---- 详情（画像聚合）----
     detail = (await client.get(f"/api/v1/collect/leads/{lead['id']}", headers=h)).json()["data"]
     assert detail["contacts_count"] == 1 and detail["contacts"][0]["id"] == contact["id"]
-    assert set(detail["dimensions"]) == {"overseas", "whatsapp", "saas", "scale", "marketing", "contact"}
-    assert detail["dimension_weights"]["whatsapp"] == 30
+    # v3：六维 dimensions/dimension_weights 已删，意向明细走 score_breakdown
+    assert "dimensions" not in detail and "dimension_weights" not in detail
+    assert detail["score_breakdown"]["total"] == detail["score"]
     assert isinstance(detail["events"], list) and detail["events"]
     types = [e["event_type"] for e in detail["events"]]
     assert "manual_entry" in types and "contact_added" in types

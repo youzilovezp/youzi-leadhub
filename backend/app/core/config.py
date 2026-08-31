@@ -170,8 +170,6 @@ class Settings(BaseSettings):
     # 扫描必然覆盖新增线索；不设时间窗口（刚跑完的富化扫不到本次新增，会漏）
     ENRICH_CONCURRENCY: int = 5     # 富化并发站点数
     SCHEDULER_ENABLED: bool = False  # 定时调度总开关（WORKERS=1 的进程才会启动）
-    # 六维评分权重覆盖（JSON，键 overseas/whatsapp/saas/scale/marketing/contact，按和归一化）
-    SCORING_DIM_WEIGHTS: dict[str, int] = {}
     # LLM（OpenAI 兼容协议：智谱 GLM / DeepSeek / OpenAI 均可）。未配置时 AI 能力降级为规则模板
     LLM_BASE_URL: str = ""  # 如 https://open.bigmodel.cn/api/paas/v4
     LLM_API_KEY: str = ""

@@ -19,7 +19,7 @@ from loguru import logger
 
 from app.collectors.recommend import recommend_products
 from app.collectors.scenes import SAAS_LABELS_ZH, SCENE_LABELS_ZH
-from app.collectors.scoring import DIM_LABELS_ZH
+from app.collectors.scoring import INTENT_LABELS_ZH
 from app.core.config import settings
 
 
@@ -66,13 +66,16 @@ _ANALYSIS_SYSTEM = """你是 WhatsApp Business API 产品的销售分析师。�
 "entry_point": 建议销售切入点一句话}。只输出 JSON。"""
 
 
-def _lead_context(lead: Any, dims: dict[str, int], contacts: list[Any]) -> str:
+def _lead_context(lead: Any, contacts: list[Any]) -> str:
     parts = [
         f"企业：{lead.name}",
         f"行业：{lead.industry or '未知'}；国家：{lead.country or '未知'}；城市：{lead.city or '未知'}",
-        f"等级：{lead.grade}（总分 {lead.score}；"
-        + "，".join(f"{DIM_LABELS_ZH[k]} {v}" for k, v in dims.items())
-        + ")",
+        f"等级：{lead.grade}（意向分 {lead.score}；"
+        + "，".join(
+            f"{INTENT_LABELS_ZH.get(k, k)} {v}"
+            for k, v in (lead.score_signals or {}).items()
+        )
+        + "）",
         f"WhatsApp：{'已发现 ' + (lead.whatsapp_url or '') if (lead.whatsapp_hit or lead.whatsapp_url) else '未发现'}；"
         f"FB 私域：{'是' if lead.fb_whatsapp else '否'}；在招 WA 岗位：{'是' if lead.whatsapp_job else '否'}",
         "场景："
@@ -89,7 +92,7 @@ def _lead_context(lead: Any, dims: dict[str, int], contacts: list[Any]) -> str:
     return "\n".join(parts)
 
 
-async def ai_analysis(lead: Any, dims: dict[str, int], contacts: list[Any]) -> dict[str, Any]:
+async def ai_analysis(lead: Any, contacts: list[Any]) -> dict[str, Any]:
     """AI 分析客户（§25）。LLM 不可用时降级为规则模板输出（同结构）。"""
     recs = recommend_products(
         whatsapp_hit=lead.whatsapp_hit,
@@ -98,7 +101,6 @@ async def ai_analysis(lead: Any, dims: dict[str, int], contacts: list[Any]) -> d
         scenes=lead.scenes,
         saas_signals=lead.saas_signals,
         industry=lead.industry,
-        dim_saas=dims.get("saas", 0),
         sources=lead.sources,
     )
     fallback = {
@@ -111,7 +113,7 @@ async def ai_analysis(lead: Any, dims: dict[str, int], contacts: list[Any]) -> d
     if not llm_enabled():
         return {**fallback, "generated_by": "template"}
     try:
-        result = await chat_json(_ANALYSIS_SYSTEM, _lead_context(lead, dims, contacts))
+        result = await chat_json(_ANALYSIS_SYSTEM, _lead_context(lead, contacts))
         return {**fallback, **result, "generated_by": "llm"}
     except Exception as exc:  # noqa: BLE001  LLM 失败不挡业务，降级模板
         logger.warning("llm.ai_analysis 降级模板：{}: {}", type(exc).__name__, exc)
@@ -149,7 +151,7 @@ async def sales_script(lead: Any) -> dict[str, Any]:
     if not llm_enabled():
         return {"script": _script_fallback(lead), "generated_by": "template"}
     try:
-        result = await chat_json(_SCRIPT_SYSTEM, _lead_context(lead, {}, []))
+        result = await chat_json(_SCRIPT_SYSTEM, _lead_context(lead, []))
         return {"script": result.get("script") or _script_fallback(lead), "generated_by": "llm"}
     except Exception as exc:  # noqa: BLE001
         logger.warning("llm.sales_script 降级模板：{}: {}", type(exc).__name__, exc)
