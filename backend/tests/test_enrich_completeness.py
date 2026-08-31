@@ -78,8 +78,12 @@ def test_detect_text_phones_international_format():
     多数联系页不写 tel: 链接，电话就是正文文本；裸座机号不碰——只认 +区号前缀）。"""
     html = "<html><body>CONTACT US +86 137 3602 8159 marketing@mu.com</body></html>"
     assert detect_text_phones([html]) == ["+86 137 3602 8159"]
-    # 无国际前缀的座机形态不产出（误报面大）
-    assert detect_text_phones(["<p>0755-12345678</p>"]) == []
+    # 座机/400 现在就是要抓（2026-09-01 用户需求：连最基础的电话都没有）
+    # ——合法性校验交给 phonenumbers region=CN（enrich 调用侧），形态层宽抓
+    assert '0755-12345678' in detect_text_phones(['<p>0755-12345678</p>'])
+    assert '400-820-8820' in detect_text_phones(['<p>400-820-8820</p>'])
+    # 纯数字串（订单号等）仍不产出：无前导 0/+/400 形态不匹配
+    assert detect_text_phones(['<p>订单号 12345678901</p>']) == []
     assert detect_text_phones(["<p>价格 +86 元起</p>"]) == []
 
 
@@ -126,3 +130,66 @@ def test_detect_jsonld_contacts_schema_org():
     assert got["email"] == "sales@acme.com"
     assert "Guangfu West Rd" in got["address"]
     assert detect_jsonld_contacts(["<p>无结构化数据</p>"]) == {}
+
+
+def test_site_matches_company_distractor_rule():
+    """官网归属校验（2026-09-01 实测三类错配）：标题=知名平台且与公司名零重叠
+    → 判错配；字面零重叠但无平台干扰词（凯越/MU Group）→ 存疑放行不误杀。"""
+    from app.collectors.website_enrich import site_matches_company
+
+    # 实测错配形态
+    ok, title = site_matches_company("<title>酷狗音乐 - 就是歌多！</title>", "酷集科技")
+    assert ok is False and "酷狗" in title
+    ok2, _ = site_matches_company("<title>QQ邮箱电脑版_网页端免费邮件服务</title>", "艾普锐智能装备（嘉兴）有限公司")
+    assert ok2 is False
+    ok3, _ = site_matches_company("<title>汉典</title>", "宸星体育用品（上海）有限责任公司")
+    assert ok3 is False
+    # 名-站一致 / 字面零重叠但非平台（存疑放行） / 无标题（放行）
+    assert site_matches_company("<title>凯迪仕智能锁-智能指纹锁</title>", "凯迪仕")[0] is True
+    assert site_matches_company("<title>MU Group: China's first supply chain</title>", "宁波凯越集团")[0] is True
+    assert site_matches_company("<html>no title</html>", "任意公司")[0] is True
+
+
+async def test_clear_mismatched_website_purges_wrong_site_data(db_session):
+    """错配清除要连坐：错站抓的邮箱/电话/WA/信号/自动联系人全清（全是别人的数据）。"""
+    from sqlalchemy import select
+
+    from app.collectors.base import LeadDraft
+    from app.collectors.website_enrich import _clear_mismatched_website
+    from app.crud.contact import auto_create_from_email
+    from app.crud.lead import upsert_lead
+    from app.models.lead import Lead, LeadContact
+
+    lead, _ = await upsert_lead(
+        db_session,
+        LeadDraft(source="web_search", name="错配清除测试科技（杭州）有限公司",
+                  website="https://kugou.com", is_cn=True, email="wrong@kugou.com"),
+    )
+    await db_session.flush()
+    await auto_create_from_email(db_session, lead, "wrong@kugou.com", source="website_enrich")
+    await db_session.commit()
+    assert lead.email and lead.website
+
+    await _clear_mismatched_website(lead.id, "https://kugou.com", "酷狗音乐", session=db_session)
+    await db_session.commit()
+    await db_session.expire_all()
+    got = await db_session.get(Lead, lead.id)
+    assert got.website is None and got.domain is None
+    assert got.email is None and got.phone_e164 is None
+    assert not got.whatsapp_hit and got.saas_signals == {} and got.overseas_signals == {}
+    left = (await db_session.execute(
+        select(LeadContact).where(LeadContact.lead_id == got.id)
+    )).scalars().all()
+    assert left == []
+    assert got.field_meta["website"]["source"] == "mismatch_clear"
+    await _delete_tree(db_session, got.id)
+
+
+async def _delete_tree(db_session, lead_id):
+    from sqlalchemy import delete
+
+    from app.models.lead import Lead, LeadContact, LeadEvent, LeadFollowUp, LeadSignal
+    for m in (LeadContact, LeadSignal, LeadEvent, LeadFollowUp):
+        await db_session.execute(delete(m).where(m.lead_id == lead_id))
+    await db_session.execute(delete(Lead).where(Lead.id == lead_id))
+    await db_session.commit()

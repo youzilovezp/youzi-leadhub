@@ -65,6 +65,8 @@ _NON_SITE_DOMAINS = (
     # 出海媒体/素材站/博客（2026-09-01 实测批次漏网）
     "baijing.cn", "chwang.com", "haiwainet.cn", "nipic.com",
     "chuhaijiang.com", "onexiaobai.com",
+    # 知名平台/词典站（2026-09-01 官网错配实测：被当官网绑给无关公司）
+    "kugou.com", "zdic.net",
 )
 
 

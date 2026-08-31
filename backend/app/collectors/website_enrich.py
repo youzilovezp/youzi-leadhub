@@ -94,6 +94,44 @@ def detect_icp_license(html_list: list[str] | list[str | None] | None) -> str | 
 
 
 _TEXT_PHONE_RE = re.compile(r"\+\d{1,3}[\s\-]?(?:\d[\s\-]?){7,12}\d")
+# 400 热线（中国企业客服标配形态，误报极低）与国内座机（0xx-xxxxxxxx）
+# 2026-09-01 用户反馈「连最基础的电话都没有」——此前只认国际前缀明文，
+# 而国内官网联系页九成是 400/座机。校验交给 phonenumbers（region=CN）
+# 官网归属校验（2026-09-01）：错配官网的实测形态——站点是知名平台/产品站
+# （酷狗音乐/QQ邮箱/汉典词典等），标题带明显品牌词而与公司名零重叠。这类
+# 「张冠李戴」不清除的话，从错站抓的邮箱/电话/信号全是别人的数据
+_SITE_BRAND_DISTRACTORS: tuple[str, ...] = (
+    "酷狗", "酷我", "qq音乐", "QQ音乐", "汉典", "百度", "京东", "淘宝", "天猫",
+    "拼多多", "知乎", "哔哩", "bilibili", "抖音", "快手", "网易", "新浪", "搜狐",
+    "腾讯", "qq邮箱", "qq 邮箱", "微信", "支付宝", "携程", "美团", "饿了么", "高德",
+    "滴滴", "哈啰", "下载", "下载站", "win10", "windows", "android", "apk",
+)
+_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.S | re.I)
+
+
+def site_matches_company(homepage_html: str, company_name: str) -> tuple[bool, str]:
+    """首页标题与公司名的一致性粗判：返回 (是否通过, 站点标题)。
+
+    判「错配」的条件（保守——两证齐全才判错）：
+    ① 标题含知名平台/产品品牌词（干扰词表）且 ② 公司名主词不出现在标题里。
+    只缺一证不判（凯越 vs "MU Group" 字面零重叠但不是错配——宁存疑不误杀）。
+    """
+    m = _TITLE_RE.search(homepage_html or "")
+    title = re.sub(r"<[^>]+>|\s+", " ", m.group(1)).strip() if m else ""
+    if not title:
+        return True, title  # 拿不到标题不判错
+    core = re.sub(r"(股份有限公司|有限责任公司|有限公司|集团公司|集团)", "", company_name or "").strip()
+    name_hit = bool(core) and any(
+        core[i : i + 2] in title for i in range(max(1, len(core) - 1))
+    )
+    distractor = next((d for d in _SITE_BRAND_DISTRACTORS if d.lower() in title.lower()), "")
+    if distractor and not name_hit:
+        return False, title
+    return True, title
+
+
+_400_HOTLINE_RE = re.compile(r"(?<!\d)400-?\d{3,4}-?\d{3,4}(?!\d)")
+_CN_LANDLINE_RE = re.compile(r"(?<!\d)0\d{2,3}[-\s]?\d{3,4}[-\s]?\d{4}(?!\d)")
 
 
 def detect_text_phones(html_list: list[str]) -> list[str]:
@@ -105,7 +143,14 @@ def detect_text_phones(html_list: list[str]) -> list[str]:
     """
     from app.collectors.scenes import page_text
 
-    return [m.group(0).strip() for m in _TEXT_PHONE_RE.finditer(page_text(html_list, keep_case=True))]
+    text = page_text(html_list, keep_case=True)
+    out: list[str] = []
+    for pattern in (_TEXT_PHONE_RE, _400_HOTLINE_RE, _CN_LANDLINE_RE):
+        for m in pattern.finditer(text):
+            v = m.group(0).strip()
+            if v not in out:
+                out.append(v)
+    return out
 
 
 _JSONLD_RE = re.compile(
@@ -896,6 +941,70 @@ async def _record_enrich_fail(lead_id: int, website: str, reason: str) -> None:
         await session.commit()
 
 
+async def _clear_mismatched_website(
+    lead_id: int,
+    website: str,
+    site_title: str,
+    session: AsyncSession | None = None,
+) -> None:
+    """官网错配清除（2026-09-01）：张冠李戴的站抓来的邮箱/电话/信号/联系人
+    全是别人的数据——全清 + 重评分（大概率成空壳，交给 prune 规则），
+    field_meta.website 记错配原因。session 缺省自建短事务；测试可注入共库会话。
+    """
+    from sqlalchemy import select as _select
+
+    from app.crud.lead_events import rescore_and_log
+    from app.models.lead import Lead, LeadContact
+
+    owns = session is None
+    if owns:
+        session = _session_factory()()
+    try:
+        lead = await session.get(Lead, lead_id)
+        if lead is None:
+            return
+        lead.website = None
+        lead.domain = None
+        lead.email = None
+        lead.phone_raw = None
+        lead.phone_e164 = None
+        lead.whatsapp_hit = False
+        lead.whatsapp_url = None
+        lead.whatsapp_numbers = []
+        lead.fb_whatsapp = False
+        lead.wa_business = False
+        lead.scenes = []
+        lead.saas_signals = {}
+        lead.overseas_signals = {}
+        lead.social = {}
+        meta = dict(lead.field_meta or {})
+        meta["website"] = {
+            "source": "mismatch_clear",
+            "reason": f"错配官网已清除：站点标题「{site_title[:60]}」与公司名无关联",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "confidence": 100,
+        }
+        lead.field_meta = meta
+        rows = (
+            await session.execute(
+                _select(LeadContact).where(
+                    LeadContact.lead_id == lead_id,
+                    LeadContact.source == "website_enrich",
+                )
+            )
+        ).scalars().all()
+        for c in rows:
+            await session.delete(c)
+        await rescore_and_log(session, lead)
+        if owns:
+            await session.commit()
+        else:
+            await session.flush()
+    finally:
+        if owns:
+            await session.close()
+
+
 async def _enrich_one(
     clients: tuple[httpx.AsyncClient, httpx.AsyncClient],
     ctx: TaskContext,
@@ -935,6 +1044,23 @@ async def _enrich_one(
         await ctx.log("warn", f"[lead {lead_id}] 首页抓取失败：{website} —— {reason}")
         await _record_enrich_fail(lead_id, website, reason)
         return False, reason
+
+    # 官网归属校验（2026-09-01）：标题=知名平台且与公司名零重叠 → 张冠李戴
+    # （实测：酷集科技→酷狗音乐、艾普锐→QQ邮箱镜像、宸星→汉典词典）。
+    # 两证齐全才判错——凯越 vs "MU Group" 字面零重叠但不是错配，宁存疑不误杀
+    from app.models.lead import Lead as _Lead
+
+    async with _session_factory()() as _s:
+        _row = await _s.get(_Lead, lead_id)
+        _company_name = _row.name if _row else ""
+    owns_site, site_title = site_matches_company(homepage, _company_name)
+    if not owns_site:
+        await ctx.log(
+            "warn",
+            f"[lead {lead_id}] ⚠️ 官网错配清除：{website} 站点是「{site_title[:40]}」，与「{_company_name}」无关联",
+        )
+        await _clear_mismatched_website(lead_id, website, site_title)
+        return False, f"官网错配已清除（站点={site_title[:30]}）"
 
     # 首页里找内页链接（联系/关于/产品，最多 3 个，域名相同才跟）
     base_domain = extract_domain(base)
