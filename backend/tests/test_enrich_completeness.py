@@ -77,6 +77,7 @@ def test_detect_text_phones_international_format():
     """明文国际电话（2026-09-01 实测 mugroup.com：「CONTACT US +86 137 3602 8159」，
     多数联系页不写 tel: 链接，电话就是正文文本；裸座机号不碰——只认 +区号前缀）。"""
     html = "<html><body>CONTACT US +86 137 3602 8159 marketing@mu.com</body></html>"
+    # 国际号码与手机形态同串命中时只留国际形态（span 去重，不重复产出）
     assert detect_text_phones([html]) == ["+86 137 3602 8159"]
     # 座机/400 现在就是要抓（2026-09-01 用户需求：连最基础的电话都没有）
     # ——合法性校验交给 phonenumbers region=CN（enrich 调用侧），形态层宽抓
@@ -158,7 +159,10 @@ async def test_clear_mismatched_website_purges_wrong_site_data(db_session):
     from app.collectors.website_enrich import _clear_mismatched_website
     from app.crud.contact import auto_create_from_email
     from app.crud.lead import upsert_lead
+    from app.db.init_db import init_db
     from app.models.lead import Lead, LeadContact
+
+    await init_db()  # 单文件跑时 db_session 不经 client fixture，需自建表
 
     lead, _ = await upsert_lead(
         db_session,
@@ -172,8 +176,9 @@ async def test_clear_mismatched_website_purges_wrong_site_data(db_session):
 
     await _clear_mismatched_website(lead.id, "https://kugou.com", "酷狗音乐", session=db_session)
     await db_session.commit()
-    await db_session.expire_all()
+    db_session.expire_all()
     got = await db_session.get(Lead, lead.id)
+    await db_session.refresh(got)  # commit 后属性访问会触发懒加载 MissingGreenlet
     assert got.website is None and got.domain is None
     assert got.email is None and got.phone_e164 is None
     assert not got.whatsapp_hit and got.saas_signals == {} and got.overseas_signals == {}
@@ -193,3 +198,30 @@ async def _delete_tree(db_session, lead_id):
         await db_session.execute(delete(m).where(m.lead_id == lead_id))
     await db_session.execute(delete(Lead).where(Lead.id == lead_id))
     await db_session.commit()
+
+
+def test_detect_contact_persons_kaadas_shape():
+    """具名联系人提取（2026-09-01 kaadas 联系页实测形态）：部门+人名+手机号。"""
+    from app.collectors.website_enrich import detect_contact_persons
+
+    text = """
+    海外事业部（加盟合作/OEM/ODM） 联系人：屈先生 联系电话：189-2522-1831
+    工程集采业务部(地产、智慧公寓&高校、园区等) 联系人：欧阳先生（负责人） 联系电话：136-0259-5599
+    KA渠道（苏宁、国美、商超等） 联系人：李明祥 联系电话：153-6731-9213
+    """
+    persons = detect_contact_persons([f"<html><body>{text}</body></html>"])
+    by_name = {p["name"]: p for p in persons}
+    assert by_name["屈先生"]["phone"] == "18925221831"
+    assert "海外事业部" in by_name["屈先生"]["title"]
+    assert by_name["欧阳先生"]["phone"] == "13602595599"
+    assert "负责人" in by_name["欧阳先生"]["title"]
+    assert len(persons) == 3
+
+
+def test_phone_rank_prefers_landline_over_400():
+    """电话选取定序（kaadas 教训）：总机座机 > 国际 > 400 热线 > 手机。"""
+    from app.collectors.website_enrich import detect_text_phones
+
+    html = "<p>售后热线：400-800-5919 招商热线：400-800-3756 联系电话：0755-86668868</p>"
+    phones = detect_text_phones([html])
+    assert "0755-86668868" in phones and "400-800-5919" in phones
