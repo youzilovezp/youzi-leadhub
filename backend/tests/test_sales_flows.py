@@ -136,6 +136,43 @@ async def test_assign_release_and_auto_assign(client, admin_credentials):
         await client.delete(f"/api/v1/collect/leads/{lid}", headers=h)
 
 
+async def test_auto_assign_skips_non_buyer(client, admin_credentials):
+    """终审修复波：auto-assign 共享池同样过 ICP 门——non_buyer（媒体/社区）不被轮转给销售。"""
+    h = await _login(client, admin_credentials)
+    r = await client.post(
+        "/api/v1/users",
+        headers=h,
+        json={"username": "fixwave_sales", "password": "pass-123456", "nickname": "修复波销售"},
+    )
+    owner_id = r.json()["data"]["id"]
+    # 正常共享池线索（unknown 不做有罪推定，可分配）+ 名称命中买家黑名单的线索
+    normal = await _mk_lead(
+        client, h, "Fixwave Normal Co", country="MY",
+        website="https://fixwave-normal.com", industry="fixwave_test",
+    )
+    non_buyer = await _mk_lead(
+        client, h, "Fixwave 跨境卖家社区", country="CN",
+        website="https://fixwave-community.com", industry="fixwave_test",
+    )
+    assert non_buyer["icp_status"] == "non_buyer"  # 前置：确实命中买家门
+
+    r = await client.post(
+        "/api/v1/collect/leads/auto-assign",
+        headers=h,
+        json={"owner_ids": [owner_id], "max_per_owner": 10, "limit": 10, "industry": "fixwave_test"},
+    )
+    data = r.json()["data"]
+    assert data["assigned_count"] == 1
+    # 库内核验：正常线索被分配，non_buyer 留在共享池
+    got_normal = (await client.get(f"/api/v1/collect/leads/{normal['id']}", headers=h)).json()["data"]
+    got_non_buyer = (await client.get(f"/api/v1/collect/leads/{non_buyer['id']}", headers=h)).json()["data"]
+    assert got_normal["owner_id"] == owner_id
+    assert got_non_buyer["owner_id"] is None
+
+    for lid in (normal["id"], non_buyer["id"]):
+        await client.delete(f"/api/v1/collect/leads/{lid}", headers=h)
+
+
 async def test_alerts_endpoint(client, admin_credentials):
     """预警中心（§55）：is_alert 事件可查（无预警时为空也成立）。"""
     h = await _login(client, admin_credentials)

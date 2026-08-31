@@ -149,6 +149,8 @@ async def auto_assign_leads(
     conds: list = [
         Lead.owner_id.is_(None),  # 未分配 = owner IS NULL
         (Lead.follow_status.is_(None)) | (Lead.follow_status == "unassigned"),
+        # ICP 门（与 _lead_conditions 默认口径一致）：foreign/non_buyer 不进销售池
+        Lead.icp_status.notin_(("foreign", "non_buyer")),
     ]
     if grade:
         conds.append(Lead.grade == grade.upper())

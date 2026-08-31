@@ -210,8 +210,7 @@ SAAS_SIGNALS: list[tuple[str, str, list[str]]] = [
             "crisp.chat",
             "tawk.to",
             "livechat",
-            "livechatinc",
-            "drift",
+            "drift.com",
         ],
     ),
 ]
@@ -281,7 +280,8 @@ def detect_saas_signals(html_list: list[str] | None) -> dict[str, int]:
             if text and _keyword_hit(text, kw):
                 count += 1
             elif key in ("wa_bsp", "brand_stack") and kw in raw:
-                # 品牌词足够独特（wati.io/360dialog/gupshup…），raw 子串命中
+                # raw 子串匹配的取舍：域名形指纹（wati.io/zdassets/drift.com）
+                # 本身独特，直接子串；普通品牌词以 .com 等域名锚定，防裸词误报
                 count += 1
         if count:
             hits[key] = count
