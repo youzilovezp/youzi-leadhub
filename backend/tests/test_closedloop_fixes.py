@@ -161,10 +161,11 @@ async def test_upsert_auto_contact_from_collector_email(db_session):
 
 async def test_maybe_chain_enrich_creates_and_throttles(db_session, monkeypatch):
     """采集流水线自动接力（2026-08-31 交互改造）：发现类完成 → 自动排入富化；
-    节流窗口内有富化跑过 → 跳过；非发现类/开关关 → 不动。"""
+    去重只认「全库富化还在排队」（排队中的扫描必然覆盖新增线索），刚跑完的
+    不算数——按时间窗口节流会整批漏富化（同日修复）；非发现类/开关关 → 不动。"""
     from datetime import datetime, timezone
 
-    from sqlalchemy import delete as sa_delete, select as sa_select
+    from sqlalchemy import delete as sa_delete, select as sa_select, update as sa_update
 
     from app.models.collect_task import CollectTask
     from app.services.task_runner import task_runner
@@ -211,31 +212,58 @@ async def test_maybe_chain_enrich_creates_and_throttles(db_session, monkeypatch)
     assert not logs
     assert await _chained_count() == baseline + 1
 
-    # 3) 节流：窗口内有富化任务刚跑过（last_run_at=now）→ 跳过并留日志
+    # 清掉 1) 排队中的接力任务（新去重逻辑下它会挡住后续用例的接力）
+    await db_session.delete(chained[0])
+    await db_session.commit()
+
+    # 3) 富化刚跑完（旧时间窗口的节流条件）→ 必须照常接力：刚跑完的富化
+    #    扫不到本批新增线索，按"跑没跑过"节流会整批漏富化（2026-08-31 修复）
     ran = CollectTask(
         name="最近的富化（节流桩）", collector="website_enrich", params={},
-        last_run_at=datetime.now(timezone.utc),
+        status="completed", last_run_at=datetime.now(timezone.utc),
     )
     db_session.add(ran)
     await db_session.commit()
     logs.clear()
     await task_runner._maybe_chain_enrich(log_fn, 9903, "job_posting", 1)
+    assert any("已自动接力" in m for _, m in logs)
+    assert await _chained_count() == baseline + 1  # 刚跑过 ≠ 覆盖，必须补接力
+
+    # 4) 全库富化（params 空）排队中 → 跳过（它扫得到本批新增）
+    logs.clear()
+    await task_runner._maybe_chain_enrich(log_fn, 9905, "web_search", 1)
     assert any("跳过自动富化接力" in m for _, m in logs)
     assert await _chained_count() == baseline + 1  # 没有新建
 
-    # 4) 开关关闭 → 不动
+    # 5) 勾选型富化（lead_ids）排队 → 不算数，照常接力（它不扫全库）
+    picked = CollectTask(
+        name="勾选富化（节流桩）", collector="website_enrich",
+        params={"lead_ids": [1, 2]}, status="queued",
+    )
+    db_session.add(picked)
+    # 顺手把 3) 接力的那个消费掉（置 completed），隔离 5) 的判定
+    await db_session.execute(
+        sa_update(CollectTask).where(CollectTask.name.like("%任务 #9903%")).values(status="completed")
+    )
+    await db_session.commit()
+    logs.clear()
+    await task_runner._maybe_chain_enrich(log_fn, 9906, "meta_ads", 1)
+    assert any("已自动接力" in m for _, m in logs)
+    assert await _chained_count() == baseline + 2
+
+    # 6) 开关关闭 → 不动
     monkeypatch.setattr("app.core.config.settings.AUTO_CHAIN_ENRICH", False)
     logs.clear()
-    await db_session.delete(ran)
-    await db_session.commit()
-    await task_runner._maybe_chain_enrich(log_fn, 9904, "meta_ads", 1)
+    await task_runner._maybe_chain_enrich(log_fn, 9907, "meta_ads", 1)
     assert not logs
-    assert await _chained_count() == baseline + 1
+    assert await _chained_count() == baseline + 2
 
-    # 清理（共享测试库）：只删本用例接力产生的
+    # 清理（共享测试库）：只删本用例接力产生的 + 节流桩
     await db_session.execute(
         sa_delete(CollectTask).where(CollectTask.name.like(f"{_CHAIN_NAME}%"))
     )
+    await db_session.delete(ran)
+    await db_session.delete(picked)
     await db_session.commit()
 
 

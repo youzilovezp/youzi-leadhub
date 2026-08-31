@@ -324,31 +324,93 @@ class WebsiteEnrichCollector(Collector):
             # cn_domestic 永远升不了 qualified。仅全库扫描模式做（手动勾选是精确富化）
             discovered: list[tuple[int, str]] = []
             if not lead_ids:
+                # 全库富化允许调大发现上限（手动按钮传大值一次清完存量；
+                # 自动接力保持默认 30——搜索配额友好）
+                try:
+                    discover_limit = max(1, min(int(ctx.params.get("discover_limit") or _DISCOVER_LIMIT), 500))
+                except (TypeError, ValueError):
+                    discover_limit = _DISCOVER_LIMIT
                 async with _session_factory()() as session:
-                    candidates = await _load_discoverable(session, _DISCOVER_LIMIT)
+                    candidates = await _load_discoverable(session, discover_limit)
+                    from sqlalchemy import func
+
+                    from app.models.lead import Lead as LeadModel
+
+                    backlog = (
+                        await session.execute(
+                            select(func.count()).select_from(LeadModel).where(
+                                (LeadModel.website.is_(None)) | (LeadModel.website == ""),
+                                LeadModel.icp_status != "foreign",
+                            )
+                        )
+                    ).scalar_one()
+                if candidates:
+                    await ctx.log(
+                        "info",
+                        f"库内共 {backlog} 家无官网，本轮处理 {len(candidates)} 家（按分数优先）",
+                    )
                 for lid, name in candidates:
                     ctx.check_cancelled()
-                    ws = await _discover_website((client, loose), name)
+                    ws = await _discover_website((client, loose), name, log=ctx.log)
                     if ws:
+                        from app.crud.lead import touch_field_meta
+                        from app.models.lead import Lead
+
+                        dom = extract_domain(ws)
+                        async with _session_factory()() as session:
+                            lead = await session.get(Lead, lid)
+                            if lead and not lead.website:
+                                # 撞域检查：别的线索已持有该 domain 时绝不写入——
+                                # 发现链直接改行会绕过 upsert 去重，同公司出现两条
+                                # 线索且永远无人合并（2026-08-31 巡检 B 级 bug）。
+                                # 标 dup 负缓存 7 天冷却，避免反复搜索浪费配额
+                                taken = await _domain_taken(session, dom, lid) if dom else None
+                                if taken is not None:
+                                    touch_field_meta(
+                                        lead, "website", "web_discovery_dup",
+                                        confidence=0, now=datetime.now(timezone.utc),
+                                    )
+                                    await session.commit()
+                                    await ctx.log(
+                                        "info",
+                                        f"[lead {lid}] 🔍 官网发现撞域跳过：{name} → {ws}"
+                                        f"（线索 #{taken} 已持有 {dom}，不造重复）",
+                                    )
+                                else:
+                                    lead.website = ws
+                                    lead.domain = dom or lead.domain
+                                    touch_field_meta(
+                                        lead, "website", "web_discovery",
+                                        confidence=60, now=datetime.now(timezone.utc),
+                                    )
+                                    await session.commit()
+                                    discovered.append((lid, ws))
+                                    await ctx.log("info", f"[lead {lid}] 🔍 官网发现：{name} → {ws}")
+                    else:
+                        # 失败负缓存：7 天内不再重搜（否则失败者永远占着
+                        # 分数倒序的前 N 窗口，后面的线索饿死——2026-08-31 巡检 A 级 bug）
                         from app.crud.lead import touch_field_meta
                         from app.models.lead import Lead
 
                         async with _session_factory()() as session:
                             lead = await session.get(Lead, lid)
                             if lead and not lead.website:
-                                lead.website = ws
-                                lead.domain = extract_domain(ws) or lead.domain
                                 touch_field_meta(
-                                    lead, "website", "web_discovery",
-                                    confidence=60, now=datetime.now(timezone.utc),
+                                    lead, "website", "web_discovery_miss",
+                                    confidence=0, now=datetime.now(timezone.utc),
                                 )
                                 await session.commit()
-                                discovered.append((lid, ws))
-                                await ctx.log("info", f"[lead {lid}] 🔍 官网发现：{name} → {ws}")
                     await asyncio.sleep(_DISCOVER_GAP)  # 搜索礼貌间隔
                 if candidates:
+                    remaining = backlog - len(discovered)
                     await ctx.log(
-                        "info", f"官网发现：{len(discovered)}/{len(candidates)} 条命中"
+                        "info",
+                        f"官网发现：{len(discovered)}/{len(candidates)} 条命中"
+                        + (
+                            f"，仍有 {remaining} 家无官网待后续轮次（再点一次全库富化继续）"
+                            if remaining > 0
+                            else ""
+                        ),
                     )
             leads = [*discovered, *leads]
 
@@ -397,34 +459,87 @@ class WebsiteEnrichCollector(Collector):
 # 招聘站（jobui）公司页无官网字段——缺官网的线索进不了富化/评分链路，
 # cn_domestic 永远升不了 qualified。用公司名走搜索引擎（默认引擎、零 key）
 # 找官网，复用 web_search 的平台/文章页过滤与根 URL 归一。
-_DISCOVER_GAP = 2.0  # 搜索礼貌间隔（秒）
-_DISCOVER_LIMIT = 30  # 每次任务最多发现的线索数（搜索配额友好）
+_DISCOVER_GAP = 3.0  # 搜索礼貌间隔（秒）——必应通道对频繁请求敏感，3s 起步
+_DISCOVER_LIMIT = 30  # 每轮最多发现的线索数（搜索配额友好；手动全库富化可调大）
+_DISCOVER_RETRY_DAYS = 7  # 发现失败/撞域名的冷却重试天数（field_meta 负缓存）
 
 
 async def _discover_website(
-    clients: tuple[httpx.AsyncClient, httpx.AsyncClient], name: str
+    clients: tuple[httpx.AsyncClient, httpx.AsyncClient], name: str, log=None
 ) -> str | None:
-    """公司名 → 官网（第一个企业站结果，根 URL 归一）。找不到返回 None。"""
-    from app.collectors.web_search import _search, results_to_drafts
+    """公司名 → 官网（第一个企业站结果，根 URL 归一）。找不到返回 None。
 
-    items, _err = await _search(clients, settings.SEARCH_ENGINE, f"{name} 官网", 5)
+    走 search_with_fallback（DDG 不可达自动切必应）——发现链此前直连主引擎，
+    引擎被墙时发现率直接归零，无官网线索永远进不了富化。
+    """
+    # 经模块属性调用（非 from-import 局部绑定）——测试可对 web_search.search_with_fallback 打桩
+    from app.collectors import web_search as _ws
+
+    items, _err, _used = await _ws.search_with_fallback(clients, f"{name} 官网", 5, log=log)
     if not items:
         return None
-    drafts = results_to_drafts(items, params_is_cn=True)
+    drafts = _ws.results_to_drafts(items, params_is_cn=True)
     return drafts[0].website if drafts else None
 
 
-async def _load_discoverable(session: AsyncSession, limit: int) -> list[tuple[int, str]]:
-    """无官网且非 foreign 的线索（分数倒序——高分商机优先补全）。"""
+async def _domain_taken(session: AsyncSession, domain: str, exclude_id: int) -> int | None:
+    """该 domain 是否已被其他线索持有（返回持有者 id 或 None）。
+
+    发现链直接改行会绕过 upsert 去重——同公司出现两条线索且永远无人合并，
+    所以写入前必查（2026-08-31 巡检 B 级 bug）。
+    """
+    from sqlalchemy import select as sa_select
+
     from app.models.lead import Lead
 
-    stmt = (
-        select(Lead.id, Lead.name)
-        .where((Lead.website.is_(None)) | (Lead.website == ""), Lead.icp_status != "foreign")
-        .order_by(Lead.score.desc())
-        .limit(limit)
-    )
-    return [(r[0], r[1]) for r in (await session.execute(stmt)).all()]
+    return (
+        await session.execute(
+            sa_select(Lead.id).where(Lead.domain == domain, Lead.id != exclude_id).limit(1)
+        )
+    ).scalar_one_or_none()
+
+
+def _discovery_cooldown(meta: dict | None, now: datetime | None = None) -> bool:
+    """field_meta 里 website 字段带 miss/dup 标记且在冷却期内 → 跳过本轮发现。
+
+    没有负缓存时：发现失败的线索分数不变，永远占着「分数倒序前 N」的窗口，
+    排在后面的线索饿死（2026-08-31 巡检：191 家 backlog 下覆盖率会永久卡住）。
+    """
+    w = (meta or {}).get("website") or {}
+    if w.get("source") not in ("web_discovery_miss", "web_discovery_dup"):
+        return False
+    try:
+        tried = datetime.fromisoformat(str(w.get("updated_at")))
+    except (TypeError, ValueError):
+        return False
+    cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=_DISCOVER_RETRY_DAYS)
+    return tried >= cutoff
+
+
+async def _load_discoverable(session: AsyncSession, limit: int) -> list[tuple[int, str]]:
+    """无官网且非 foreign 的线索（分数倒序——高分商机优先补全）。
+
+    多取 3 倍候选，内存里滤掉冷却中的（失败/撞域名 7 天内不再消耗搜索配额）；
+    SQL 侧不比较 JSON——PG json 类型无 = 操作符。
+    """
+    from app.models.lead import Lead
+
+    rows = (
+        await session.execute(
+            select(Lead.id, Lead.name, Lead.field_meta)
+            .where((Lead.website.is_(None)) | (Lead.website == ""), Lead.icp_status != "foreign")
+            .order_by(Lead.score.desc())
+            .limit(limit * 3 + 30)
+        )
+    ).all()
+    out: list[tuple[int, str]] = []
+    for lid, name, meta in rows:
+        if _discovery_cooldown(meta):
+            continue
+        out.append((lid, name))
+        if len(out) >= limit:
+            break
+    return out
 
 
 async def _load_scope(session: AsyncSession, lead_ids: list[Any]) -> list[tuple[int, str]]:
@@ -483,6 +598,26 @@ def _session_factory():
     return async_session
 
 
+async def _fetch_impersonated(url: str) -> str | None:
+    """Chrome TLS/HTTP2 指纹伪装请求（curl_cffi）：大多数反爬只认指纹不开浏览器就能过。
+
+    抓取三层递进的第二层——httpx（快、通用）→ 本层（指纹伪装，毫秒级开销，
+    实测 banggood 403 → 200）→ 无头浏览器渲染（JS 挑战才需要）。失败/未安装返回 None。
+    """
+    try:
+        from curl_cffi.requests import AsyncSession
+    except ImportError:
+        return None
+    try:
+        async with AsyncSession(impersonate="chrome", timeout=20) as s:
+            resp = await s.get(url)
+            if resp.status_code == 200 and len(resp.text) > 500:
+                return resp.text
+    except Exception:  # noqa: BLE001  指纹层失败留给浏览器层
+        return None
+    return None
+
+
 async def _render_with_browser(browser, url: str) -> str | None:
     """无头浏览器渲染兜底：httpx 被反爬拒绝（403）的大站用渲染抓。失败返回 None。"""
     try:
@@ -528,7 +663,13 @@ async def _enrich_one(
     primary = clients[0]
     base = website if website.startswith(("http://", "https://")) else f"https://{website}"
     homepage = await _fetch_site(clients, base)
+    if homepage is None:
+        # 第二层：Chrome 指纹伪装（大多数反爬站到此为止，不用开浏览器）
+        homepage = await _fetch_impersonated(base)
+        if homepage is not None:
+            await ctx.log("info", f"[lead {lead_id}] 🥷 Chrome 指纹伪装通过：{website}")
     if homepage is None and get_browser is not None:
+        # 第三层：无头浏览器渲染（JS 验证挑战站才需要）
         browser = await get_browser()
         if browser is not None:
             homepage = await _render_with_browser(browser, base)

@@ -127,3 +127,51 @@ def test_drafts_with_stats_filter_breakdown():
     drafts, stats = drafts_with_stats(items)
     assert len(drafts) == 1
     assert stats == {"platform_domain": 1, "article_page": 1, "dup_domain": 1}
+
+
+def test_parse_bing_html():
+    """必应中国版结果页解析（b_algo 块的 h2 直链，无跳转包装）。"""
+    from app.collectors.web_search import parse_bing_html
+
+    html = """
+    <li class="b_algo"><h2><a href="https://www.salemartly.com/" h="ID=SERP">SaleSmartly-<strong>WhatsApp</strong>私域运营</a></h2><p>desc</p></li>
+    <li class="b_algo"><h2><a href="https://kuajingwang.vip/products">跨境王官网</a></h2></li>
+    <li class="b_other">干扰块</li>
+    """
+    items = parse_bing_html(html)
+    assert len(items) == 2
+    assert items[0]["url"] == "https://www.salemartly.com/"
+    assert "SaleSmartly" in items[0]["title"] and "WhatsApp" in items[0]["title"]
+    assert parse_bing_html("") == []
+    assert parse_bing_html("<html>no results</html>") == []
+
+
+async def test_search_with_fallback_switches_engine(monkeypatch):
+    """引擎降级链：主引擎（DDG）失败 → 自动切必应；主引擎正常时不切。"""
+    from app.collectors import web_search as ws
+
+    async def fake_ddg_fail(clients, engine, kw, limit):
+        return [], "DDG 连接失败 ConnectError"
+
+    async def fake_bing_ok(clients, kw, limit):
+        return [{"title": "某公司官网", "url": "https://fallback-cn.com/"}], None
+
+    monkeypatch.setattr(ws, "_search", fake_ddg_fail)
+    monkeypatch.setattr(ws, "_search_bing", fake_bing_ok)
+    logs = []
+
+    async def log(level, msg):
+        logs.append(msg)
+
+    items, err, used = await ws.search_with_fallback((None, None), "whatsapp 客服", 10, log=log)
+    assert used == "bing_cn" and err is None
+    assert items[0]["url"] == "https://fallback-cn.com/"
+    assert any("自动切换必应" in m for m in logs)
+
+    # 主引擎正常 → 不动用降级
+    async def fake_ok(clients, engine, kw, limit):
+        return [{"title": "直接命中", "url": "https://primary-cn.com/"}], None
+
+    monkeypatch.setattr(ws, "_search", fake_ok)
+    items2, err2, used2 = await ws.search_with_fallback((None, None), "whatsapp 客服", 10)
+    assert used2 == ws.settings.SEARCH_ENGINE and items2[0]["url"].startswith("https://primary")

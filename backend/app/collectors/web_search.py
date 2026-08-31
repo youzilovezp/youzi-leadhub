@@ -119,6 +119,56 @@ def _has_cjk(text: str) -> bool:
     return any("一" <= ch <= "鿿" for ch in text)
 
 
+# ---------- 必应中国版（bing_cn）：国内直连可达的兜底引擎 ----------
+# DDG 国内直连被墙、走代理又常被出口 IP 限流（202 实测）；cn.bing.com 直连
+# 可用但对「频繁新建 TLS 连接」敏感——必须 keep-alive 复用 + 秒级间隔 + 一次重试。
+_BING_H2_RE = re.compile(r'<h2[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', re.S)
+_BING_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def parse_bing_html(html: str) -> list[dict[str, Any]]:
+    """cn.bing.com 结果页 → [{title, url}]（b_algo 结果块的 h2 直链，无跳转包装）。"""
+    items: list[dict[str, Any]] = []
+    for block in re.split(r'class="b_algo"', html or "")[1:]:
+        m = _BING_H2_RE.search(block)
+        if not m:
+            continue
+        url = m.group(1).strip()
+        title = _BING_TAG_RE.sub("", m.group(2)).strip()
+        if url.startswith(("http://", "https://")) and title:
+            items.append({"title": title, "url": url})
+    return items
+
+
+async def _search_bing(
+    clients: tuple[httpx.AsyncClient, httpx.AsyncClient], kw: str, limit: int
+) -> tuple[list[dict[str, Any]], str | None]:
+    """cn.bing.com 直连搜索（直连优先，代理兜底；ConnectError 退避一次重试）。"""
+    err: str | None = None
+    # 直连优先（国内站走代理反而 301），复用传入 client 的 keep-alive 连接；
+    # cn.bing 首次访问常 30x 跳转（区域/参数规整），必须跟跳转；
+    # 连续新建连接会被掐 TLS（惩罚窗口约 1 分钟）——退避 8s 重试，共 3 次
+    for client in (clients[1], clients[0]):
+        for attempt in range(3):
+            try:
+                resp = await client.get(
+                    "https://cn.bing.com/search",
+                    params={"q": kw, "count": min(limit, 30)},
+                    headers={"User-Agent": _UA, "Accept-Language": "zh-CN,zh;q=0.9"},
+                    follow_redirects=True,
+                )
+            except httpx.HTTPError as exc:
+                err = f"必应连接失败 {type(exc).__name__}"
+                if attempt < 2:
+                    await asyncio.sleep(8)
+                continue
+            if resp.status_code != 200:
+                err = f"必应 {resp.status_code}"
+                continue
+            return parse_bing_html(resp.text)[:limit], None
+    return [], err or "必应不可达"
+
+
 def drafts_with_stats(
     items: list[dict[str, Any]], params_is_cn: Any = True
 ) -> tuple[list[LeadDraft], dict[str, int]]:
@@ -171,6 +221,28 @@ def drafts_with_stats(
 def results_to_drafts(items: list[dict[str, Any]], params_is_cn: Any = True) -> list[LeadDraft]:
     """drafts_with_stats 的列表形态（官网发现等只取 website 的调用方用）。"""
     return drafts_with_stats(items, params_is_cn)[0]
+
+
+async def search_with_fallback(
+    clients: tuple[httpx.AsyncClient, httpx.AsyncClient],
+    kw: str,
+    limit: int,
+    log=None,
+) -> tuple[list[dict[str, Any]], str | None, str]:
+    """主引擎搜索，DDG 不可达自动切必应。返回 (items, err, 实际使用的引擎)。
+
+    供本采集器与 website_enrich 的官网发现共用——单引擎故障不中断任何链路。
+    """
+    engine = settings.SEARCH_ENGINE
+    items, err = await _search(clients, engine, kw, limit)
+    used = engine
+    if err and engine == "duckduckgo":
+        if log is not None:
+            await log("warn", f"「{kw}」{err}，自动切换必应（cn.bing.com 直连）重试")
+        items, err = await _search_bing(clients, kw, limit)
+        if not err:
+            used = "bing_cn"
+    return items, err, used
 
 
 async def _search(
@@ -263,6 +335,9 @@ async def _search(
             return [], f"Bing {resp.status_code}"
         return (resp.json().get("webPages") or {}).get("value", [])[:limit], None
 
+    if engine == "bing_cn":
+        return await _search_bing(clients, kw, limit)
+
     return [], f"未知引擎：{engine}"
 
 
@@ -270,8 +345,10 @@ class WebSearchCollector(Collector):
     name = "web_search"
     title = "搜索引擎发现（DuckDuckGo / SearxNG）"
     logic_note = (
-        "【抓什么】用搜索引擎（默认 DuckDuckGo，免费无 key）按关键词找企业官网，"
-        "作为线索种子入库。联系方式和购买意向不在这步判断——由下一步「网站富化」抓官网核实。\n"
+        "【抓什么】用搜索引擎按关键词找企业官网，作为线索种子入库。联系方式和购买"
+        "意向不在这步判断——由下一步「网站富化」抓官网核实。\n"
+        "【引擎与降级】默认 DuckDuckGo（免费无 key，国内需代理）；DuckDuckGo 连不上时"
+        "自动切换必应中国版（cn.bing.com 直连，无需代理）重试，单引擎故障不会导致任务失败。\n"
         "【过滤规则】① 电商平台和社交媒体的链接（facebook/amazon/alibaba 等 28 类）不算企业官网；"
         "② 文章页（指南、测评、博客）丢弃；③ 同一网站只留一条，入口统一为网站首页。\n"
         "【准确性】只在「结果标题含中文」时才标记为中国企业；英文标题的网站保持待验证，"
@@ -339,7 +416,10 @@ class WebSearchCollector(Collector):
             for kw in keywords:
                 ctx.check_cancelled()
                 await ctx.log("info", f"搜索（{engine}）：「{kw}」")
-                items, err = await _search(clients, engine, kw, max_results)
+                # 主引擎 + DDG 不可达自动切必应（search_with_fallback 与官网发现共用）
+                items, err, engine_used = await search_with_fallback(
+                    clients, kw, max_results, log=ctx.log
+                )
                 if err:
                     await ctx.log("error", f"「{kw}」搜索失败：{err}")
                 else:
@@ -357,7 +437,8 @@ class WebSearchCollector(Collector):
                             f" · 同域重复 {fstats['dup_domain']}；标中国企业 {cn_n}）",
                         )
                 ctx.inc_progress(1)
-                await asyncio.sleep(1.0)  # 引擎礼貌间隔
+                # 引擎礼貌间隔：必应对频繁新建连接敏感，间隔拉长
+                await asyncio.sleep(4.0 if engine_used == "bing_cn" else 1.0)
 
         if keywords and ok_queries == 0:
             raise BusinessError(

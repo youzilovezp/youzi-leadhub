@@ -40,31 +40,37 @@ class TaskRunner:
     async def _maybe_chain_enrich(
         self, log_fn, task_id: int, collector: str, created_by: int | None
     ) -> None:
-        """发现类任务完成后自动接力 website_enrich（节流 + 失败不影响主任务）。"""
-        from datetime import timedelta
+        """发现类任务完成后自动接力 website_enrich（失败不影响主任务）。
 
+        去重只看「有没有全库富化（params 为空）还在 pending/queued」——排队中的
+        那次扫描发生在本批线索入库之后，必然覆盖。刚跑完的不算数：它扫不到本次
+        新增的线索（2026-08-31 修复：旧的 60 分钟时间窗口会整批漏富化）；多余的
+        接力也只是分级增量的廉价空扫。勾选型（lead_ids）排队不算，它不扫全库。
+        """
         if not settings.AUTO_CHAIN_ENRICH or collector not in self._CHAIN_ENRICH_AFTER:
             return
         try:
-            cutoff = datetime.now(timezone.utc) - timedelta(
-                minutes=max(1, settings.AUTO_CHAIN_ENRICH_INTERVAL)
-            )
             async with async_session() as s:
-                recent = (
-                    await s.execute(
-                        select(CollectTask.id)
-                        .where(
-                            CollectTask.collector == "website_enrich",
-                            CollectTask.last_run_at.is_not(None),
-                            CollectTask.last_run_at >= cutoff,
+                # 排队中的富化任务本就只有个位数，全取回内存里判「全库扫」——
+                # 不在 SQL 里比较 JSON（PG json 类型无 = 操作符，2026-08-31 e2e 实测）
+                pending_rows = (
+                    (
+                        await s.execute(
+                            select(CollectTask.id, CollectTask.params).where(
+                                CollectTask.collector == "website_enrich",
+                                CollectTask.status.in_(["pending", "queued"]),
+                            )
                         )
-                        .limit(1)
                     )
-                ).scalar_one_or_none()
-                if recent is not None:
+                    .all()
+                )
+                full_scan = next(
+                    (row_id for row_id, row_params in pending_rows if not (row_params or {})), None
+                )
+                if full_scan is not None:
                     await log_fn(
                         "info",
-                        f"↪️ 已跳过自动富化接力（{settings.AUTO_CHAIN_ENRICH_INTERVAL} 分钟内已有富化任务跑过）",
+                        f"↪️ 已跳过自动富化接力（全库富化任务 #{full_scan} 排队中，会覆盖本次新增线索）",
                     )
                     return
                 chained = CollectTask(
