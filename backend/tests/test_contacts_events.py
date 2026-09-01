@@ -4,6 +4,7 @@ import pytest
 
 from app.collectors.base import LeadDraft
 from app.crud.contact import (
+    _name_from_email,
     auto_create_from_email,
     create_contact,
     derive_seniority,
@@ -26,6 +27,20 @@ def test_derive_seniority():
     assert derive_seniority("Sales Representative") == "unknown"
     assert derive_seniority(None) is None
     assert derive_seniority("  ") is None
+
+
+def test_name_from_email():
+    """邮箱 local-part 推断人名（2026-09-01 用户反馈「联系人几乎都爬不到」：
+    英文站联系页常只写邮箱——firstname.lastname / f-l / camelCase 可推断；
+    角色邮箱与拆不出的单段串不硬猜）。"""
+    assert _name_from_email("john.smith@acme.com") == "John Smith"
+    assert _name_from_email("liu-wei@factory.cn") == "Liu Wei"
+    assert _name_from_email("jackieMa@t-shine.net") == "Jackie Ma"
+    assert _name_from_email("info@acme.com") is None
+    assert _name_from_email("sales@acme.com") is None
+    assert _name_from_email("marketing@acme.com") is None
+    assert _name_from_email("jackiema@t-shine.net") is None  # 全小写拆不出，不硬猜
+    assert _name_from_email("yzyd@youduobio.com") is None
 
 
 # ---------- 事件 + 联系人（DB 集成） ----------

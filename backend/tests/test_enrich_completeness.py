@@ -366,6 +366,103 @@ def test_phone_rank_prefers_landline_over_400():
     assert "0755-86668868" in phones and "400-800-5919" in phones
 
 
+def test_pick_best_phone_rejects_jsonld_placeholder():
+    """模板占位电话排除（2026-09-01 t-shinebakeware 实测：JSON-LD 声明
+    +86-513-88888888（占位），真电话是 tel: 链接的 +8617368160555——phonenumbers
+    会放过占位号，必须显式剔除；剔除后 JSON-LD 序位优势被真电话接替）。"""
+    from app.collectors.website_enrich import is_placeholder_phone, pick_best_phone
+
+    assert is_placeholder_phone("+86-513-88888888") is True
+    assert is_placeholder_phone("88888888") is True
+    assert is_placeholder_phone("666666666") is True
+    assert is_placeholder_phone("+86-755-86668868") is False  # 4 连串不是占位
+    assert is_placeholder_phone("+8617368160555") is False
+    assert is_placeholder_phone("") is False
+
+    # JSON-LD 占位 + tel 真号（候选顺序 jsonld 在前）→ 真号胜出
+    best = pick_best_phone(
+        ["+86-513-88888888", "+8617368160555"],
+        current_raw=None,
+        current_e164=None,
+        region="CN",
+    )
+    assert best == ("+8617368160555", "+8617368160555")
+
+    # 存量是占位号 → 同序位真号可替换（此前「仅更优序位才换」把错选锁死）
+    best = pick_best_phone(
+        ["+8617368160555"],
+        current_raw="+86-513-88888888",
+        current_e164="+8651388888888",
+        region="CN",
+    )
+    assert best is not None and best[1] == "+8617368160555"
+
+    # 存量是合法国际号 → 同序位候选不替换（不抖动）
+    assert (
+        pick_best_phone(
+            ["+8617368160555"],
+            current_raw="+86 137 3602 8159",
+            current_e164="+8613736028159",
+            region="CN",
+        )
+        is None
+    )
+
+
+def test_detect_jsonld_contacts_t_shine_shape():
+    """JSON-LD 城市/组织名提取（2026-09-01 t-shinebakeware 实测：city 全空、
+    公司名全是英文——JSON-LD 里有 addressLocality=南通市 与 LocalBusiness
+    name=江苏台烁烘焙器具有限公司，此前 detect_jsonld_contacts 只收
+    phone/email/address，两样关键基础信息被丢）。"""
+    from app.collectors.website_enrich import detect_jsonld_contacts
+
+    html = """
+    <script type="application/ld+json">
+    {"@type": "WebSite", "name": null, "url": "https://t-shinebakeware.com/"}
+    </script>
+    <script type="application/ld+json">
+    {"@type": "LocalBusiness", "name": "江苏台烁烘焙器具有限公司",
+     "alternateName": "T-Shine Bakeware",
+     "telephone": "+86-513-88888888",
+     "address": {"addressLocality": "南通市", "addressRegion": "江苏省",
+                 "addressCountry": "CN"},
+     "url": "https://t-shinebakeware.com/"}
+    </script>
+    """
+    got = detect_jsonld_contacts([html])
+    assert got["city"] == "南通市"
+    assert got["country"] == "CN"
+    assert got["org_name"] == "江苏台烁烘焙器具有限公司"
+    assert got["phone"] == "+86-513-88888888"
+
+    # WebSite 块的 name 不是公司名，不采信
+    got2 = detect_jsonld_contacts(
+        ['<script type="application/ld+json">{"@type": "WebSite", "name": "台烁官网"}</script>']
+    )
+    assert got2.get("org_name") is None
+
+
+def test_extract_city_from_address():
+    """地址文本 → 城市兜底（2026-09-01 重测：多数工厂站无 JSON-LD，city 全空
+    ——地址行里三种形态现成可提：中文省XX市/XX市、英文「Qingdao City」、
+    「Shijiazhuang, Hebei, China」）。"""
+    from app.collectors.website_enrich import extract_city_from_address
+
+    assert extract_city_from_address("广东省佛山市顺德区勒流街道263号") == "佛山市"
+    assert extract_city_from_address("深圳市南山区科技园8栋") == "深圳市"
+    assert extract_city_from_address("北京市朝阳区建国路88号") == "北京市"
+    assert (
+        extract_city_from_address("Xingyang Road, Chengyang District Qingdao City, Shandong")
+        == "Qingdao"
+    )
+    assert extract_city_from_address("Shijiazhuang, Hebei, China") == "Shijiazhuang"
+    assert extract_city_from_address("Group 28, Puxi Community, Baipu Town, Rugao City") == "Rugao"
+    # 无城市形态不硬猜
+    assert extract_city_from_address("West of Nanhao Village, Longhua Town") is None
+    assert extract_city_from_address(None) is None
+    assert extract_city_from_address("") is None
+
+
 def test_detect_contact_persons_name_tel_shape():
     """具名联系人第 5 形态（2026-09-01 Shoptop 实测，用户报「联系信息爬取不对」）：
     「城市 Name Tel：手机 微信同号」——无「联系人：」前缀、拉丁名、微信同号标注。

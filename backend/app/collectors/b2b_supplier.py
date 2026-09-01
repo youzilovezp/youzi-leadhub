@@ -184,6 +184,22 @@ def build_draft(*, name: str, keyword: str, profile: dict[str, Any]) -> LeadDraf
     )
 
 
+def resolve_keywords(params: dict[str, Any]) -> list[str]:
+    """任务参数 → 品类词列表。
+
+    缺省链（2026-09-01 实测修复：前端传 null 时 str(None)="None" 被
+    split_csv 拆成字面词「None」，产出 industry="None·Bakeware"、
+    信号「中国制造网出口挂单（None）」的垃圾行）：空/缺失/None 值一律回落
+    默认词；字面 none/null/undefined 不是品类词，剔除。
+    """
+    raw = params.get("keywords")
+    return [
+        k
+        for k in (split_csv(raw) if isinstance(raw, str) and raw.strip() else [])
+        if k.lower() not in ("none", "null", "undefined")
+    ] or split_csv(DEFAULT_KEYWORDS)
+
+
 class B2BSupplierCollector(Collector):
     name = "b2b_supplier"
     title = "B2B 出口目录（中国制造网）"
@@ -226,7 +242,7 @@ class B2BSupplierCollector(Collector):
     ]
 
     async def run(self, ctx: TaskContext) -> None:
-        keywords = split_csv(str(ctx.params.get("keywords"))) or split_csv(DEFAULT_KEYWORDS)
+        keywords = resolve_keywords(ctx.params)
         try:
             budget = max(5, min(int(ctx.params.get("max_suppliers") or 30), 100))
         except ValueError:

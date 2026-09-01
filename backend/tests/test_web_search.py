@@ -209,6 +209,47 @@ def test_blocked_domains_include_cn_trade_media():
     assert not _is_blocked_domain("anker.com")
 
 
+def test_blocked_domains_media_content_sites():
+    """新闻媒体/内容站域族（2026-09-01 清库重测实锤：用户跑 web_search 品类词，
+    人民网/央视网/pixabay 图片站/8264 论坛以 qualified 混进销售池）。"""
+    from app.collectors.icp import is_non_buyer
+    from app.collectors.web_search import _is_blocked_domain
+
+    for d in (
+        "people.com.cn",
+        "cctv.com",
+        "chinanews.com.cn",
+        "china.com.cn",
+        "news.cn",
+        "xinhuanet.com",
+        "chinadaily.com.cn",
+        "pixabay.com",
+        "8264.com",
+        "petopic.com",
+        "ledinside.cn",
+        "www.people.com.cn",
+    ):
+        assert _is_blocked_domain(d), d
+        assert is_non_buyer(domain=d), d
+    assert is_non_buyer(name="中国供应商网")
+    # 正常企业域不误杀
+    assert not _is_blocked_domain("t-shinebakeware.com")
+    assert not is_non_buyer(domain="t-shinebakeware.com", name="江苏台烁烘焙器具有限公司")
+
+
+def test_article_pages_faq_shape_filtered():
+    """教程/FAQ 标题形态（2026-09-01 清库重测漏网：「常见 LED 功能和 LED 驱动器
+    设计注意事项」TI 官方技术文章以 qualified 混入销售池）。"""
+    from app.collectors.web_search import _looks_like_article
+
+    assert _looks_like_article(
+        "常见 LED 功能和 LED 驱动器设计注意事项", "https://www.ti.com.cn/"
+    )
+    assert _looks_like_article("LED 驱动选型注意事项", "https://x.com/")
+    # 正常公司名不误杀（裸「常见」不是文章词，只有「常见问题」是）
+    assert not _looks_like_article("中山常见灯饰有限公司", "https://a.com/")
+
+
 def test_non_buyer_domains_single_source_parity():
     """黑名单单源（2026-09-01 巡检）：web_search 入库拦截必须整包含
     icp.NON_BUYER_DOMAINS——增补只改 icp.py 一处，防止再出现「只补一边」。"""
@@ -252,6 +293,27 @@ def test_generic_titles_skipped():
     drafts, stats = drafts_with_stats(items)
     assert [d.name for d in drafts] == ["安克创新官方商城"]
     assert stats.get("generic_title") == 2
+
+
+def test_none_titles_and_synonym_pages_skipped():
+    """空名兜底标题与词典站（2026-09-01 实测：web_search 一批线索里混入
+    name="none"、「"None"」、「NONE Synonyms: 83 Similar and Opposite Words」
+    thesaurus.com 词条——搜索引擎对空结果/词条页的兜底标题，同属垃圾行）。"""
+    from app.collectors.web_search import drafts_with_stats
+
+    items = [
+        {"title": "none", "url": "https://empty-name-a.com/"},
+        {"title": '"None"', "url": "https://empty-name-b.com/"},
+        {
+            "title": "NONE Synonyms: 83 Similar and Opposite Words",
+            "url": "https://www.thesaurus.com/browse/none",
+        },
+        {"title": "Real Factory Co., Ltd", "url": "https://real-factory.com/"},
+    ]
+    drafts, stats = drafts_with_stats(items)
+    assert [d.name for d in drafts] == ["Real Factory Co., Ltd"]
+    assert stats.get("generic_title") == 2
+    assert stats.get("article_page") == 1
 
 
 def test_whatsapp_mirror_domains_blocked():

@@ -74,6 +74,7 @@ async def sync() -> None:
             continue
         _scheduler.add_job(
             _fire,
+            args=[str(t.id)],
             trigger=trigger,
             id=str(t.id),
             name=f"collect-task-{t.id}",

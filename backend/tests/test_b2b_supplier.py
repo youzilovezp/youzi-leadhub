@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from app.collectors import get_collector
-from app.collectors.base import LeadDraft
+from app.collectors.base import LeadDraft, split_csv
 from app.collectors.b2b_supplier import (
     DEFAULT_KEYWORDS,
     build_draft,
@@ -130,6 +130,20 @@ def test_draft_without_markets_still_overseas_via_listing():
     assert compute_icp_status(
         name=d.name, is_cn=d.is_cn, country=d.country, overseas_signals=d.overseas_signals
     ) == "qualified"
+
+
+def test_resolve_keywords_none_leak_falls_back_to_defaults():
+    """关键词缺省链（2026-09-01 实测：前端传 null → str(None)="None" 被拆成
+    字面词「None」，产出 industry="None·Bakeware"、信号「（None）」的垃圾行）：
+    空/缺失/None 值回落默认词；字面 none/null 剔除。"""
+    from app.collectors.b2b_supplier import DEFAULT_KEYWORDS, resolve_keywords
+
+    assert resolve_keywords({}) == split_csv(DEFAULT_KEYWORDS)
+    assert resolve_keywords({"keywords": None}) == split_csv(DEFAULT_KEYWORDS)
+    assert resolve_keywords({"keywords": ""}) == split_csv(DEFAULT_KEYWORDS)
+    assert resolve_keywords({"keywords": "None"}) == split_csv(DEFAULT_KEYWORDS)
+    assert resolve_keywords({"keywords": "None,wig"}) == ["wig"]
+    assert resolve_keywords({"keywords": "wig, LED strip"}) == ["wig", "LED strip"]
 
 
 def test_draft_carries_website_when_profile_filled():

@@ -171,6 +171,35 @@ async def delete_contact(db: AsyncSession, lead: Lead, contact: LeadContact) -> 
     await rescore_and_log(db, lead)
 
 
+# 邮箱 local-part 推断人名（2026-09-01 用户反馈「联系人几乎都爬不到」：
+# 英文站联系页常只写邮箱不写人名——firstname.lastname / f-l / camelCase
+# 形态可推断出可读人名；角色邮箱（info/sales/marketing…）不是人名不推断）
+_ROLE_LOCALPARTS = frozenset(
+    "info sales marketing support contact contacts admin service hr hello "
+    "export exports overseas trade business manager office enquiry inquiry "
+    "webmaster postmaster noreply no-reply careers jobs service mail".split()
+)
+
+
+def _name_from_email(email: str) -> str | None:
+    local = email.split("@", 1)[0]
+    if local.lower() in _ROLE_LOCALPARTS:
+        return None
+    if not re.fullmatch(r"[a-zA-Z][a-zA-Z0-9._+\-]*", local):
+        return None
+    if any(sep in local for sep in "._+-"):
+        parts = [p for p in re.split(r"[._+\-]+", local) if len(p) >= 2]
+        if not parts:
+            return None
+        return " ".join(p.capitalize() for p in parts[:3])
+    # 无分隔：只认 camelCase（jackieMa→Jackie Ma）；全小写单段（jackiema/
+    # yzyd）拆不出可靠人名，不硬猜
+    words = re.findall(r"[A-Z][a-z]+|[a-z]+|[A-Z]+", local)
+    if len(words) >= 2 and any(w[0].isupper() for w in words):
+        return " ".join(w.capitalize() for w in words[:3])
+    return None
+
+
 async def auto_create_from_email(
     db: AsyncSession,
     lead: Lead,
@@ -178,8 +207,9 @@ async def auto_create_from_email(
     *,
     source: str = "website_enrich",
 ) -> LeadContact | None:
-    """富化/采集抓到公开邮箱 → 自动生成「待补全」联系人（job_title 空，前端显示待补全）。
+    """富化/采集抓到公开邮箱 → 自动生成联系人（job_title 空，前端显示待补全）。
 
+    邮箱 local-part 可推断出人名时带上（销售直接看到「Jackie Ma」而不是空名）；
     已存在同邮箱联系人时返回 None。只建记录 + 事件，不重评——调用方
     （website_enrich._enrich_one）在富化末尾统一 rescore_and_log。
     source 透传（2026-08-31 审计：此前硬编码 website_enrich，meta_ads 抓的
@@ -190,13 +220,14 @@ async def auto_create_from_email(
     dup = await _find_by_email(db, lead.id, email)
     if dup is not None:
         return None
+    name = _name_from_email(email)
     contact = LeadContact(
         lead_id=lead.id,
-        name=None,
+        name=name,
         job_title=None,
         email=email,
         seniority=None,
-        confidence=40,
+        confidence=55 if name else 40,
         source=source,
     )
     db.add(contact)
