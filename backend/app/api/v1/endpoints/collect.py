@@ -485,13 +485,14 @@ async def export_leads(
 
         return _cell
 
-    selected_set = set(selected)
-
     async def _csv_chunks():
         """分批（1000 行/批）产出 CSV 字节流：单请求内存峰值 = 一批，不再是全量。"""
         buf = io.StringIO()
         writer = csv.writer(buf)
-        writer.writerow([label for k, label in EXPORT_FIELDS if k in selected_set])
+        # 表头与数据行必须同序（都用用户请求的 selected 顺序）——历史上表头走
+        # EXPORT_FIELDS 固定序、数据行走请求序，自选字段顺序不同时全列错位
+        _label_of = dict(EXPORT_FIELDS)
+        writer.writerow([_label_of.get(k, k) for k in selected])
         yield b"\xef\xbb\xbf" + buf.getvalue().encode("utf-8")
 
         _cell = None
