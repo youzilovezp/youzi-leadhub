@@ -425,6 +425,30 @@ async def test_export_intent_detail_field(client, admin_credentials):
     assert r.status_code == 400 and r.json()["code"] == 40001
 
 
+async def test_export_header_cells_aligned_in_request_order(client, admin_credentials):
+    """2026-09-01 实测 bug：自选字段顺序 ≠ 预设目录顺序时，表头走固定序、
+    数据行走请求序 → 全列错位（第 4 列表头「WhatsApp号码」数据却是 ICP 值）。
+    表头与数据必须同序（都按请求序）。"""
+    r = await client.post("/api/v1/auth/login", json=admin_credentials)
+    h = {"Authorization": f"Bearer {r.json()['data']['access_token']}"}
+    await client.post(
+        "/api/v1/collect/leads",
+        headers=h,
+        json={"name": "ExportAlign Co", "country": "CN", "website": "https://exportalign.com"},
+    )
+    # 故意用与 EXPORT_FIELDS 目录不同的顺序
+    r = await client.get(
+        "/api/v1/collect/leads/export",
+        headers=h,
+        params={"keyword": "ExportAlign", "fields": "icp_status,name,score", "limit": 10},
+    )
+    assert r.status_code == 200
+    lines = [ln for ln in r.content.decode("utf-8-sig").splitlines() if ln]
+    assert lines[0] == "ICP资格,企业名称,Lead Score"
+    row = lines[1].split(",")
+    assert row[1] == "ExportAlign Co"  # 名称在表头「企业名称」列下，不错位
+
+
 def test_job_posting_liepin_parsing():
     """猎聘职位卡解析（2026-08-31 实测结构）：job-card-pc-container 锚点 +
     title 属性职位名 + company-info 公司名；匿名代发（某…公司）跳过；
