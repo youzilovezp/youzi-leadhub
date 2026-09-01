@@ -33,7 +33,7 @@ from sqlalchemy import select as _sa_select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.collectors.base import Collector, TaskContext
-from app.collectors.normalize import extract_domain
+from app.collectors.normalize import extract_domain, normalize_phone
 from app.collectors.overseas import detect_domain_tld, detect_overseas_signals
 from app.collectors.scenes import (
     SAAS_LABELS_ZH,
@@ -339,20 +339,44 @@ def detect_jsonld_contacts(html_list: list[str]) -> dict[str, str]:
             if not isinstance(it, dict):
                 continue
             addr = it.get("address")
+            locality = region_name = ""
             if isinstance(addr, dict):
                 parts = [
                     addr.get(k)
                     for k in ("streetAddress", "addressLocality", "addressRegion", "addressCountry")
                 ]
                 addr_text = " ".join(str(x) for x in parts if x)
+                locality = str(addr.get("addressLocality") or "").strip()
+                region_name = str(addr.get("addressRegion") or "").strip()
             elif isinstance(addr, str):
                 addr_text = addr
             else:
                 addr_text = ""
+            country = ""
+            if isinstance(addr, dict):
+                raw_cc = str(addr.get("addressCountry") or "").strip()
+                country = raw_cc if re.fullmatch(r"[A-Za-z]{2}", raw_cc) else (
+                    "CN" if raw_cc.lower() in ("china", "中国") else ""
+                )
+            # 组织名（schema.org name/legalName）：CJK 值 = 公司中文全名——
+            # 中国出海企业官网 JSON-LD 常中英双语声明（2026-09-01 t-shinebakeware
+            # 实测：name=江苏台烁烘焙器具有限公司 / alternateName=T-Shine Bakeware）。
+            # 只认组织类 @type（WebSite/WebPage 的 name 是站点名，不是公司名）
+            types = it.get("@type") or ""
+            types = types if isinstance(types, list) else [types]
+            org_like = any(
+                isinstance(t, str)
+                and (t.lower() in ("organization", "localbusiness", "corporation", "company", "brand")
+                     or "organization" in t.lower())
+                for t in types
+            )
             for key, val in (
                 ("phone", it.get("telephone")),
                 ("email", it.get("email")),
                 ("address", addr_text),
+                ("city", locality or region_name),
+                ("country", country),
+                ("org_name", (it.get("name") or it.get("legalName")) if org_like else None),
             ):
                 if val and isinstance(val, str) and not out.get(key):
                     out[key] = val.strip()
@@ -641,12 +665,32 @@ def _make_client(**kwargs: Any) -> httpx.AsyncClient:
     )
 
 
+# 显式代理兜底（CRAWLER_PROXY_URL）：海外站点（en. 子域/Shopify 型站）直连
+# 超时/被墙时走代理；国内站直连成功时绝不碰代理（国内资源无论如何都直连）。
+# 进程级懒加载单例——单进程任务系统，配置启动时读一次，进程生命周期内不关闭。
+_proxy_client: httpx.AsyncClient | None = None
+_proxy_client_url: str | None = None
+
+
+def _get_proxy_client() -> httpx.AsyncClient | None:
+    global _proxy_client, _proxy_client_url
+    url = settings.CRAWLER_PROXY_URL or ""
+    if not url:
+        return None
+    if _proxy_client is None or _proxy_client_url != url:
+        _proxy_client = _make_client(proxy=url)
+        _proxy_client_url = url
+    return _proxy_client
+
+
 async def _fetch_site_detailed(
     clients: tuple[httpx.AsyncClient, httpx.AsyncClient], url: str
 ) -> tuple[str | None, list[str]]:
     """抓站点首页（换 scheme 重试 + 宽松 SSL 兜底），失败时收集各次尝试的原因。
 
     返回 (html, 原因列表)；html 命中时原因列表为空。
+    直连两次失败后、宽松 SSL 前会经显式代理（CRAWLER_PROXY_URL）再试一次——
+    海外站点（en. 子域/Shopify 型）直连被墙时走代理；国内站直连成功不碰代理。
     """
     primary, loose = clients
     html, reason = await _fetch_detailed(primary, url)
@@ -664,6 +708,13 @@ async def _fetch_site_detailed(
             return html, []
         if reason:
             reasons.append(reason)
+    proxy = _get_proxy_client()
+    if proxy is not None:
+        html, reason = await _fetch_detailed(proxy, url)
+        if html is not None:
+            return html, []
+        if reason:
+            reasons.append(f"{reason}（显式代理）")
     html, reason = await _fetch_detailed(loose, url)
     if html is not None:
         return html, []
@@ -860,9 +911,10 @@ class WebsiteEnrichCollector(Collector):
             # cn_domestic 永远升不了 qualified。仅全库扫描模式做（手动勾选是精确富化）
             discovered: list[tuple[int, str]] = []
             if not lead_ids:
-                # 每轮上限固定 30（FR-1.5：搜索配额礼貌约束——想多补靠多轮，
-                # 不靠一轮放大）。3s 间隔见 _DISCOVER_GAP。
-                discover_limit = _DISCOVER_LIMIT
+                # 每轮上限默认 30（FR-1.5：搜索配额礼貌约束——想多补靠多轮，
+                # 不靠一轮放大；冷启动积压期经 COLLECT_DISCOVER_LIMIT 显式调大）。
+                # 3s 间隔见 _DISCOVER_GAP。
+                discover_limit = settings.COLLECT_DISCOVER_LIMIT
                 async with _session_factory()() as session:
                     candidates = await _load_discoverable(session, discover_limit)
                     from sqlalchemy import func
@@ -1434,6 +1486,108 @@ def detect_tel_phones(html_list: list[str]) -> list[str]:
     return phones
 
 
+def _phone_rank(raw: str) -> int:
+    """选取定序（2026-09-01 kaadas 教训：先抓到的 400 是招商热线，不是对外
+    联系电话）：座机总机 0 → 国际 1 → 400 热线 2 → 手机 3（手机归具名联系人
+    所有，只作总机/热线全缺时的兜底）。"""
+    r = (raw or "").strip()
+    if r.startswith("0"):
+        return 0
+    if r.startswith("+"):
+        return 1
+    if r.startswith("400"):
+        return 2
+    return 3
+
+
+_PLACEHOLDER_DIGIT_RUN_RE = re.compile(r"(\d)\1{5,}")
+
+
+# 地址文本 → 城市（2026-09-01 重测：JSON-LD 无地址结构的站点 city 仍全空——
+# 已抓到的地址行里有现成城市：中文「省XX市/XX市」、英文「Qingdao City」、
+# 「Shijiazhuang, Hebei, China」三形态）
+_CITY_AFTER_PROV_RE = re.compile(r"省([\u4e00-\u9fff]{2,8}?市)")
+_CITY_CN_RE = re.compile(r"[\u4e00-\u9fff]{2,8}?市")
+_CITY_EN_RE = re.compile(r"\b([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?)\s+City\b")
+_CITY_COMMA_RE = re.compile(r"^([A-Z][a-zA-Z]+),\s+([A-Z][a-zA-Z]+),\s+(?:China|CN)\b")
+# 英文地址里「City」前的引导词（District/Town/Road…）不是城市名的一部分——
+# 正则贪到「District Qingdao City」时剥掉前导词，只留城市名
+_ADDR_LEAD_STOPWORDS = frozenset(
+    "district town village county road street st ave avenue community park "
+    "building block industrial zone factory plant area center centre plaza "
+    "lane room floor no".split()
+)
+
+
+def extract_city_from_address(address: str | None) -> str | None:
+    """地址文本 → 城市名（city 兜底：JSON-LD addressLocality 没有时用）。"""
+    if not address:
+        return None
+    a = address.strip()
+    m = _CITY_AFTER_PROV_RE.search(a)
+    if m:
+        return m.group(1)
+    # 剥省前缀（「广东省佛山市顺德区…」直搜会整段吞成「广东省佛山市」）
+    a2 = re.sub(r"^[\u4e00-\u9fff]{2,7}省", "", a)
+    m = _CITY_CN_RE.search(a2)
+    if m:
+        return m.group(0)
+    m = _CITY_EN_RE.search(a)
+    if m:
+        words = [w for w in m.group(1).split() if w]
+        while words and words[0].lower() in _ADDR_LEAD_STOPWORDS:
+            words.pop(0)
+        if words:
+            return " ".join(words)
+    m = _CITY_COMMA_RE.match(a)
+    if m and m.group(2).lower() not in ("china", "cn"):
+        return m.group(1)
+    return None
+
+
+def is_placeholder_phone(raw: str | None) -> bool:
+    """模板占位假电话（88888888/66666666 类同数字连串）判定。
+
+    phonenumbers 会放过这类号码（长度合法），但它们是建站模板 JSON-LD 的
+    占位值——2026-09-01 t-shinebakeware 实测：JSON-LD 声明 +86-513-88888888，
+    真电话是页面 tel: 链接的 +8617368160555。占位号必须显式排除，否则
+    「声明即权威」的 JSON-LD 优先会把假电话选成线索电话。
+    """
+    if not raw:
+        return False
+    digits = re.sub(r"\D", "", raw)
+    return bool(_PLACEHOLDER_DIGIT_RUN_RE.search(digits))
+
+
+def pick_best_phone(
+    candidates: list[str],
+    *,
+    current_raw: str | None,
+    current_e164: str | None,
+    region: str | None,
+) -> tuple[str, str] | None:
+    """候选电话 → (raw, e164) 最优解，无更优返回 None（调用方不改动存量）。
+
+    - 占位号（88888888 型）一律剔除；
+    - 存量电话是占位号 → 任一合法候选都可替换（把错选解锁）；
+    - 存量电话合法 → 只接受序位严格更优的候选（座机 > 国际 > 400 > 手机）。
+    """
+    valid = [x for x in candidates if x and not is_placeholder_phone(x)]
+    valid.sort(key=_phone_rank)
+    best: tuple[str, str] | None = None
+    for raw in valid:
+        e164 = normalize_phone(raw, region)
+        if e164:
+            best = (raw, e164)
+            break
+    if best is None:
+        return None
+    if current_e164 and current_raw and not is_placeholder_phone(current_raw):
+        if _phone_rank(best[0]) >= _phone_rank(current_raw):
+            return None
+    return best
+
+
 async def _record_enrich_fail(lead_id: int, website: str, reason: str) -> None:
     """富化失败原因落到线索 field_meta.enrich_fail（详情页可见；成功富化时自愈清除）。
 
@@ -1859,6 +2013,36 @@ async def _enrich_one(
         if not lead.address and jsonld.get("address"):
             lead.address = jsonld["address"]
             touch_field_meta(lead, "address", "website_enrich", confidence=95, now=now)
+        # JSON-LD 城市/国家（2026-09-01 用户反馈：基础信息 city 全空——b2b/search
+        # 线索的来源不含城市，官网 JSON-LD 的 addressLocality/addressRegion 是现成权威源）
+        if not lead.city and jsonld.get("city"):
+            lead.city = jsonld["city"][:128]
+            touch_field_meta(lead, "city", "website_enrich", confidence=90, now=now)
+        # 地址文本兜底（2026-09-01 重测：多数工厂站无 JSON-LD，地址行里有城市）
+        if not lead.city and lead.address:
+            city = extract_city_from_address(lead.address)
+            if city:
+                lead.city = city
+                touch_field_meta(lead, "city", "website_enrich", confidence=70, now=now)
+        if not lead.country and jsonld.get("country"):
+            lead.country = jsonld["country"]
+            touch_field_meta(lead, "country", "website_enrich", confidence=90, now=now)
+        # JSON-LD 组织名中文全名（2026-09-01 用户反馈：企业名称全是英文——
+        # 中国出海企业的官网结构化数据里常有中文全名；线索名无 CJK 才采信，
+        # 英文名转入 field_meta 备查，身份键同步收敛）
+        org_name = (jsonld.get("org_name") or "").strip()
+        if org_name and _has_cjk(org_name) and not _has_cjk(lead.name or ""):
+            from app.crud.lead import converge_dedupe_key
+
+            alt_name = lead.name
+            lead.name = org_name[:255]
+            touch_field_meta(lead, "name", "website_enrich", confidence=90, now=now)
+            meta = dict(lead.field_meta or {})
+            nm = dict(meta.get("name") or {})
+            nm["alt_name"] = alt_name
+            meta["name"] = nm
+            lead.field_meta = meta
+            await converge_dedupe_key(session, lead)
         # 基础画像补全（country/industry/address）——富化只补信号不补画像的空白
         backfill_profile_fields(lead, icp_license=icp_license, pages=pages, now=now)
         if overseas:
@@ -1976,40 +2160,20 @@ async def _enrich_one(
             await auto_create_from_email(session, lead, email)
         # ---------- 联系方式补全（「找谁」是爬取最关键的产出） ----------
         # tel: 链接电话 → 线索电话（此前只抓邮箱不抓电话）
-        from app.collectors.normalize import normalize_phone
-
         tel_phones = detect_tel_phones(pages)
         # 明文国际格式电话（「CONTACT US +86 137 3602 8159」类——2026-09-01 实测
         # mugroup.com：多数联系页不写 tel: 链接，电话就是正文文本）
         text_phones = detect_text_phones(pages)
 
-        def _phone_rank(raw: str) -> int:
-            # 选取定序（2026-09-01 kaadas 实测教训：先抓到的 400 是招商热线，
-            # 不是对外联系电话）：座机总机 0 → 国际 1 → 400 热线 2 → 手机 3
-            # （手机归具名联系人所有，只作总机/热线全缺时的兜底）
-            r = raw.strip()
-            if r.startswith("0"):
-                return 0
-            if r.startswith("+"):
-                return 1
-            if r.startswith("400"):
-                return 2
-            return 3
-
+        region = "CN" if (lead.is_cn or (lead.country or "").upper() == "CN") else None
         phone_candidates = [x for x in (jsonld.get("phone"), *tel_phones, *text_phones) if x]
-        phone_candidates.sort(key=_phone_rank)
-        best_phone: tuple[str, str] | None = None
-        for raw in phone_candidates:
-            region = "CN" if (lead.is_cn or (lead.country or "").upper() == "CN") else None
-            e164 = normalize_phone(raw, region)
-            if e164:
-                best_phone = (raw, e164)
-                break
-        # 更优序位可替换（2026-09-01 kaadas 教训：旧轮先抓到的 400 招商热线
-        # 占住字段后，新一轮的总机座机永远进不来——只填空不更新会锁死错选）
-        if best_phone and (
-            not lead.phone_e164 or _phone_rank(best_phone[0]) < _phone_rank(lead.phone_raw or "")
-        ):
+        best_phone = pick_best_phone(
+            phone_candidates,
+            current_raw=lead.phone_raw,
+            current_e164=lead.phone_e164,
+            region=region,
+        )
+        if best_phone:
             lead.phone_raw = best_phone[0]
             lead.phone_e164 = best_phone[1]
             touch_field_meta(lead, "phone_e164", "website_enrich", confidence=85, now=now)

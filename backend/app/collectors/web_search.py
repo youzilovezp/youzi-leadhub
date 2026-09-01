@@ -210,6 +210,16 @@ _ARTICLE_TITLE_WORDS = (
     "教程",
     "干货",
     "盘点",
+    # 词典站英文形态（2026-09-01 实测漏网：「NONE Synonyms: 83 Similar and
+    # Opposite Words」thesaurus.com 词条整条入库）
+    "synonym",
+    "antonym",
+    "thesaurus",
+    "opposite words",
+    # 教程/FAQ 形态（2026-09-01 清库重测漏网：「常见 LED 功能和 LED 驱动器
+    # 设计注意事项」TI 官方技术文章以 qualified 混入销售池）
+    "注意事项",
+    "常见问题",
 )
 _ARTICLE_PATH_WORDS = (
     "/blog",
@@ -403,8 +413,14 @@ def drafts_with_stats(
                 title = title.split(sep)[0].strip() or title
                 break
         # 泛标题（「首页/Home」类）拿不到公司名，入库就是垃圾行
-        # （2026-09-01 实测：gy2025.com 以 name=「首页」入库）
-        if title.strip().lower() in ("首页", "home", "index", "main", "主页"):
+        # （2026-09-01 实测：gy2025.com 以 name=「首页」入库；同批还实测到
+        # 字面 "None"/"none"/「NONE Synonyms…」入库——搜索引擎对空名结果
+        # 的兜底标题，同样过滤）
+        plain_title = title.strip().strip('"\'“”')
+        if plain_title.lower() in (
+            "首页", "home", "index", "main", "主页",
+            "none", "null", "undefined", "nan", "undefined synonyms",
+        ):
             stats["generic_title"] = stats.get("generic_title", 0) + 1
             continue
         d = LeadDraft(source="web_search", name=title[:255], website=url)
@@ -550,11 +566,13 @@ class WebSearchCollector(Collector):
         "等富化抓到 ICP 备案号或中文内容后再认定——避免把海外公司误当中国出海企业。\n"
         "【自动接力】任务完成后系统自动执行「网站富化」（找官网、抓信号、重新评分），"
         "已有全库富化在排队时不会重复堆任务。\n"
-        "【关键词怎么填】品类×官网词形（假发 厂家 外贸、LED灯带 厂家 官网）。"
+        "【关键词怎么填】三轴词形：① WA-first 量词形（\"wa.me\" 86 品类）——搜到页面=中国号码\n"
+        "WhatsApp 链接 = WA 信号+CN 证据一条命中，直接产出 S/A；② 品类×出口身份词（假发 厂家 外贸、\n"
+        "宠物用品 供应商 出口）——找工厂官网本体；③ 独立站词形（户外家具 独立站）。\n"
         "泛行业词（跨境电商 客服）与单词（whatsapp）搜到的全是文章/词典/下载页。\n"
-        "【通道定位（2026-09-01 实测）】国内直连下这是**弱种子辅助通道**：无论怎么换词，"
-        "单词产出 0-5 个种子且混媒体站——扩量主力是招聘站品类词发现（job_posting 开"
-        "『发现新线索』+ 品类词）与 Meta 广告库（meta_ads，需免费 token），本通道只做补漏。\n"
+        "【通道定位（2026-09-01 实测）】国内直连下是**弱种子辅助通道**：单词产出 0-5 个种子\n"
+        "且混媒体站——扩量主力是 B2B 出口目录（b2b_supplier）与招聘站品类词发现（job_posting\n"
+        "开『发现新线索』+ 品类词），WA-first 量词形则把本通道升级为直接产出 S/A 的补强。\n"
         "【边界】搜索只负责发现候选，是否值得跟进由 ICP 准入和评分决定。"
     )
     param_schema = [
@@ -563,11 +581,15 @@ class WebSearchCollector(Collector):
             "label": "搜索关键词",
             "required": True,
             "type": "tags",
-            "placeholder": "品类×官网词形（假发 厂家 外贸、LED灯带 厂家 官网）。注意：泛行业词（跨境电商 客服）搜到的全是文章/社区/门户，必被过滤；此通道为弱种子辅助，扩量主力是招聘站品类词发现 + Meta 广告库",
-            # 2026-09-01 两轮实测定稿：泛行业词 10 条结果 9-10 条是内容页/平台域
-            # （0 企业）；品类词形也只 0-5 种子且混媒体站。搜索是弱种子辅助通道，
-            # 不要再往「行业大词」方向调——那是内容页泥石流（Bing CN 生态现实）。
-            "default": "假发 厂家 外贸,LED灯带 厂家 官网,宠物用品 工厂 出口,户外家具 厂家 官网",
+            # 三轴词形（2026-09-01 定稿）：WA-first 量词形（直接命中已在用
+            # WhatsApp 的中国企业 = S/A 制造机）> 品类×出口身份词（工厂官网）>
+            # 独立站词形。泛行业词（跨境电商 客服）与单词（whatsapp）搜到的
+            # 全是文章/词典/下载页，必被过滤
+            "placeholder": "WA-first 量词形（\"wa.me\" 86 假发、\"api.whatsapp.com/send\" 86 LED灯带）最值钱：搜到页面=中国号码 WhatsApp 链接=WA 信号+CN 证据一条命中；品类×出口身份词（假发 厂家 外贸）做补充。泛行业词（跨境电商 客服）搜到的全是文章/社区/门户，必被过滤",
+            "default": (
+                '"wa.me" 86 假发,"api.whatsapp.com/send" 86 LED灯带,'
+                "户外家具 厂家 外贸,宠物用品 供应商 出口"
+            ),
         },
         {
             "key": "max_results",
@@ -602,7 +624,8 @@ class WebSearchCollector(Collector):
             raise BusinessError(code=40001, message="SEARCH_ENGINE=bing 需配 BING_SEARCH_KEY")
 
     async def run(self, ctx: TaskContext) -> None:
-        keywords = split_csv(str(ctx.params.get("keywords")))
+        raw_kw = ctx.params.get("keywords")
+        keywords = split_csv(raw_kw) if isinstance(raw_kw, str) and raw_kw.strip() else []
         try:
             max_results = max(1, min(int(ctx.params.get("max_results") or 20), 50))
         except ValueError:

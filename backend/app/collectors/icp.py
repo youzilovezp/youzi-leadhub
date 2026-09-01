@@ -87,6 +87,25 @@ NON_BUYER_DOMAINS: tuple[str, ...] = (
     # 怎么搭建…」是文章标题不是公司名）；单一窗口政务平台两轮搜索都霸榜
     "iresearch.cn",  # 艾瑞咨询（研究报告站）
     "singlewindow.cn",  # 中国国际贸易单一窗口（政务平台）
+    # 2026-09-01 富化失败日志实锤（81 条失败归因）：假 WhatsApp 站与内容站
+    # 无真实托管/非企业本体，进库只浪费富化窗口
+    "page-whatapps.com.cn",  # WhatsApp 假站（typosquat）
+    "home-whatsapp.com",  # WhatsApp 假站（typosquat）
+    "chagushici.com",  # 古诗词内容站（词典/内容站同族）
+    # 2026-09-01 清库重测实锤（用户跑 web_search 品类词，这些全以 qualified
+    # 混进销售池）：新闻媒体门户（事业单位媒体，非企业本体）、图片素材站、
+    # 户外论坛/宠物信息内容站
+    "people.com.cn",  # 人民网
+    "cctv.com",  # 央视网
+    "chinanews.com.cn",  # 中新网
+    "china.com.cn",  # 中国网
+    "news.cn",  # 新华网
+    "xinhuanet.com",  # 新华网国际站
+    "chinadaily.com.cn",  # 中国日报
+    "pixabay.com",  # 图片素材站
+    "8264.com",  # 户外论坛（社区）
+    "petopic.com",  # 宠物信息内容站
+    "ledinside.cn",  # LED 行业媒体
 )
 
 # 名称词表（域边界锚定不适用于中文，用子串；宁可窄不可误杀正常企业）
@@ -113,6 +132,8 @@ _NON_BUYER_NAME_RE = re.compile(
     r"|字节跳动|腾讯|阿里巴巴|京东|拼多多|百度|网易|美团|华为|小米|快手|哔哩|bilibili"
     # 2026-09-01 用户标准巡检：知识站/招聘平台/供应链/教育咨询（非四类目标的漏网形态）
     r"|知识网|大全|招聘网|招聘平台|供应链|教育咨询"
+    # 2026-09-01 清库重测实锤：B2B 目录门户（供应商网=平台门户，非企业本体）
+    r"|供应商网|采购网"
     # 2026-09-01 富化实测漏网：字典/国学内容站（hanyuguoxue）与汇率工具站
     # （huilvbiao）——词典类已有「词典/辞典」，补「字典」与「汇率」token
     r"|字典|国学|汇率",

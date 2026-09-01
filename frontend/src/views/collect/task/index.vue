@@ -81,12 +81,12 @@ function currentCollector(): CollectorInfo | undefined {
 }
 
 /** 采集器分组（2026-09-01 口径）：
- *  - 数据源（可手动创建/定时）：web_search / job_posting / meta_ads / career_site
+ *  - 数据源（可手动创建/定时）：b2b_supplier / web_search / job_posting / meta_ads / career_site
  *  - 内部步骤（不进创建列表）：website_enrich——由三入口自动执行：
  *    ① 发现任务完成 → 自动接力；② 每日 cron「网站富化·全库」（任务列表可手动执行）；
  *    ③ 线索列表勾选 → 「富化选中」 */
-const SOURCE_COLLECTORS = ['web_search', 'job_posting', 'meta_ads', 'career_site']
-const DISCOVERY_COLLECTORS = ['web_search', 'job_posting', 'meta_ads']
+const SOURCE_COLLECTORS = ['b2b_supplier', 'web_search', 'job_posting', 'meta_ads', 'career_site']
+const DISCOVERY_COLLECTORS = ['b2b_supplier', 'web_search', 'job_posting', 'meta_ads']
 const isDiscovery = computed(() => DISCOVERY_COLLECTORS.includes(form.collector))
 /** 创建对话框的采集器选项：数据源（发现类 + 招聘页巡检），不含 website_enrich */
 const creatableCollectors = computed(() =>
@@ -152,7 +152,16 @@ async function handleCreate() {
     message.success('任务已开始执行，完成后会自动做官网富化（找官网、抓信号、重新评分）')
   }
   dialogVisible.value = false
+  resetListFilters()
   fetchData()
+}
+
+/** 新建/执行后回到无筛选首页——否则新任务（排队中）被当前筛选条件挡住
+ * （2026-09-01 实测：状态筛选「已完成」下新建任务，列表不更新，刷新才显示） */
+function resetListFilters() {
+  query.page = 1
+  query.collector = null
+  query.status = null
 }
 
 function openCreate() {
@@ -174,6 +183,7 @@ watch(() => form.collector, initParamForm)
 async function handleRun(row: CollectTask) {
   await collectApi.runTask(row.id)
   message.success('已入队')
+  resetListFilters()
   fetchData()
 }
 

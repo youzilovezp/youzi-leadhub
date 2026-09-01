@@ -25,6 +25,7 @@ async function fetchAll() {
 /** 流水线阶段：依赖关系可视化——发现层产出种子，信号层补招聘信号；
  *  网站富化是内部复核步骤（非数据源），不出现在本列表（2026-09-01 口径） */
 const PIPELINE_STAGE: Record<string, { label: string; type: 'success' | 'info' | 'warning' }> = {
+  b2b_supplier: { label: '① 发现层·线索', type: 'info' },
   web_search: { label: '① 发现层·种子', type: 'info' },
   job_posting: { label: '① 发现层·线索', type: 'info' },
   meta_ads: { label: '① 发现层·带信号直采', type: 'success' },
@@ -89,7 +90,7 @@ onMounted(fetchAll)
         class="mb-4"
       >
         <div style="line-height: 2">
-          🔍 <b>① 找线索</b>（搜索引擎 / 招聘监控 / 广告库）
+          🔍 <b>① 找线索</b>（B2B 出口目录 / 搜索引擎 / 招聘监控 / 广告库）
           <span style="color: #18a058">→ 自动 →</span>
           🔄 <b>② 补信息</b>：搜官网、识别 WhatsApp 与出海信号、重新评分
           <span style="color: #18a058">→</span>

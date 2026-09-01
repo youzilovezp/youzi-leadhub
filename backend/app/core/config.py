@@ -177,9 +177,10 @@ class Settings(BaseSettings):
     # all_proxy 环境变量——httpx(trust_env) 与 curl_cffi(libcurl) 都会隐式捡起
     # 这些变量，本机 VPN 一开一关采集行为就变（共享出口 IP 被限流/国内站走
     # 国外出口被拦/代理半开全线失败），全部改为确定性直连。
-    # CRAWLER_PROXY_URL：显式代理（如 socks5://127.0.0.1:7890），**只**用于
-    # 境外被墙端点（DDG 搜索 / Meta 广告库 API / FB 主页探测）；国内可达资源
-    # （必应中国/招聘站/中国企业官网富化）无论如何都直连。
+    # CRAWLER_PROXY_URL：显式代理（如 socks5://127.0.0.1:7890），用于境外被墙
+    # 端点（DDG 搜索 / Meta 广告库 API / FB 主页探测）优先通道；富化对国内站
+    # 无论如何都直连，仅直连失败后经代理兜底一次（海外站点被墙场景，2026-09-01
+    # 复盘追加）。
     CRAWLER_IGNORE_ENV_PROXY: bool = True
     CRAWLER_PROXY_URL: str = ""
     # 采集流水线自动接力（2026-08-31 交互改造）：发现类采集器（web_search/
@@ -189,6 +190,7 @@ class Settings(BaseSettings):
     # 自动接力去重：已有全库富化（params 为空）排队中就不再堆——排队中的那次
     # 扫描必然覆盖新增线索；不设时间窗口（刚跑完的富化扫不到本次新增，会漏）
     ENRICH_CONCURRENCY: int = 5  # 富化并发站点数
+    COLLECT_DISCOVER_LIMIT: int = 30  # 官网发现每轮上限（搜索配额礼貌约束；冷启动积压期可显式调大）
     SCHEDULER_ENABLED: bool = False  # 定时调度总开关（WORKERS=1 的进程才会启动）
     # LLM（OpenAI 兼容协议：智谱 GLM / DeepSeek / OpenAI 均可）。未配置时 AI 能力降级为规则模板
     LLM_BASE_URL: str = ""  # 如 https://open.bigmodel.cn/api/paas/v4
