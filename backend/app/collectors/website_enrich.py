@@ -148,16 +148,50 @@ _CONTACT_PERSON_RE = re.compile(
     r"((?:\+?86[-\s]?)?1[3-9]\d[-\s]?\d{4}[-\s]?\d{4})",
     re.I,
 )
+# 第 5 形态（2026-09-01 Shoptop 实测，用户报「联系信息爬取不对」）：无
+# 「联系人：」前缀，直接「城市 Name Tel：17891981788 微信同号」——地区销售/
+# 代理建站服务商的常见写法；名字可为拉丁（Lisa/Akon）或中文（李伟），
+# 手机可带分隔（178-9198-1788），微信同号=手机即微信号（对销售是关键信息）
+_CONTACT_PERSON_TEL_RE = re.compile(
+    r"(?P<ctx>[一-鿿][一-鿿/·、]{0,11})?\s*"
+    r"(?P<name>[A-Za-z][A-Za-z .\-]{1,23}|[一-鿿·]{2,4})"
+    r"\s*(?:联系电话|联系方式|电话|手机|mobile|tel)\s*[:：]?\s*"
+    r"(?P<phone>(?:\+?86[-\s]?)?1[3-9]\d[-\s]?\d{4}[-\s]?\d{4})"
+    r"(?:\s*(?P<wechat>微信同号|微信号同号))?",
+    re.I,
+)
+# 不是人名的词（客服/电话/致电…）——第 5 形态没有「联系人：」锚，靠词表防误判
+_CONTACT_NAME_JUNK_RE = re.compile(
+    r"客服|电话|咨询|联系|我们|热线|致电|服务|销售|商务|市场|技术|支持|微信|同号"
+    r"|邮箱|地址|传真|时间|工作|更多|详情|留言|提交|tel|phone|mobile|contact|wa$|^qq",
+    re.I,
+)
+
+
+def _norm_cn_mobile(phone: str) -> str | None:
+    """手机号原文 → 11 位数字（剥 +86/分隔）；不合法返回 None。"""
+    digits = re.sub(r"[\s\-+]", "", phone)
+    if len(digits) > 11 and digits.startswith("86"):
+        digits = digits[2:]
+    return digits if re.fullmatch(r"1[3-9]\d{9}", digits) else None
 
 
 def detect_contact_persons(html_list: list[str]) -> list[dict[str, str]]:
-    """页面上的具名联系人 → [{name, title, phone}]（title=部门/角色，可空）。
+    """页面上的具名联系人 → [{name, title, phone}]（title=部门/角色/地区，可空）。
 
-    kaadas 联系页形态：「海外事业部（加盟合作/OEM/ODM） 联系人：屈先生
-    联系电话：189-2522-1831」——比泛邮箱强一个量级的「找谁」答案。
+    覆盖三种实测形态（联系方式是一级产出，宁可多识别一个形态不能漏一种写法）：
+    - kaadas：「海外事业部（加盟合作/OEM/ODM） 联系人：屈先生 联系电话：189-2522-1831」
+    - Shoptop：「上海 Lisa Tel：17891981788 微信同号」（城市+拉丁名+Tel+微信同号）
+    - 中文名无前缀：「李伟 电话：138-1234-5678」
     """
     text = page_text(html_list, keep_case=True)
     out: list[dict[str, str]] = []
+
+    def _add(name: str, title: str, phone_digits: str) -> None:
+        entry = {"name": name, "title": title[:60], "phone": phone_digits}
+        if not any(e["name"] == name and e["phone"] == phone_digits for e in out):
+            out.append(entry)
+
     for m in _CONTACT_PERSON_RE.finditer(text):
         dept, name, role, phone = (
             (m.group(1) or "").strip(),
@@ -165,15 +199,26 @@ def detect_contact_persons(html_list: list[str]) -> list[dict[str, str]]:
             (m.group(3) or "").strip(),
             m.group(4),
         )
-        phone_digits = re.sub(r"[\s\-+]", "", phone)
-        if len(phone_digits) > 11 and phone_digits.startswith("86"):
-            phone_digits = phone_digits[2:]
-        if not re.fullmatch(r"1[3-9]\d{9}", phone_digits):
+        digits = _norm_cn_mobile(phone)
+        if not digits:
             continue
-        title = " ".join(x for x in (dept, role) if x)[:60]
-        entry = {"name": name, "title": title, "phone": phone_digits}
-        if not any(e["name"] == name and e["phone"] == phone_digits for e in out):
-            out.append(entry)
+        _add(name, " ".join(x for x in (dept, role) if x), digits)
+
+    for m in _CONTACT_PERSON_TEL_RE.finditer(text):
+        ctx, name, phone, wechat = (
+            (m.group("ctx") or "").strip(),
+            m.group("name").strip(),
+            m.group("phone"),
+            m.group("wechat"),
+        )
+        digits = _norm_cn_mobile(phone)
+        # 词表里的客服/电话类词不是人名；ctx 混入 微信/同号 等残留时丢弃
+        if not digits or _CONTACT_NAME_JUNK_RE.search(name):
+            continue
+        if any(w in ctx for w in ("微信", "同号", "电话", "联系")):
+            ctx = ""
+        title = " ".join(x for x in (ctx, "微信同号" if wechat else "") if x)
+        _add(name, title, digits)
     return out[:8]
 
 

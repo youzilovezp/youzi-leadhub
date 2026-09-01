@@ -262,6 +262,46 @@ def test_phone_rank_prefers_landline_over_400():
     assert "0755-86668868" in phones and "400-800-5919" in phones
 
 
+def test_detect_contact_persons_name_tel_shape():
+    """具名联系人第 5 形态（2026-09-01 Shoptop 实测，用户报「联系信息爬取不对」）：
+    「城市 Name Tel：手机 微信同号」——无「联系人：」前缀、拉丁名、微信同号标注。
+    此前只抓到 400 热线，页面 5 位地区联系全漏。"""
+    from app.collectors.website_enrich import detect_contact_persons
+
+    text = """
+    致电我们 400-888-3299
+    上海 Lisa Tel：17891981788 微信同号
+    上海 Hope Tel：13122987879 微信同号
+    合肥 Akon Tel：13127786691 微信同号
+    深圳/广州 Kay Tel：13122863363 微信同号
+    郑州 Terry Tel：18616332393 微信同号
+    """
+    persons = detect_contact_persons([f"<html><body>{text}</body></html>"])
+    by_name = {p["name"]: p for p in persons}
+    assert len(persons) == 5
+    assert by_name["Lisa"]["phone"] == "17891981788"
+    assert "微信同号" in by_name["Lisa"]["title"]
+    assert by_name["Akon"]["phone"] == "13127786691"
+    assert "合肥" in by_name["Akon"]["title"]
+    assert "深圳/广州" in by_name["Kay"]["title"]
+
+
+def test_detect_contact_persons_name_tel_cn_name_and_junk_guard():
+    """第 5 形态边界：中文名+带分隔手机可识别；「客服电话：」类非人名词不建联系人。"""
+    from app.collectors.website_enrich import detect_contact_persons
+
+    text = """
+    业务咨询 李伟 电话：138-1234-5678
+    客服电话：13900000000
+    售后服务 mobile: 13711112222
+    """
+    persons = detect_contact_persons([f"<html><body>{text}</body></html>"])
+    by_name = {p["name"]: p for p in persons}
+    assert by_name.get("李伟", {}).get("phone") == "13812345678"
+    # 客服/售后服务是部门职能词不是人名——不产出具名联系人
+    assert "客服" not in by_name and "售后服务" not in by_name
+
+
 def test_site_matches_company_short_brand_identity():
     """归属 v2（呜噜网实测）：标题=短中文品牌（≤6字）且与公司名零重叠 → 错配；
     长口号标题/英文品牌站不触发（防误杀）。"""
