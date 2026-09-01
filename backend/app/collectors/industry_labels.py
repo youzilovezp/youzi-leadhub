@@ -62,8 +62,8 @@ INDUSTRY_LABELS_ZH: dict[str, str] = {
 
 
 # ---------- PRD §二 目标行业（spec §四白名单映射；归类标签不是 ICP 硬门） ----------
-# 2026-09-01 用户裁决：四类。货代/代运营/客服外包等服务商**不是**目标客户（进
-# icp 非买家排除）；建站/工具 SaaS 服务商（Shopline 类）**算**买家（归 overseas_saas）。
+# 2026-09-01 用户二次裁决定案：四类。货代/代运营/客服外包等服务商**不是**目标客户；
+# 建站/工具 SaaS 服务商（Shopline 类）**也撤出**（自建通讯能力/渠道现实性低）。
 
 INDUSTRY_GROUPS: dict[str, tuple[str, ...]] = {
     # 组键 → （industry token / 公司名子串，大小写不敏感）
@@ -72,8 +72,7 @@ INDUSTRY_GROUPS: dict[str, tuple[str, ...]] = {
                           "独立站", "品牌出海"),
     "game_app": ("游戏", "game", "gaming", "移动应用", "出海app"),
     "manufacturing": ("制造", "工厂", "factory", "工业", "器械", "设备", "汽配", "新能源"),
-    "overseas_saas": ("saas", "软件", "software", "科技", "technology", "互联网", "建站",
-                      "shopify", "独立站服务"),
+    "overseas_saas": ("saas", "软件", "software", "科技", "technology", "互联网"),
 }
 
 INDUSTRY_GROUP_LABELS_ZH: dict[str, str] = {
