@@ -162,7 +162,20 @@ def site_matches_company(homepage_html: str, company_name: str) -> tuple[bool, s
     distractor = next((d for d in _SITE_BRAND_DISTRACTORS if d.lower() in title.lower()), "")
     if distractor and not name_hit:
         return False, title
+    # v2（2026-09-01 呜噜网实测）：标题是短中文品牌身份（≤6 个汉字，如「呜噜网」）
+    # 且与中文公司名零重叠 → 错配。只限短品牌：长标题多为产品口号（无身份主张），
+    # 英文品牌站（凯越→MU Group）不触发——防误杀
+    if not name_hit and _has_cjk(core) and 2 <= _cjk_len(title) <= 6:
+        return False, title
     return True, title
+
+
+def _has_cjk(text: str) -> bool:
+    return any("一" <= ch <= "鿿" for ch in text or "")
+
+
+def _cjk_len(text: str) -> int:
+    return sum(1 for ch in text or "" if "一" <= ch <= "鿿")
 
 
 _400_HOTLINE_RE = re.compile(r"(?<!\d)400-?\d{3,4}-?\d{3,4}(?!\d)")
@@ -1025,11 +1038,14 @@ async def _clear_mismatched_website(
             "confidence": 100,
         }
         lead.field_meta = meta
+        # 错站来源的自动联系人全删（不限 source=website_enrich——draft 落库时
+        # 建的联系人带的是采集器 source 如 web_search，2026-09-01 调试实锤）；
+        # manual 是人工录入，保留
         rows = (
             await session.execute(
                 _select(LeadContact).where(
                     LeadContact.lead_id == lead_id,
-                    LeadContact.source == "website_enrich",
+                    LeadContact.source != "manual",
                 )
             )
         ).scalars().all()
