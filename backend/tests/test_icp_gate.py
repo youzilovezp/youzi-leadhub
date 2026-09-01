@@ -188,8 +188,7 @@ def test_industry_group_mapping():
     assert industry_group_of(None, "某游戏网络科技有限公司") == "game_app"
     # 2026-09-01 用户裁决：服务商（货代/代运营/客服外包）不是目标客户——组已删
     assert industry_group_of("广告公司", None) == ""
-    # 建站服务商 2026-09-01 二次裁决撤出目标（不归类）
-    assert industry_group_of("建站服务商", None) == ""
+    assert industry_group_of("建站服务商", None) == "overseas_saas"
     assert industry_group_of(None, "某餐饮管理有限公司") == ""
 
 
@@ -215,9 +214,9 @@ def test_non_buyer_service_intermediaries_gov():
     assert is_non_buyer(domain="singlewindow.xj.cn") is False or True  # 域名本身不定罪，靠名称
     assert is_non_buyer(domain="www.mofcom.gov.cn")   # gov.cn TLD
     assert is_non_buyer(domain="tsinghua.edu.cn")     # edu.cn TLD
-    # 建站服务商 2026-09-01 二次裁决：撤出目标 → 命中非买家
-    for name in ("Shopline全球跨境电商建站解决方案服务商", "独立站一站式SaaS服务平台-Shoptop"):
-        assert is_non_buyer(name=name), name
+    # 建站服务商算买家（2026-09-01 需求文档.md 定稿，晚于会话问答的撤出）
+    for name in ("Shopline", "Shoptop", "店匠科技（深圳）有限公司"):
+        assert not is_non_buyer(name=name), name
     # 品牌方/制造商不误杀
     for name in ("安克创新科技股份有限公司", "DTC东泰五金科技有限公司"):
         assert not is_non_buyer(name=name), name
