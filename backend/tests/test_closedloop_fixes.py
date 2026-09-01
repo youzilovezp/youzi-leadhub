@@ -259,6 +259,36 @@ async def test_maybe_chain_enrich_creates_and_throttles(db_session, monkeypatch)
     await task_runner._maybe_chain_enrich(log_fn, 9907, "meta_ads", 1)
     assert not logs
     assert await _chained_count() == baseline + 2
+    monkeypatch.setattr("app.core.config.settings.AUTO_CHAIN_ENRICH", True)
+
+    # 7) cron 全库富化歇息在 pending（等下一次定时触发，SCHEDULER_ENABLED=false
+    #    时永远不触发）→ **不算数必须接力**——2026-09-01 用户实报：定时富化 #16
+    #    把所有自动接力永久挡掉，新增线索一直没人富化
+    cron_resting = CollectTask(
+        name="定时全库富化（歇息桩）", collector="website_enrich", params={},
+        status="pending", cron_expr="0 4 * * *",
+    )
+    db_session.add(cron_resting)
+    # 消费掉 5) 的接力任务，隔离 7) 的判定
+    await db_session.execute(
+        sa_update(CollectTask).where(CollectTask.name.like("%任务 #9906%")).values(status="completed")
+    )
+    await db_session.commit()
+    logs.clear()
+    await task_runner._maybe_chain_enrich(log_fn, 9908, "web_search", 1)
+    assert any("已自动接力" in m for _, m in logs), "cron 歇息 pending 不得挡掉接力"
+    assert await _chained_count() == baseline + 3
+
+    # 8) cron 真正被触发（queued）→ 算数照常跳过（即将运行的全库扫描会覆盖）
+    await db_session.execute(
+        sa_update(CollectTask).where(CollectTask.name.like("%任务 #9908%")).values(status="completed")
+    )
+    cron_resting.status = "queued"
+    await db_session.commit()
+    logs.clear()
+    await task_runner._maybe_chain_enrich(log_fn, 9909, "web_search", 1)
+    assert any("跳过自动富化接力" in m for _, m in logs)
+    assert await _chained_count() == baseline + 3  # 没有新建
 
     # 清理（共享测试库）：只删本用例接力产生的 + 节流桩
     await db_session.execute(
@@ -266,6 +296,7 @@ async def test_maybe_chain_enrich_creates_and_throttles(db_session, monkeypatch)
     )
     await db_session.delete(ran)
     await db_session.delete(picked)
+    await db_session.delete(cron_resting)
     await db_session.commit()
 
 
@@ -291,3 +322,52 @@ def test_detect_tel_phones():
     assert detect_tel_phones([html]) == ["+8675512345678", "075512345678"]
     assert detect_tel_phones(["<p>no tel here</p>"]) == []
     assert detect_tel_phones(["", None]) == []
+
+
+def test_lead_out_json_type_guard():
+    """JSON 列类型容错（2026-09-01 实测事故）：数据手术把 saas_signals 清成
+    空列表后，三条脏行把 /leads 与 /daily-batch 全打成 422——一条行的类型
+    错乱不该搞挂整个列表 API，错型归空而不是拒绝序列化。"""
+    from datetime import datetime, timezone
+
+    from app.schemas.collect import LeadOut
+
+    out = LeadOut(
+        id=1,
+        name="测试公司",
+        country="CN",
+        city=None,
+        industry=None,
+        address=None,
+        phone_raw=None,
+        phone_e164=None,
+        website=None,
+        domain=None,
+        email=None,
+        social=[],  # 错型：应为 dict
+        whatsapp_hit=False,
+        whatsapp_url=None,
+        whatsapp_job=False,
+        job_urls="not-a-list",  # 错型
+        enriched_at=datetime.now(timezone.utc),
+        score=15,
+        saas_signals=[],  # 错型：应为 dict（事故现场）
+        scenes={},
+        whatsapp_numbers=None,
+        job_signals=[],
+        ad_count=0,
+        sources=[],
+        score_signals=None,  # 错型：应为 dict
+        owner_id=None,
+        follow_status=None,
+        last_followed_at=None,
+        next_follow_at=None,
+        target_countries={},
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    assert out.saas_signals == {}
+    assert out.social == {}
+    assert out.job_urls == []
+    assert out.whatsapp_numbers == []
+    assert out.job_signals == {}

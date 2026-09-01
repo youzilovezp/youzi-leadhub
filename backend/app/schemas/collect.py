@@ -78,6 +78,22 @@ class LeadOut(BaseModel):
     whatsapp_job: bool
     job_urls: list[str]
     enriched_at: datetime | None
+
+    # JSON 列类型容错（2026-09-01 实测事故：一次数据手术把 saas_signals 清成
+    # 空列表，三条脏行把 /leads 与 /daily-batch 全打成 422——一条行的类型
+    # 错乱不该具备搞挂整个列表 API 的能力）：错型归空而不是拒绝序列化
+    @field_validator(
+        "saas_signals", "job_signals", "social", "score_signals", "field_meta", mode="before"
+    )
+    @classmethod
+    def _coerce_json_dict(cls, v: object) -> dict:
+        return v if isinstance(v, dict) else {}
+
+    @field_validator("scenes", "whatsapp_numbers", "job_urls", "target_countries", mode="before")
+    @classmethod
+    def _coerce_json_list(cls, v: object) -> list:
+        return v if isinstance(v, list) else []
+
     score: int
     score_signals: dict[str, int]  # v3 意向分 {命中信号键: 分值}
     grade: str = "C"  # S/A/B/C

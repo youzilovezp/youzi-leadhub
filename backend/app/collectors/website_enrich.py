@@ -629,10 +629,15 @@ def _charset_from_content_type(content_type: str | None) -> str | None:
 
 
 def _make_client(**kwargs: Any) -> httpx.AsyncClient:
+    # trust_env=False：富化目标是中国企业官网（国内直连可达），不捡环境变量
+    # 代理（2026-09-01 用户裁决：爬虫不被本机 VPN 干扰——国外出口访问国内站
+    # 会被拦/变慢/内容不同）。需要代理的场景在调用方显式传 proxy=。
+    base: dict[str, Any] = {"trust_env": False}
+    base.update(kwargs)
     return httpx.AsyncClient(
         headers={"User-Agent": _UA, "Accept-Language": "en"},
         timeout=_TIMEOUT,
-        **kwargs,
+        **base,
     )
 
 
@@ -815,6 +820,7 @@ class WebsiteEnrichCollector(Collector):
 
         # 结果统计（结束日志说清成功/失败与各自原因——失败不再淹没在「完成」里）
         ok_sites: list[str] = []
+        ok_lead_ids: list[int] = []  # 成功的线索 ID（结束时统计联系方式命中率）
         fail_sites: list[tuple[str, str | None]] = []  # (website, 失败原因)
 
         # 浏览器渲染兜底（懒启动）：httpx 三通道都被拒的站点（如大型电商的
@@ -878,9 +884,11 @@ class WebsiteEnrichCollector(Collector):
                         "info",
                         f"库内共 {backlog} 家无官网，本轮处理 {len(candidates)} 家（按分数优先）",
                     )
-                for lid, name in candidates:
+                for lid, name, brand_slugs in candidates:
                     ctx.check_cancelled()
-                    ws = await _discover_website((client, loose), name, log=ctx.log)
+                    ws = await _discover_website(
+                        (client, loose), name, log=ctx.log, brand_slugs=brand_slugs
+                    )
                     if ws:
                         from app.crud.lead import touch_field_meta
                         from app.models.lead import Lead
@@ -1004,6 +1012,7 @@ class WebsiteEnrichCollector(Collector):
                         )
                         if ok:
                             ok_sites.append(website)
+                            ok_lead_ids.append(lead_id)
                         else:
                             fail_sites.append((website, fail_reason))
                     except Exception:  # noqa: BLE001  单站点失败不放大为整任务失败
@@ -1023,6 +1032,16 @@ class WebsiteEnrichCollector(Collector):
         # 汇总日志：成功/失败分开数，失败带真实原因（每站点：原因）——
         # 「域名失效或拒绝访问」这种一刀切文案换成分层诊断（DNS/超时/TLS/HTTP 码）
         summary = f"富化完成：成功 {len(ok_sites)}、失败 {len(fail_sites)}"
+        # 联系方式命中率（2026-09-01 用户红线：联系信息爬不全 = 失败——命中率
+        # 必须可见，不能只看「富化成功」）：成功站点里有多少家拿到了电话/邮箱/WA
+        if ok_lead_ids:
+            hits = await _contact_hit_counts(ok_lead_ids)
+            if hits:
+                tel, mail, wa, contact_rows = hits
+                summary += (
+                    f"；联系方式命中（成功 {len(ok_lead_ids)} 家中）："
+                    f"邮箱 {mail}、电话 {tel}、WhatsApp {wa}、具名联系人 {contact_rows}"
+                )
         if fail_sites:
             detail = "、".join(
                 f"{site.replace('https://', '').replace('http://', '')}"
@@ -1043,21 +1062,166 @@ _DISCOVER_RETRY_DAYS = 7  # 发现失败/撞域名的冷却重试天数（field_
 
 
 async def _discover_website(
-    clients: tuple[httpx.AsyncClient, httpx.AsyncClient], name: str, log=None
+    clients: tuple[httpx.AsyncClient, httpx.AsyncClient],
+    name: str,
+    log=None,
+    brand_slugs: list[str] | None = None,
 ) -> str | None:
-    """公司名 → 官网（第一个企业站结果，根 URL 归一）。找不到返回 None。
+    """公司名 → 官网（候选站**写前验证**，根 URL 归一）。找不到返回 None。
 
-    走 search_with_fallback（DDG 不可达自动切必应）——发现链此前直连主引擎，
-    引擎被墙时发现率直接归零，无官网线索永远进不了富化。
+    三级尝试（2026-09-01 用户红线「联系信息必须爬准」）：
+    ① 品牌域直猜：B2B 目录线索的店铺子域就是品牌名（yuanxiuhair.en.
+       made-in-china.com → 官网大概率 yuanxiuhair.com），先猜后验——比
+       搜索引擎对英文公司名的返回质量（实测全是企查查/Vogue/政府网垃圾）
+       靠谱得多；
+    ② 搜索（DDG 不可达自动切必应）：英文名引号精确匹配，中文名加「官网」；
+    ③ 候选站写前验证：抓首页，标题或域名必须含公司名特征词（拉丁词 ≥5
+       字符剔通用与城市软词，或中文名相邻汉字对）才写——错站数据等于
+       给销售错误联系方式，宁可 miss 负缓存 7 天。
     """
     # 经模块属性调用（非 from-import 局部绑定）——测试可对 web_search.search_with_fallback 打桩
     from app.collectors import web_search as _ws
 
-    items, _err, _used = await _ws.search_with_fallback(clients, f"{name} 官网", 5, log=log)
-    if not items:
+    async def _verified(url: str) -> str | None:
+        page = await _fetch_site(clients, url)
+        if page is None:
+            return None
+        m = _TITLE_RE.search(page)
+        title = re.sub(r"<[^>]+>|\s+", " ", m.group(1)).strip() if m else ""
+        if _site_title_mentions(name, title=title, url=url):
+            return url
         return None
-    drafts = _ws.results_to_drafts(items, params_is_cn=True)
-    return drafts[0].website if drafts else None
+
+    # ① 品牌域直猜（B2B 线索专属）：{slug}.com/.cn，写前验证同闸
+    for slug in (brand_slugs or [])[:2]:
+        for guess in (f"https://{slug}.com", f"https://www.{slug}.com", f"https://{slug}.cn"):
+            hit = await _verified(guess)
+            if hit:
+                if log:
+                    await log("info", f"官网发现（品牌域直猜命中）：{name} → {hit}")
+                return hit
+            await asyncio.sleep(_DISCOVER_GAP)
+
+    # ② 搜索：有品牌词先搜品牌词（比公司名独特，SERP 干净）；否则公司名
+    # （英文名加引号精确匹配——混「官网」中文词会把结果带偏）
+    queries: list[str] = []
+    if brand_slugs:
+        queries.append(f'"{brand_slugs[0]}"')
+    queries.append(f'"{name}"' if not _has_cjk(name) else f"{name} 官网")
+    for query in queries:
+        items, _err, _used = await _ws.search_with_fallback(clients, query, 8, log=log)
+        if not items:
+            continue
+        drafts = _ws.results_to_drafts(items, params_is_cn=True)
+        for d in drafts[:3]:
+            if not d.website:
+                continue
+            page = await _fetch_site(clients, d.website)
+            if page is None:
+                continue  # 抓不到的站写了也富化不了
+            m = _TITLE_RE.search(page)
+            title = re.sub(r"<[^>]+>|\s+", " ", m.group(1)).strip() if m else ""
+            if _site_title_mentions(name, title=title, url=d.website):
+                return d.website
+            if log:
+                await log(
+                    "info",
+                    f"官网发现候选否决（公司名特征词不在站内）：{name} → {d.website}"
+                    f"（标题：{title[:40] or '无'}）",
+                )
+            await asyncio.sleep(_DISCOVER_GAP)
+    return None
+
+
+# 发现验证的公司名通用词：英文公司名几乎必含、不构成身份特征的高频词
+_DISCOVERY_GENERIC_LATIN = frozenset(
+    {
+        "co", "ltd", "limited", "inc", "llc", "corp", "corporation", "company",
+        "group", "technology", "tech", "technologies", "industrial", "industry",
+        "industries", "trading", "trade", "international", "china", "chinese",
+        "products", "product", "manufacturing", "manufacture", "manufacturer",
+        "official", "website", "home", "page", "network", "networks", "digital",
+        "opto", "optic", "optics", "light", "lights", "lighting", "led", "hair",
+        "beauty", "electronics", "electronic", "arts", "crafts", "new", "best",
+    }
+)
+# 软词（城市/省份）：单独出现不足以确认身份（深圳的网站千千万），但可作
+# 双词佐证之一（Shenzhen ATA 的标题含 shenzhen+ata 两个词 → 通过）
+_DISCOVERY_SOFT_LATIN = frozenset(
+    {
+        "shenzhen", "beijing", "shanghai", "guangzhou", "dongguan", "ningbo",
+        "xuchang", "hangzhou", "suzhou", "wuxi", "yiwu", "wuhan", "chengdu",
+        "xiamen", "qingdao", "tianjin", "chongqing", "nanjing", "dalian",
+        "fuzhou", "quanzhou", "shantou", "chaozhou", "zhongshan", "foshan",
+        "huizhou", "changzhou", "heze", "juancheng", "guangdong", "jiangsu",
+        "zhejiang", "fujian", "shandong", "hunan", "sichuan",
+    }
+)
+
+
+def _site_title_mentions(company_name: str, *, title: str, url: str) -> bool:
+    """公司名特征词是否出现在站点标题或 URL（发现链写前验证，纯函数）。
+
+    拉丁名：剔通用词与城市软词后 ≥5 字符的词（yuanxiu/topledvision）任一
+    命中即通过；不足时退化要求 ≥2 个 ≥3 字符词（城市词可作佐证之一：
+    Shenzhen ATA → 「shenzhen」+「ata」；单独一个城市词不通过）。
+    中文名：剥法律后缀后任一相邻汉字对出现在标题（与 site_matches_company
+    的 name_hit 同口径）。
+    """
+    name = (company_name or "").strip()
+    if not name:
+        return False
+    hay = f"{title} {url}".lower()
+    if _has_cjk(name):
+        core = re.sub(
+            r"(股份有限公司|有限责任公司|有限公司|集团公司|集团)", "", name
+        ).strip()
+        return bool(core) and any(core[i : i + 2] in title for i in range(max(1, len(core) - 1)))
+    words = [w for w in re.split(r"[^a-z0-9]+", name.lower()) if w]
+    strong = [
+        w
+        for w in words
+        if len(w) >= 5 and w not in _DISCOVERY_GENERIC_LATIN and w not in _DISCOVERY_SOFT_LATIN
+    ]
+    if any(w in hay for w in strong):
+        return True
+    weak = [w for w in words if len(w) >= 3 and w not in _DISCOVERY_GENERIC_LATIN]
+    hit = {w for w in weak if w in hay}
+    return len(hit) >= 2
+
+
+async def _contact_hit_counts(lead_ids: list[int]) -> tuple[int, int, int, int] | None:
+    """成功富化的线索里联系方式命中数：(电话, 邮箱, WA, 具名联系人)。"""
+    if not lead_ids:
+        return None
+    async with _session_factory()() as session:
+        from sqlalchemy import func as sa_func, select as sa_select, or_
+
+        from app.models.lead import Lead as LeadModel, LeadContact as LeadContactModel
+
+        rows = (
+            await session.execute(
+                sa_select(
+                    sa_func.count(sa_func.nullif(LeadModel.phone_e164, "")).label("tel"),
+                    sa_func.count(sa_func.nullif(LeadModel.email, "")).label("mail"),
+                    sa_func.count().label("wa"),
+                ).where(
+                    LeadModel.id.in_(lead_ids),
+                    or_(
+                        LeadModel.whatsapp_url != "",
+                        sa_func.json_array_length(LeadModel.whatsapp_numbers) > 0,
+                    ),
+                )
+            )
+        ).one()
+        contact_rows = (
+            await session.execute(
+                sa_select(sa_func.count(sa_func.distinct(LeadContactModel.lead_id))).where(
+                    LeadContactModel.lead_id.in_(lead_ids)
+                )
+            )
+        ).scalar_one()
+    return int(rows.tel), int(rows.mail), int(rows.wa), int(contact_rows)
 
 
 async def _domain_taken(session: AsyncSession, domain: str, exclude_id: int) -> int | None:
@@ -1096,16 +1260,20 @@ def _discovery_cooldown(meta: dict | None, now: datetime | None = None) -> bool:
     return tried >= cutoff
 
 
-async def _load_discoverable(session: AsyncSession, limit: int) -> list[tuple[int, str]]:
+async def _load_discoverable(session: AsyncSession, limit: int) -> list[tuple[int, str, list[str]]]:
     """无官网且在 ICP 门内（foreign/non_buyer 排除）的线索（分数倒序——高分商机优先补全）。
 
     多取 3 倍候选，内存里滤掉冷却中的（失败/撞域名 7 天内不再消耗搜索配额）；
     SQL 侧不比较 JSON——PG json 类型无 = 操作符。
     终态（won/invalid）与富化范围同口径排除（FR-1.5「非终态」；NULL 放行）。
+
+    返回 (lead_id, name, brand_slugs)：B2B 目录线索从证据链里提取店铺子域
+    品牌名（yuanxiuhair），发现链优先猜品牌域——搜索引擎对英文公司名的
+    返回质量不可靠（2026-09-01 实测：企查查/Vogue/政府网霸榜）。
     """
     from sqlalchemy import or_
 
-    from app.models.lead import Lead
+    from app.models.lead import Lead, LeadSignal
 
     rows = (
         await session.execute(
@@ -1119,13 +1287,32 @@ async def _load_discoverable(session: AsyncSession, limit: int) -> list[tuple[in
             .limit(limit * 3 + 30)
         )
     ).all()
-    out: list[tuple[int, str]] = []
+    out: list[tuple[int, str, list[str]]] = []
+    prefilter: list[tuple[int, str]] = []
     for lid, name, meta in rows:
         if _discovery_cooldown(meta):
             continue
-        out.append((lid, name))
-        if len(out) >= limit:
+        prefilter.append((lid, name))
+        if len(prefilter) >= limit:
             break
+    if not prefilter:
+        return out
+    # B2B 证据里的店铺子域 → 品牌名（批量一条查询，避免 N+1）
+    sig_rows = (
+        await session.execute(
+            select(LeadSignal.lead_id, LeadSignal.evidence_url).where(
+                LeadSignal.lead_id.in_([r[0] for r in prefilter]),
+                LeadSignal.source == "b2b_supplier",
+            )
+        )
+    ).all()
+    slug_by_lead: dict[int, list[str]] = {}
+    for sig_lead_id, ev_url in sig_rows:
+        m = re.search(r"https://([a-z0-9-]{2,})\.en\.made-in-china\.com", ev_url or "")
+        if m:
+            slug_by_lead.setdefault(sig_lead_id, []).append(m.group(1))
+    for lid, name in prefilter:
+        out.append((lid, name, slug_by_lead.get(lid, [])))
     return out
 
 
@@ -1375,6 +1562,38 @@ async def _clear_mismatched_website(
             await session.close()
 
 
+async def _probe_export_en_pages(
+    clients: tuple[httpx.AsyncClient, httpx.AsyncClient], base: str, base_domain: str | None
+) -> list[tuple[str, str]]:
+    """外销站英文联系页探测（2026-09-01 靶心补强）。
+
+    中国公司国内站常不挂 WA，外销版（en. 子域=同注册人、同域 /en/ 路径）才挂
+    wa.me——「在用 WA 承接客户」的高发位。只探零错配风险的形态（不换 TLD：
+    .cn→.com 可能撞到别人的域）；页面须含联系方式才收；预算 ≤4 次抓取、
+    页间 0.5s（与内页翻页同档礼貌间隔）。
+    """
+    from urllib.parse import urlparse
+
+    host = urlparse(base).hostname or ""
+    cands: list[str] = []
+    if base_domain:
+        cands += [f"https://en.{base_domain}/", f"https://en.{base_domain}/contact-us"]
+    if host:
+        cands += [f"https://{host}/en/contact-us", f"https://{host}/en/contact"]
+    out: list[tuple[str, str]] = []
+    for url in cands[:4]:
+        html = await _fetch_site(clients, url)
+        if html is not None and (
+            detect_whatsapp([html])[0]
+            or detect_whatsapp_numbers([html])
+            or detect_email([html])
+            or detect_text_phones([html])
+        ):
+            out.append((html, url))
+        await asyncio.sleep(0.5)
+    return out
+
+
 async def _enrich_one(
     clients: tuple[httpx.AsyncClient, httpx.AsyncClient],
     ctx: TaskContext,
@@ -1423,6 +1642,8 @@ async def _enrich_one(
     async with _session_factory()() as _s:
         _row = await _s.get(_Lead, lead_id)
         _company_name = _row.name if _row else ""
+    # 中国企业标记（外销站英文页探测的触发条件）：国内站常无 WA，外销版才挂
+    _lead_is_cn = bool(_row and (_row.is_cn or _row.country == "CN"))
     owns_site, site_title = site_matches_company(homepage, _company_name)
     if not owns_site:
         await ctx.log(
@@ -1520,6 +1741,19 @@ async def _enrich_one(
 
     whatsapp_hit, whatsapp_url = detect_whatsapp(pages)
     wa_numbers = detect_whatsapp_numbers(pages)
+    # 外销站英文联系页（2026-09-01 靶心补强）：中国企业国内站全页无 WA 时，
+    # WA 常挂在外销版（en. 子域=同注册人 / 同域 /en/ 路径，零错配风险）——
+    # 补抓有联系信息的英文页后再检测一轮（靶心「在用 WA 承接客户」高发位）
+    if _lead_is_cn and not whatsapp_hit and not wa_numbers:
+        for html, url in await _probe_export_en_pages(clients, base, base_domain):
+            pages.append(html)
+            page_urls.append(url)
+        if detect_whatsapp(pages)[0] or detect_whatsapp_numbers(pages):
+            await ctx.log(
+                "info", f"[lead {lead_id}] 🌍 外销站英文页命中 WhatsApp（en.子域 或 /en/ 路径）"
+            )
+            whatsapp_hit, whatsapp_url = detect_whatsapp(pages)
+            wa_numbers = detect_whatsapp_numbers(pages)
     # schema.org JSON-LD 声明的联系方式——网站主的机器可读数据，权威度高于正则启发；
     # 邮箱取值次序（FR-1.5）：mailto 显式链接 > JSON-LD 声明 > 正文正则
     jsonld = detect_jsonld_contacts(pages)

@@ -252,3 +252,52 @@ def test_generic_titles_skipped():
     drafts, stats = drafts_with_stats(items)
     assert [d.name for d in drafts] == ["安克创新官方商城"]
     assert stats.get("generic_title") == 2
+
+
+def test_whatsapp_mirror_domains_blocked():
+    """WhatsApp 软件/镜像站域族拦截（2026-09-01 实测：pwa-whatsapp.com 等
+    「WhatsApp网页版」镜像站轮换域名霸榜搜索结果，中国企业官网域名不含该词）。"""
+    from app.collectors.web_search import _is_blocked_domain
+
+    for d in (
+        "pwa-whatsapp.com",
+        "hub-whatsapp.com",
+        "home-whatsapp.com",
+        "whatsapp-download.cn",
+        "www.pwa-whatsapp.com",
+    ):
+        assert _is_blocked_domain(d), d
+    # 正常企业域名不误杀
+    for d in ("anker.com", "shein.cn", "made-in-china.cn.example.com"):
+        assert not _is_blocked_domain(d), d
+
+
+def test_env_proxy_stripped_on_import():
+    """本机 VPN 环境变量启动即剥离（2026-09-01 用户裁决：爬虫不被本机代理干扰）。
+
+    子进程里先注入死代理再 import config——httpx(trust_env)/curl_cffi(libcurl)
+    都会隐式捡这些变量，剥离必须发生在任何客户端构造前。
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    backend_dir = Path(__file__).resolve().parent.parent
+    code = (
+        "import os; "
+        "os.environ['https_proxy']='socks5://127.0.0.1:9'; "
+        "os.environ['ALL_PROXY']='socks5://127.0.0.1:9'; "
+        "from app.core.config import settings; "
+        "assert settings.CRAWLER_IGNORE_ENV_PROXY is True; "
+        "assert 'https_proxy' not in os.environ and 'ALL_PROXY' not in os.environ; "
+        "print('stripped')"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        cwd=backend_dir,
+        timeout=60,
+    )
+    assert out.returncode == 0, out.stderr
+    assert "stripped" in out.stdout

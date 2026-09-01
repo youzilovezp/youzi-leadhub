@@ -124,6 +124,11 @@ def _is_blocked_domain(domain: str) -> bool:
     shopee.sg）——归一为裸标签按前缀匹配。与 meta_ads 的判定统一锚定域边界。
     """
     d = domain.lower()
+    # WhatsApp 软件/镜像站域族（2026-09-01 实测：pwa-whatsapp.com 等「WhatsApp
+    # 网页版」镜像站轮换域名霸榜搜索结果）——中国出海企业官网域名不含该词，
+    # 子串规则防枚举漏网
+    if "whatsapp" in d:
+        return True
     for entry in _NON_SITE_DOMAINS:
         b = entry.rstrip(".").lower()
         if d == b or d.endswith("." + b):
@@ -198,6 +203,13 @@ _ARTICLE_TITLE_WORDS = (
     "meaning",
     "translation",
     "pronunciation",
+    # 问句/教程形态（2026-09-01 实测漏网：「外贸私域体系怎么搭建，从客户触达到
+    # 长期转化的…」文章标题整条入库——「怎么办」拦不住「怎么搭建」）
+    "怎么",
+    "一文",
+    "教程",
+    "干货",
+    "盘点",
 )
 _ARTICLE_PATH_WORDS = (
     "/blog",
@@ -538,9 +550,11 @@ class WebSearchCollector(Collector):
         "等富化抓到 ICP 备案号或中文内容后再认定——避免把海外公司误当中国出海企业。\n"
         "【自动接力】任务完成后系统自动执行「网站富化」（找官网、抓信号、重新评分），"
         "已有全库富化在排队时不会重复堆任务。\n"
-        "【关键词怎么填】目标行业定向词（跨境电商/品牌 DTC/游戏/制造/出海 SaaS 工具），"
-        "用中文长尾业务词组（如：跨境电商 独立站 品牌、出海品牌 独立站）。"
-        "只搜 whatsapp 一个词或英文拼错词，结果全是软件下载页，找不到客户。\n"
+        "【关键词怎么填】品类×官网词形（假发 厂家 外贸、LED灯带 厂家 官网）。"
+        "泛行业词（跨境电商 客服）与单词（whatsapp）搜到的全是文章/词典/下载页。\n"
+        "【通道定位（2026-09-01 实测）】国内直连下这是**弱种子辅助通道**：无论怎么换词，"
+        "单词产出 0-5 个种子且混媒体站——扩量主力是招聘站品类词发现（job_posting 开"
+        "『发现新线索』+ 品类词）与 Meta 广告库（meta_ads，需免费 token），本通道只做补漏。\n"
         "【边界】搜索只负责发现候选，是否值得跟进由 ICP 准入和评分决定。"
     )
     param_schema = [
@@ -549,11 +563,11 @@ class WebSearchCollector(Collector):
             "label": "搜索关键词",
             "required": True,
             "type": "tags",
-            "placeholder": "目标行业定向词（跨境电商/品牌DTC/游戏/制造/出海SaaS工具），中文长尾业务词有效",
-            # 预填默认词：打开就能一键创建。口径 = 中文长尾**业务词**（客服/
-            # 私域/官网类组合）——名词类品类词（制造业/品牌）的搜索结果页全是
-            # 词典与文章页，不是企业官网（2026-09-01 实测教训）
-            "default": "跨境电商 独立站 客服,外贸 whatsapp 私域,海外私域运营 whatsapp,跨境 电商 官网 客服,出海品牌 独立站 客服",
+            "placeholder": "品类×官网词形（假发 厂家 外贸、LED灯带 厂家 官网）。注意：泛行业词（跨境电商 客服）搜到的全是文章/社区/门户，必被过滤；此通道为弱种子辅助，扩量主力是招聘站品类词发现 + Meta 广告库",
+            # 2026-09-01 两轮实测定稿：泛行业词 10 条结果 9-10 条是内容页/平台域
+            # （0 企业）；品类词形也只 0-5 种子且混媒体站。搜索是弱种子辅助通道，
+            # 不要再往「行业大词」方向调——那是内容页泥石流（Bing CN 生态现实）。
+            "default": "假发 厂家 外贸,LED灯带 厂家 官网,宠物用品 工厂 出口,户外家具 厂家 官网",
         },
         {
             "key": "max_results",
@@ -601,7 +615,14 @@ class WebSearchCollector(Collector):
         ok_queries = 0
 
         async with (
-            httpx.AsyncClient(timeout=_TIMEOUT) as via_proxy,
+            # 采集代理策略（2026-09-01 用户裁决）：环境变量代理已在 config 启动时
+            # 剥离；境外端点（DDG）只在显式配置 CRAWLER_PROXY_URL 时走代理，否则
+            # 直连（海外部署可用）——必应中国无论何时都直连（clients[1] 优先）
+            httpx.AsyncClient(
+                timeout=_TIMEOUT,
+                trust_env=False,
+                proxy=settings.CRAWLER_PROXY_URL or None,
+            ) as via_proxy,
             httpx.AsyncClient(timeout=_TIMEOUT, trust_env=False) as direct,
         ):
             clients = (via_proxy, direct)

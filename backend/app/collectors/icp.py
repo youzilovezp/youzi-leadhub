@@ -83,6 +83,10 @@ NON_BUYER_DOMAINS: tuple[str, ...] = (
     "onexiaobai.com",
     "kugou.com",
     "zdic.net",
+    # 2026-09-01 会话实测漏网：艾瑞研究报告页整条入库（lead 290「外贸私域体系
+    # 怎么搭建…」是文章标题不是公司名）；单一窗口政务平台两轮搜索都霸榜
+    "iresearch.cn",  # 艾瑞咨询（研究报告站）
+    "singlewindow.cn",  # 中国国际贸易单一窗口（政务平台）
 )
 
 # 名称词表（域边界锚定不适用于中文，用子串；宁可窄不可误杀正常企业）
@@ -102,7 +106,10 @@ _NON_BUYER_NAME_RE = re.compile(
     # 超大平台企业（2026-09-01 用户质疑后裁决：自建通讯能力/企业级直采，BSP 销售不可达）
     r"|字节跳动|腾讯|阿里巴巴|京东|拼多多|百度|网易|美团|华为|小米|快手|哔哩|bilibili"
     # 2026-09-01 用户标准巡检：知识站/招聘平台/供应链/教育咨询（非四类目标的漏网形态）
-    r"|知识网|大全|招聘网|招聘平台|供应链|教育咨询",
+    r"|知识网|大全|招聘网|招聘平台|供应链|教育咨询"
+    # 2026-09-01 富化实测漏网：字典/国学内容站（hanyuguoxue）与汇率工具站
+    # （huilvbiao）——词典类已有「词典/辞典」，补「字典」与「汇率」token
+    r"|字典|国学|汇率",
     re.IGNORECASE,
 )
 
@@ -216,10 +223,12 @@ def compute_icp_status_of(lead: Any) -> str:
 #   主要入口。弱证据行不拒之门外（宁漏勿重反过来也伤召回），但必须可见、
 #   且质量抽检优先抽它们来量化误判率。
 
-# strong 口径 = 需求文档 §2.3 四项：country=CN / +86 / 中国招聘站来源（job_posting）
-# / 人工·种子录入。career_site 是官网招聘页巡检（对象含海外 ATS），不构成
-# CN 硬证据——只算弱 CJK 一侧，防止东南亚华人企业被升格 strong 回填 country=CN
-CN_STRONG_SOURCES = ("job_posting", "seed_import", "manual")
+# strong 口径 = 需求文档 §2.3：country=CN / +86 / 中国招聘站来源（job_posting）/
+# 中国 B2B 出口平台来源（b2b_supplier——挂单供应商是中国出口企业，平台本身
+# 是中国站，2026-09-01 裁决新增）/ 人工·种子录入。career_site 是官网招聘页
+# 巡检（对象含海外 ATS），不构成 CN 硬证据——只算弱 CJK 一侧，防止东南亚
+# 华人企业被升格 strong 回填 country=CN
+CN_STRONG_SOURCES = ("job_posting", "b2b_supplier", "seed_import", "manual")
 
 
 def cn_evidence_of(
