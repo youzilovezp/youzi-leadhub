@@ -61,29 +61,36 @@ ICP_STATUS_LABELS_ZH: dict[str, str] = {
 
 # 实测漏网域名（2026-08-31 dev 库查实：霸榜的就是这些"行业媒体/社区/平台门户"）
 NON_BUYER_DOMAINS: tuple[str, ...] = (
-    "ikjzd.com",         # 跨境知道（资讯站）
+    "ikjzd.com",  # 跨境知道（资讯站）
     "wearesellers.com",  # 知无不言（卖家社区）
-    "cifnews.com",       # 雨果跨境（行业媒体/平台）
-    "kuajingyan.com",    # 跨境眼
-    "kjtong.com",        # 跨境通（门户导航）
-    "mckinsey.com.cn",   # 咨询报告页
-    "gizmodo.com",       # 海外科技媒体（软件下载页宿主）
+    "cifnews.com",  # 雨果跨境（行业媒体/平台）
+    "kuajingyan.com",  # 跨境眼
+    "kjtong.com",  # 跨境通（门户导航）
+    "mckinsey.com.cn",  # 咨询报告页
+    "gizmodo.com",  # 海外科技媒体（软件下载页宿主）
     "whatsappbusiness.com",  # WhatsApp 官方产品页
-    "letschuhai.com",    # 36氪出海（2026-09-01 实测：独立域漏网，混入且拿 qualified）
-    "iciba.com",         # 爱词霸词典（同日实测：词条页整条入库）
+    "letschuhai.com",  # 36氪出海（2026-09-01 实测：独立域漏网，混入且拿 qualified）
+    "iciba.com",  # 爱词霸词典（同日实测：词条页整条入库）
     # 政府事业单位/教育机构（2026-09-01 用户裁决：目标只有企业本体）——TLD 后缀即可判定
-    "gov.cn", "edu.cn",
+    "gov.cn",
+    "edu.cn",
     # 出海媒体/素材站/博客（2026-09-01 实测批次：白鲸出海/出海网/海外网/昵图网/出海匠/个人博客）
-    "baijing.cn", "chwang.com", "haiwainet.cn", "nipic.com",
-    "chuhaijiang.com", "onexiaobai.com",
-    "kugou.com", "zdic.net",
+    "baijing.cn",
+    "chwang.com",
+    "haiwainet.cn",
+    "nipic.com",
+    "chuhaijiang.com",
+    "onexiaobai.com",
+    "kugou.com",
+    "zdic.net",
 )
 
 # 名称词表（域边界锚定不适用于中文，用子串；宁可窄不可误杀正常企业）
 # download 是唯一英文 token：软件下载页宿主（gizmodo 的 WhatsApp 下载页）
-# 实测漏网，且正常买家名不含该词
+# 实测漏网，且正常买家名不含该词；「报告」裸 token 覆盖「XX报告网/数据报告平台」
+# 形态（需求文档 §2.2 词表明列）
 _NON_BUYER_NAME_RE = re.compile(
-    r"资讯|社区|论坛|白皮书|市场研究|行业报告|研究报告|下载|download|百科|导航|工具箱|协会|学会|36氪"
+    r"资讯|社区|论坛|白皮书|市场研究|行业报告|研究报告|报告|下载|download|百科|导航|工具箱|协会|学会|36氪"
     # 政府事业单位（2026-09-01 裁决：目标只有企业本体）
     r"|人民政府|管理委员会|管委会|政务|公共服务平台|商务局|海关|税务局|监督管理局"
     r"|街道办事处|机关|事业单位|研究院"
@@ -118,7 +125,11 @@ def is_non_buyer(*, name: str | None = None, domain: str | None = None) -> bool:
 
 def has_cn_evidence(*, is_cn: bool, country: str | None, phone_e164: str | None) -> bool:
     """中国企业证据：来源标记 / 国家码 / +86 号码，任一命中。"""
-    return bool(is_cn) or (country or "").upper() == "CN" or bool(phone_e164 and phone_e164.startswith("+86"))
+    return (
+        bool(is_cn)
+        or (country or "").upper() == "CN"
+        or bool(phone_e164 and phone_e164.startswith("+86"))
+    )
 
 
 def has_overseas_evidence(
@@ -198,14 +209,17 @@ def compute_icp_status_of(lead: Any) -> str:
 # ---------- CN 证据分级（2026-08-31 审计：CJK 启发式的系统性误判通道） ----------
 #
 # is_cn 的写入方分两类：
-# - 强证据：country=CN / +86 号码 / 中国招聘站来源（job_posting、career_site）/
+# - 强证据：country=CN / +86 号码 / 中国招聘站来源（job_posting）/
 #   人工录入与种子导入（manual、seed_import——显式人为断言）
 # - 弱证据：纯 CJK 启发式（web_search 中文标题 / meta_ads 中文页名文案 /
 #   官网中文内容 ≥30%）——东南亚华人本地企业同样命中，是 qualified 误判的
 #   主要入口。弱证据行不拒之门外（宁漏勿重反过来也伤召回），但必须可见、
 #   且质量抽检优先抽它们来量化误判率。
 
-CN_STRONG_SOURCES = ("job_posting", "career_site", "seed_import", "manual")
+# strong 口径 = 需求文档 §2.3 四项：country=CN / +86 / 中国招聘站来源（job_posting）
+# / 人工·种子录入。career_site 是官网招聘页巡检（对象含海外 ATS），不构成
+# CN 硬证据——只算弱 CJK 一侧，防止东南亚华人企业被升格 strong 回填 country=CN
+CN_STRONG_SOURCES = ("job_posting", "seed_import", "manual")
 
 
 def cn_evidence_of(

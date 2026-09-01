@@ -8,6 +8,7 @@
 
 完整配置项说明请参阅 docs/配置说明.md。
 """
+
 import json
 from functools import lru_cache
 from typing import Annotated, Any, Literal
@@ -47,7 +48,7 @@ class Settings(BaseSettings):
     APP_NAME: str = "Leadhub"
     APP_DESCRIPTION: str = "Leadhub 管理系统后端 API"
     APP_ENV: Literal["dev", "test", "prod"] = "dev"
-    DEBUG: bool = False   # 生产必须 false；dev 在 .env 中显式打开
+    DEBUG: bool = False  # 生产必须 false；dev 在 .env 中显式打开
     API_V1_PREFIX: str = "/api/v1"
 
     # ---------- 安全 ----------
@@ -85,8 +86,8 @@ class Settings(BaseSettings):
     DB_ECHO: bool = False
     DB_POOL_SIZE: int = 10
     DB_MAX_OVERFLOW: int = 20
-    DB_POOL_PRE_PING: bool = True    # 防长连接被 PG/NAT 静默断开（SQLite 下无效但不报错）
-    DB_POOL_RECYCLE: int = 3600      # 1 小时回收
+    DB_POOL_PRE_PING: bool = True  # 防长连接被 PG/NAT 静默断开（SQLite 下无效但不报错）
+    DB_POOL_RECYCLE: int = 3600  # 1 小时回收
 
     @property
     def DATABASE_URL(self) -> str:
@@ -94,6 +95,7 @@ class Settings(BaseSettings):
         if self.DB_TYPE == "sqlite":
             import os
             from pathlib import Path
+
             # 保证父目录存在
             db_path = Path(self.SQLITE_PATH)
             if not db_path.is_absolute():
@@ -103,6 +105,7 @@ class Settings(BaseSettings):
             return f"sqlite+aiosqlite:///{db_path}"
         # postgresql：异步用 asyncpg
         from urllib.parse import quote
+
         return (
             f"postgresql+asyncpg://{self.POSTGRES_USER}:{quote(self.POSTGRES_PASSWORD, safe='')}"
             f"@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
@@ -114,11 +117,13 @@ class Settings(BaseSettings):
         if self.DB_TYPE == "sqlite":
             import os
             from pathlib import Path
+
             db_path = Path(self.SQLITE_PATH)
             if not db_path.is_absolute():
                 db_path = Path(os.getcwd()) / db_path
             return f"sqlite:///{db_path}"
         from urllib.parse import quote
+
         return (
             f"postgresql+psycopg2://{self.POSTGRES_USER}:{quote(self.POSTGRES_PASSWORD, safe='')}"
             f"@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
@@ -145,6 +150,11 @@ class Settings(BaseSettings):
     # AUTO_SEED_DATA: 种子数据。**生产必须 false**（避免 Demo@123 等公开凭据进入生产 DB）
     AUTO_INIT_DB: bool = True
     AUTO_SEED_DATA: bool = False
+    # AUTO_SEED_BUSINESS: 业务种子（dev 库终态池导出的中国企业出海线索 +
+    # 3 个 cron 采集任务，见 app/db/seed_data.py）——仅当 leads 表为空时
+    # 导入一次；想部署完全干净的库（自行采集）设 false。测试环境由 conftest
+    # 强制关闭
+    AUTO_SEED_BUSINESS: bool = True
 
     # ---------- 线索采集 ----------
     # Meta 广告资料库（Ad Library API）访问令牌，meta_ads 采集器必填。
@@ -156,11 +166,11 @@ class Settings(BaseSettings):
     # 可选：searxng（自托管开源元搜索，SEARXNG_URL 指向实例的 JSON API）、
     # google_cse / bing（付费加速通道，需凭据——纯免费部署保持不配即可）
     SEARCH_ENGINE: Literal["duckduckgo", "bing_cn", "searxng", "google_cse", "bing"] = "duckduckgo"
-    SEARXNG_URL: str = ""      # 如 http://localhost:8888（SearxNG 实例，format=json 已开）
-    GOOGLE_CSE_KEY: str = ""   # Google Custom Search JSON API key（免费 100 次/天，超出付费）
-    GOOGLE_CSE_CX: str = ""    # Google CSE 的搜索引擎 ID
+    SEARXNG_URL: str = ""  # 如 http://localhost:8888（SearxNG 实例，format=json 已开）
+    GOOGLE_CSE_KEY: str = ""  # Google Custom Search JSON API key（免费 100 次/天，超出付费）
+    GOOGLE_CSE_CX: str = ""  # Google CSE 的搜索引擎 ID
     BING_SEARCH_KEY: str = ""  # Bing Web Search（Azure）key
-    COLLECT_MAX_CONCURRENT: int = 2   # 同时运行的采集任务数（满则排队）
+    COLLECT_MAX_CONCURRENT: int = 2  # 同时运行的采集任务数（满则排队）
     COLLECT_TASK_TIMEOUT: int = 3600  # 单任务超时（秒）
     # 采集流水线自动接力（2026-08-31 交互改造）：发现类采集器（web_search/
     # job_posting/meta_ads）任务完成 → 自动排入一个隐式 website_enrich 全库扫描
@@ -168,7 +178,7 @@ class Settings(BaseSettings):
     AUTO_CHAIN_ENRICH: bool = True
     # 自动接力去重：已有全库富化（params 为空）排队中就不再堆——排队中的那次
     # 扫描必然覆盖新增线索；不设时间窗口（刚跑完的富化扫不到本次新增，会漏）
-    ENRICH_CONCURRENCY: int = 5     # 富化并发站点数
+    ENRICH_CONCURRENCY: int = 5  # 富化并发站点数
     SCHEDULER_ENABLED: bool = False  # 定时调度总开关（WORKERS=1 的进程才会启动）
     # LLM（OpenAI 兼容协议：智谱 GLM / DeepSeek / OpenAI 均可）。未配置时 AI 能力降级为规则模板
     LLM_BASE_URL: str = ""  # 如 https://open.bigmodel.cn/api/paas/v4
@@ -180,15 +190,30 @@ class Settings(BaseSettings):
     ENRICH_INTERVAL_HOURS: int = 720
     # 高渗透目标地区（ISO2），逗号分隔或 JSON 数组
     TARGET_REGIONS: Annotated[list[str], BeforeValidator(_parse_cors_origins)] = [
-        "MY", "SG", "ID", "TH", "PH", "VN", "AE", "SA", "QA", "KW",
-        "BR", "MX", "CO", "AR", "CL",
+        "MY",
+        "SG",
+        "ID",
+        "TH",
+        "PH",
+        "VN",
+        "AE",
+        "SA",
+        "QA",
+        "KW",
+        "BR",
+        "MX",
+        "CO",
+        "AR",
+        "CL",
     ]
 
     # ---------- 受信任主机（防 host header 注入）----------
     # 必须包含：localhost（dev）+ 你的真实域名（prod）+ testserver（TestClient/pytest）
     # 错误：只用 ["localhost","127.0.0.1"] → 任何带域名的 nginx 部署直接 400
     TRUSTED_HOSTS: Annotated[list[str], BeforeValidator(_parse_cors_origins)] = [
-        "localhost", "127.0.0.1", "testserver",
+        "localhost",
+        "127.0.0.1",
+        "testserver",
     ]
 
     model_config = SettingsConfigDict(

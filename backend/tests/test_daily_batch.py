@@ -18,16 +18,64 @@ _STRONG_DRAFT = {
     "wa_business": True,
     "target_countries": ["US", "GB", "AE"],
     "overseas_signals": {
-        "currencies": ["USD"], "languages": ["EN"], "ecommerce": ["shopify"],
-        "markets": ["USA"], "shipping": ["worldwide"],
+        "currencies": ["USD"],
+        "languages": ["EN"],
+        "ecommerce": ["shopify"],
+        "markets": ["USA"],
+        "shipping": ["worldwide"],
     },
-    "social": {"facebook": "https://facebook.com/dailybatch", "instagram": "https://instagram.com/dailybatch"},
+    "social": {
+        "facebook": "https://facebook.com/dailybatch",
+        "instagram": "https://instagram.com/dailybatch",
+    },
 }
 
 
 async def _login(client, credentials):
     r = await client.post("/api/v1/auth/login", json=credentials)
     return {"Authorization": f"Bearer {r.json()['data']['access_token']}"}
+
+
+async def test_daily_batch_alerts_require_three_questions_complete(
+    client, admin_credentials, db_session
+):
+    """FR-6：三问齐备才入批——预警切片也不例外。不齐备（无联系方式）的
+    线索即便有高价值预警事件也不进今日商机（销售拿到也无法行动）。"""
+    from app.models.lead import LeadEvent
+
+    h = await _login(client, admin_credentials)
+
+    # 不齐备行：qualified 但零联系方式、零 WA（三问 who 空 → complete=False）
+    lead, _ = await upsert_lead(
+        db_session,
+        LeadDraft(
+            source="meta_ads",
+            name="预警不齐备科技（上海）有限公司",
+            country="CN",
+            website="https://dailybatch-incomplete.com",
+            is_cn=True,
+            target_countries=["US", "GB", "AE"],  # 出海证据齐但 who 为空
+        ),
+    )
+    await db_session.commit()
+    assert lead.icp_status == "qualified"
+    assert not lead.whatsapp_url and not lead.email
+
+    db_session.add(
+        LeadEvent(
+            lead_id=lead.id,
+            event_type="high_value_signal",
+            is_alert=True,
+            note="在投广告放量",
+            payload={},
+        )
+    )
+    await db_session.commit()
+    event_lead_id = lead.id
+
+    r = await client.get("/api/v1/collect/leads/daily-batch", headers=h)
+    data = r.json()["data"]
+    assert all(a["lead_id"] != event_lead_id for a in data["alerts"])
 
 
 async def test_daily_batch_and_claim(client, admin_credentials, db_session):
@@ -37,7 +85,11 @@ async def test_daily_batch_and_claim(client, admin_credentials, db_session):
     r = await client.post(
         "/api/v1/collect/leads",
         headers=h,
-        json={"name": "今日批次晋级科技（杭州）有限公司", "country": "CN", "website": "https://dailybatch-promote.com"},
+        json={
+            "name": "今日批次晋级科技（杭州）有限公司",
+            "country": "CN",
+            "website": "https://dailybatch-promote.com",
+        },
     )
     promote_id = r.json()["data"]["id"]
     assert r.json()["data"]["grade"] == "C"
@@ -125,7 +177,9 @@ async def test_daily_batch_and_claim(client, admin_credentials, db_session):
         headers=h,
         json={"username": "dailybatch_sales", "password": "pass-123456", "nickname": "批次销售"},
     )
-    r2 = await client.post("/api/v1/auth/login", json={"username": "dailybatch_sales", "password": "pass-123456"})
+    r2 = await client.post(
+        "/api/v1/auth/login", json={"username": "dailybatch_sales", "password": "pass-123456"}
+    )
     h2 = {"Authorization": f"Bearer {r2.json()['data']['access_token']}"}
     r = await client.post(f"/api/v1/collect/leads/{fresh.id}/claim", headers=h2)
     assert r.status_code == 400 or r.json()["code"] == 40001
@@ -177,9 +231,7 @@ async def test_claim_concurrent_only_one_wins(client, admin_credentials, db_sess
     db_session.expire_all()
     winner = await db_session.get(Lead, race_id)
     assert winner.owner_id is not None
-    winners = [
-        r for r in (r_admin, r_sales) if r.status_code == 200
-    ]
+    winners = [r for r in (r_admin, r_sales) if r.status_code == 200]
     assert winner.owner_id == winners[0].json()["data"]["owner_id"]
 
     await client.delete(f"/api/v1/collect/leads/{race_id}", headers=h)

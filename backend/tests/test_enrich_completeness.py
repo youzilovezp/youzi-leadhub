@@ -16,8 +16,7 @@ from app.collectors.website_enrich import (
 
 _HOME = "<html><body><h1>Acme Corp</h1><p>Welcome to our site.</p></body></html>"
 _CONTACT = (
-    '<html><body><h1>Contact Us</h1>'
-    '<p>Email: sales@acme.com or visit our FAQ.</p></body></html>'
+    "<html><body><h1>Contact Us</h1>" "<p>Email: sales@acme.com or visit our FAQ.</p></body></html>"
 )
 
 
@@ -81,10 +80,10 @@ def test_detect_text_phones_international_format():
     assert detect_text_phones([html]) == ["+86 137 3602 8159"]
     # 座机/400 现在就是要抓（2026-09-01 用户需求：连最基础的电话都没有）
     # ——合法性校验交给 phonenumbers region=CN（enrich 调用侧），形态层宽抓
-    assert '0755-12345678' in detect_text_phones(['<p>0755-12345678</p>'])
-    assert '400-820-8820' in detect_text_phones(['<p>400-820-8820</p>'])
+    assert "0755-12345678" in detect_text_phones(["<p>0755-12345678</p>"])
+    assert "400-820-8820" in detect_text_phones(["<p>400-820-8820</p>"])
     # 纯数字串（订单号等）仍不产出：无前导 0/+/400 形态不匹配
-    assert detect_text_phones(['<p>订单号 12345678901</p>']) == []
+    assert detect_text_phones(["<p>订单号 12345678901</p>"]) == []
     assert detect_text_phones(["<p>价格 +86 元起</p>"]) == []
 
 
@@ -141,18 +140,25 @@ def test_site_matches_company_distractor_rule():
     # 实测错配形态
     ok, title = site_matches_company("<title>酷狗音乐 - 就是歌多！</title>", "酷集科技")
     assert ok is False and "酷狗" in title
-    ok2, _ = site_matches_company("<title>QQ邮箱电脑版_网页端免费邮件服务</title>", "艾普锐智能装备（嘉兴）有限公司")
+    ok2, _ = site_matches_company(
+        "<title>QQ邮箱电脑版_网页端免费邮件服务</title>", "艾普锐智能装备（嘉兴）有限公司"
+    )
     assert ok2 is False
     ok3, _ = site_matches_company("<title>汉典</title>", "宸星体育用品（上海）有限责任公司")
     assert ok3 is False
     # 名-站一致 / 字面零重叠但非平台（存疑放行） / 无标题（放行）
     assert site_matches_company("<title>凯迪仕智能锁-智能指纹锁</title>", "凯迪仕")[0] is True
-    assert site_matches_company("<title>MU Group: China's first supply chain</title>", "宁波凯越集团")[0] is True
+    assert (
+        site_matches_company("<title>MU Group: China's first supply chain</title>", "宁波凯越集团")[
+            0
+        ]
+        is True
+    )
     assert site_matches_company("<html>no title</html>", "任意公司")[0] is True
 
 
 async def test_clear_mismatched_website_purges_wrong_site_data(db_session):
-    """错配清除要连坐：错站抓的邮箱/电话/WA/信号/自动联系人全清（全是别人的数据）。"""
+    """错配清除要连坐：错站抓的邮箱/电话/WA/信号/证据链/自动联系人全清（全是别人的数据）。"""
     from sqlalchemy import select
 
     from app.collectors.base import LeadDraft
@@ -160,19 +166,34 @@ async def test_clear_mismatched_website_purges_wrong_site_data(db_session):
     from app.crud.contact import auto_create_from_email
     from app.crud.lead import upsert_lead
     from app.db.init_db import init_db
-    from app.models.lead import Lead, LeadContact
+    from app.models.lead import Lead, LeadContact, LeadSignal
 
     await init_db()  # 单文件跑时 db_session 不经 client fixture，需自建表
 
     lead, _ = await upsert_lead(
         db_session,
-        LeadDraft(source="web_search", name="错配清除测试科技（杭州）有限公司",
-                  website="https://kugou.com", is_cn=True, email="wrong@kugou.com"),
+        LeadDraft(
+            source="web_search",
+            name="错配清除测试科技（杭州）有限公司",
+            website="https://kugou.com",
+            is_cn=True,
+            email="wrong@kugou.com",
+        ),
     )
     await db_session.flush()
     await auto_create_from_email(db_session, lead, "wrong@kugou.com", source="website_enrich")
+    db_session.add(
+        LeadSignal(
+            lead_id=lead.id,
+            signal_type="whatsapp_link",
+            value="https://wa.me/8613800000000",
+            source="website_enrich",
+            evidence_url="https://kugou.com",
+        )
+    )
     await db_session.commit()
     assert lead.email and lead.website
+    assert lead.dedupe_key == "domain:kugou.com"
 
     lead_id = lead.id  # expire 前缓存：expire 后访问 lead.id 触发懒加载
     await _clear_mismatched_website(lead_id, "https://kugou.com", "酷狗音乐", session=db_session)
@@ -183,10 +204,22 @@ async def test_clear_mismatched_website_purges_wrong_site_data(db_session):
     assert got.website is None and got.domain is None
     assert got.email is None and got.phone_e164 is None
     assert not got.whatsapp_hit and got.saas_signals == {} and got.overseas_signals == {}
-    left = (await db_session.execute(
-        select(LeadContact).where(LeadContact.lead_id == got.id)
-    )).scalars().all()
+    left = (
+        (await db_session.execute(select(LeadContact).where(LeadContact.lead_id == got.id)))
+        .scalars()
+        .all()
+    )
     assert left == []  # draft 落库建的联系人（source=web_search）也必须连坐删除
+    # 信号证据链同样连坐清空（详情页证据卡不能残留错站来源）
+    sigs = (
+        (await db_session.execute(select(LeadSignal).where(LeadSignal.lead_id == got.id)))
+        .scalars()
+        .all()
+    )
+    assert sigs == []
+    # 身份键回退无官网状态：不再是 domain:（否则官网发现找到真身时会反向并入错配行）
+    assert got.dedupe_key != "domain:kugou.com"
+    assert got.dedupe_key.startswith("namecity:")
     assert got.field_meta["website"]["source"] == "mismatch_clear"
     await _delete_tree(db_session, got.id)
 
@@ -195,6 +228,7 @@ async def _delete_tree(db_session, lead_id):
     from sqlalchemy import delete
 
     from app.models.lead import Lead, LeadContact, LeadEvent, LeadFollowUp, LeadSignal
+
     for m in (LeadContact, LeadSignal, LeadEvent, LeadFollowUp):
         await db_session.execute(delete(m).where(m.lead_id == lead_id))
     await db_session.execute(delete(Lead).where(Lead.id == lead_id))
@@ -236,6 +270,12 @@ def test_site_matches_company_short_brand_identity():
     assert site_matches_company("<title>呜噜网</title>", "上海冠天国际贸易有限公司")[0] is False
     assert site_matches_company("<title>汉典</title>", "宸星体育用品公司")[0] is False
     # 不触发：英文品牌站（零重叠但合法）、长口号标题、名-站一致
-    assert site_matches_company("<title>MU Group: China's first supply</title>", "宁波凯越集团")[0] is True
-    assert site_matches_company("<title>高端全屋五金系统解决方案专家_国际一线</title>", "东泰五金")[0] is True
+    assert (
+        site_matches_company("<title>MU Group: China's first supply</title>", "宁波凯越集团")[0]
+        is True
+    )
+    assert (
+        site_matches_company("<title>高端全屋五金系统解决方案专家_国际一线</title>", "东泰五金")[0]
+        is True
+    )
     assert site_matches_company("<title>凯迪仕智能锁</title>", "凯迪仕")[0] is True

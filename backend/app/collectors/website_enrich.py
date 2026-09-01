@@ -102,10 +102,41 @@ _TEXT_PHONE_RE = re.compile(r"\+\d{1,3}[\s\-]?(?:\d[\s\-]?){7,12}\d")
 # （酷狗音乐/QQ邮箱/汉典词典等），标题带明显品牌词而与公司名零重叠。这类
 # 「张冠李戴」不清除的话，从错站抓的邮箱/电话/信号全是别人的数据
 _SITE_BRAND_DISTRACTORS: tuple[str, ...] = (
-    "酷狗", "酷我", "qq音乐", "QQ音乐", "汉典", "百度", "京东", "淘宝", "天猫",
-    "拼多多", "知乎", "哔哩", "bilibili", "抖音", "快手", "网易", "新浪", "搜狐",
-    "腾讯", "qq邮箱", "qq 邮箱", "微信", "支付宝", "携程", "美团", "饿了么", "高德",
-    "滴滴", "哈啰", "下载", "下载站", "win10", "windows", "android", "apk",
+    "酷狗",
+    "酷我",
+    "qq音乐",
+    "QQ音乐",
+    "汉典",
+    "百度",
+    "京东",
+    "淘宝",
+    "天猫",
+    "拼多多",
+    "知乎",
+    "哔哩",
+    "bilibili",
+    "抖音",
+    "快手",
+    "网易",
+    "新浪",
+    "搜狐",
+    "腾讯",
+    "qq邮箱",
+    "qq 邮箱",
+    "微信",
+    "支付宝",
+    "携程",
+    "美团",
+    "饿了么",
+    "高德",
+    "滴滴",
+    "哈啰",
+    "下载",
+    "下载站",
+    "win10",
+    "windows",
+    "android",
+    "apk",
 )
 _CN_MOBILE_RE = re.compile(r"(?<!\d)1[3-9]\d[-\s]?\d{4}[-\s]?\d{4}(?!\d)")
 # 具名联系人（2026-09-01 kaadas 实测金矿）：页面「XX部门（业务） 联系人：屈先生
@@ -128,7 +159,12 @@ def detect_contact_persons(html_list: list[str]) -> list[dict[str, str]]:
     text = page_text(html_list, keep_case=True)
     out: list[dict[str, str]] = []
     for m in _CONTACT_PERSON_RE.finditer(text):
-        dept, name, role, phone = (m.group(1) or "").strip(), m.group(2).strip(), (m.group(3) or "").strip(), m.group(4)
+        dept, name, role, phone = (
+            (m.group(1) or "").strip(),
+            m.group(2).strip(),
+            (m.group(3) or "").strip(),
+            m.group(4),
+        )
         phone_digits = re.sub(r"[\s\-+]", "", phone)
         if len(phone_digits) > 11 and phone_digits.startswith("86"):
             phone_digits = phone_digits[2:]
@@ -155,10 +191,10 @@ def site_matches_company(homepage_html: str, company_name: str) -> tuple[bool, s
     title = re.sub(r"<[^>]+>|\s+", " ", m.group(1)).strip() if m else ""
     if not title:
         return True, title  # 拿不到标题不判错
-    core = re.sub(r"(股份有限公司|有限责任公司|有限公司|集团公司|集团)", "", company_name or "").strip()
-    name_hit = bool(core) and any(
-        core[i : i + 2] in title for i in range(max(1, len(core) - 1))
-    )
+    core = re.sub(
+        r"(股份有限公司|有限责任公司|有限公司|集团公司|集团)", "", company_name or ""
+    ).strip()
+    name_hit = bool(core) and any(core[i : i + 2] in title for i in range(max(1, len(core) - 1)))
     distractor = next((d for d in _SITE_BRAND_DISTRACTORS if d.lower() in title.lower()), "")
     if distractor and not name_hit:
         return False, title
@@ -231,7 +267,10 @@ def detect_jsonld_contacts(html_list: list[str]) -> dict[str, str]:
                 continue
             addr = it.get("address")
             if isinstance(addr, dict):
-                parts = [addr.get(k) for k in ("streetAddress", "addressLocality", "addressRegion", "addressCountry")]
+                parts = [
+                    addr.get(k)
+                    for k in ("streetAddress", "addressLocality", "addressRegion", "addressCountry")
+                ]
                 addr_text = " ".join(str(x) for x in parts if x)
             elif isinstance(addr, str):
                 addr_text = addr
@@ -269,9 +308,7 @@ def backfill_profile_fields(
     from app.crud.lead import touch_field_meta
 
     touched = False
-    if not lead.country and lead.is_cn and (
-        icp_license or cn_evidence_of_lead(lead) == "strong"
-    ):
+    if not lead.country and lead.is_cn and (icp_license or cn_evidence_of_lead(lead) == "strong"):
         lead.country = "CN"
         touch_field_meta(lead, "country", "website_enrich", confidence=85, now=now)
         touched = True
@@ -327,6 +364,7 @@ def detect_whatsapp_groups(html_list: list[str] | list[str | None] | None) -> li
             groups.append(url)
     return groups
 
+
 _EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
 _SOCIAL_RES = [
     ("facebook", re.compile(r"https?://(?:www\.)?facebook\.com/[^\s\"'<>]+", re.I)),
@@ -334,13 +372,18 @@ _SOCIAL_RES = [
     ("linkedin", re.compile(r"https?://(?:www\.)?linkedin\.com/(?:company|in)/[^\s\"'<>]+", re.I)),
     ("telegram", re.compile(r"https?://(?:t\.me|telegram\.me)/[^\s\"'<>]+", re.I)),
     ("tiktok", re.compile(r"https?://(?:www\.)?tiktok\.com/@[^\s\"'<>]+", re.I)),
-    ("youtube", re.compile(r"https?://(?:www\.)?youtube\.com/(?:c|channel|user|@)[^\s\"'<>]+", re.I)),
+    (
+        "youtube",
+        re.compile(r"https?://(?:www\.)?youtube\.com/(?:c|channel|user|@)[^\s\"'<>]+", re.I),
+    ),
 ]
 # Contact/About/Products 三类内页（官网四层抓取：首页 + 联系/关于/产品页）。
 # Products 层是 B2B/B2C/品类与交易场景关键词的主要来源（跨境电商站尤其）。
 # 关键词匹配 href **或锚文本**（2026-08-31 审计：中文官网的招聘/联系栏目
 # 常是中文锚文本 + 拼音/数字路径，只匹配英文 href 词会漏掉大半内页）
-_INNER_ANCHOR_RE = re.compile(r'<a\b[^>]*href=["\']([^"\']{1,300})["\'][^>]*>(.*?)</a>', re.S | re.I)
+_INNER_ANCHOR_RE = re.compile(
+    r'<a\b[^>]*href=["\']([^"\']{1,300})["\'][^>]*>(.*?)</a>', re.S | re.I
+)
 # 联系类内页关键词（优先级 1——联系方式是富化的第一产出）
 _INNER_CONTACT_WORDS_RE = re.compile(r"contact|kontak|hubungi|联系|about|关于|faq|help", re.I)
 _INNER_PAGE_WORDS_RE = re.compile(
@@ -387,7 +430,10 @@ def _classify_httpx_error(exc: Exception) -> str:
         if isinstance(cause, ssl.SSLError) or "certificate" in str(exc).lower():
             return "TLS/证书错误"
         msg = str(exc).lower()
-        if any(k in msg for k in ("getaddrinfo", "nodename nor servname", "name or service", "no address")):
+        if any(
+            k in msg
+            for k in ("getaddrinfo", "nodename nor servname", "name or service", "no address")
+        ):
             return "DNS 解析失败（域名可能失效）"
         return "连接被拒绝/重置"
     if isinstance(exc, httpx.ConnectTimeout):
@@ -406,7 +452,6 @@ async def _fetch_detailed(client: httpx.AsyncClient, url: str) -> tuple[str | No
     if resp.status_code != 200:
         return None, f"HTTP {resp.status_code}"
     return resp.text, None
-
 
 
 # 采集 client 双通道（与 meta_ads / web_search 同策略）：
@@ -437,8 +482,10 @@ async def _fetch_site_detailed(
     if html is not None:
         return html, []
     reasons = [reason] if reason else []
-    alt = url.replace("https://", "http://", 1) if url.startswith("https://") else url.replace(
-        "http://", "https://", 1
+    alt = (
+        url.replace("https://", "http://", 1)
+        if url.startswith("https://")
+        else url.replace("http://", "https://", 1)
     )
     if alt != url:
         html, reason = await _fetch_detailed(primary, alt)
@@ -499,7 +546,20 @@ def detect_whatsapp_numbers(html_list: list[str]) -> list[str]:
     return numbers
 
 
-_ASSET_EXT = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".css", ".js", ".pdf", ".woff", ".woff2", ".ico")
+_ASSET_EXT = (
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".svg",
+    ".webp",
+    ".css",
+    ".js",
+    ".pdf",
+    ".woff",
+    ".woff2",
+    ".ico",
+)
 # 平台埋点/监控邮箱误报黑名单（实测 Wix 站点正文里带 Sentry 埋点邮箱）
 _EMAIL_DOMAIN_BLOCKLIST = ("wixpress.com", "sentry.io", "sentry-next.com", "googlegroups.com")
 
@@ -514,11 +574,15 @@ def _is_email(addr: str) -> bool:
     return not any(domain == d or domain.endswith("." + d) for d in _EMAIL_DOMAIN_BLOCKLIST)
 
 
-def detect_email(html: str | list[str] | list[str | None] | None) -> str | None:
+def detect_email(
+    html: str | list[str] | list[str | None] | None, *, mailto_only: bool = False
+) -> str | None:
     """公开邮箱检测。输入首页或页面列表（首页+联系/关于页）。
 
     mailto 优先（跨全部页面先扫一遍），其次正文正则——企业邮箱主要挂在
     联系页而非首页，2026-08-31 审计前只扫首页漏掉大半。
+    mailto_only=True 只扫显式 mailto 链接（调用方在 mailto 与正则之间
+    插入 JSON-LD 声明：结构化声明优先于正则启发，FR-1.5）。
     """
     if not html:
         return None
@@ -528,6 +592,8 @@ def detect_email(html: str | list[str] | list[str | None] | None) -> str | None:
             addr = m.group(1).strip()
             if _is_email(addr):
                 return addr
+    if mailto_only:
+        return None
     for page in pages:
         for m in _EMAIL_RE.finditer(page or ""):
             if _is_email(m.group(0)):
@@ -599,7 +665,8 @@ class WebsiteEnrichCollector(Collector):
                 if not render_note_logged:
                     render_note_logged = True
                     await ctx.log(
-                        "info", "浏览器渲染兜底不可用（装 playwright 可抓反爬大站）：pip install '.[collect]'"
+                        "info",
+                        "浏览器渲染兜底不可用（装 playwright 可抓反爬大站）：pip install '.[collect]'",
                     )
                 return None
             pw = await async_playwright().start()
@@ -616,7 +683,9 @@ class WebsiteEnrichCollector(Collector):
                 # 全库富化允许调大发现上限（手动按钮传大值一次清完存量；
                 # 自动接力保持默认 30——搜索配额友好）
                 try:
-                    discover_limit = max(1, min(int(ctx.params.get("discover_limit") or _DISCOVER_LIMIT), 500))
+                    discover_limit = max(
+                        1, min(int(ctx.params.get("discover_limit") or _DISCOVER_LIMIT), 500)
+                    )
                 except (TypeError, ValueError):
                     discover_limit = _DISCOVER_LIMIT
                 async with _session_factory()() as session:
@@ -627,7 +696,9 @@ class WebsiteEnrichCollector(Collector):
 
                     backlog = (
                         await session.execute(
-                            select(func.count()).select_from(LeadModel).where(
+                            select(func.count())
+                            .select_from(LeadModel)
+                            .where(
                                 (LeadModel.website.is_(None)) | (LeadModel.website == ""),
                                 LeadModel.icp_status.notin_(("foreign", "non_buyer")),
                             )
@@ -656,8 +727,11 @@ class WebsiteEnrichCollector(Collector):
                                 taken = await _domain_taken(session, dom, lid) if dom else None
                                 if taken is not None:
                                     touch_field_meta(
-                                        lead, "website", "web_discovery_dup",
-                                        confidence=0, now=datetime.now(timezone.utc),
+                                        lead,
+                                        "website",
+                                        "web_discovery_dup",
+                                        confidence=0,
+                                        now=datetime.now(timezone.utc),
                                     )
                                     await session.commit()
                                     await ctx.log(
@@ -669,8 +743,11 @@ class WebsiteEnrichCollector(Collector):
                                     lead.website = ws
                                     lead.domain = dom or lead.domain
                                     touch_field_meta(
-                                        lead, "website", "web_discovery",
-                                        confidence=60, now=datetime.now(timezone.utc),
+                                        lead,
+                                        "website",
+                                        "web_discovery",
+                                        confidence=60,
+                                        now=datetime.now(timezone.utc),
                                     )
                                     # uq_leads_domain 唯一索引兜底（并发窗口下
                                     # check-then-act 仍可能撞）：撞域回滚 + 负缓存
@@ -684,8 +761,11 @@ class WebsiteEnrichCollector(Collector):
                                             fresh = await s2.get(Lead, lid)
                                             if fresh and not fresh.website:
                                                 touch_field_meta(
-                                                    fresh, "website", "web_discovery_dup",
-                                                    confidence=0, now=datetime.now(timezone.utc),
+                                                    fresh,
+                                                    "website",
+                                                    "web_discovery_dup",
+                                                    confidence=0,
+                                                    now=datetime.now(timezone.utc),
                                                 )
                                                 await s2.commit()
                                         await ctx.log(
@@ -694,7 +774,9 @@ class WebsiteEnrichCollector(Collector):
                                         )
                                         continue
                                     discovered.append((lid, ws))
-                                    await ctx.log("info", f"[lead {lid}] 🔍 官网发现：{name} → {ws}")
+                                    await ctx.log(
+                                        "info", f"[lead {lid}] 🔍 官网发现：{name} → {ws}"
+                                    )
                     else:
                         # 失败负缓存：7 天内不再重搜（否则失败者永远占着
                         # 分数倒序的前 N 窗口，后面的线索饿死——2026-08-31 巡检 A 级 bug）
@@ -705,8 +787,11 @@ class WebsiteEnrichCollector(Collector):
                             lead = await session.get(Lead, lid)
                             if lead and not lead.website:
                                 touch_field_meta(
-                                    lead, "website", "web_discovery_miss",
-                                    confidence=0, now=datetime.now(timezone.utc),
+                                    lead,
+                                    "website",
+                                    "web_discovery_miss",
+                                    confidence=0,
+                                    now=datetime.now(timezone.utc),
                                 )
                                 await session.commit()
                     await asyncio.sleep(_DISCOVER_GAP)  # 搜索礼貌间隔
@@ -724,7 +809,9 @@ class WebsiteEnrichCollector(Collector):
             leads = [*discovered, *leads]
 
             if not leads:
-                await ctx.log("info", "没有待富化的线索（有网站 或 已尝试发现，且窗口内未成功富化）")
+                await ctx.log(
+                    "info", "没有待富化的线索（有网站 或 已尝试发现，且窗口内未成功富化）"
+                )
                 return
 
             ctx.set_total(len(leads))
@@ -737,7 +824,9 @@ class WebsiteEnrichCollector(Collector):
                 async with sem:
                     ctx.check_cancelled()
                     try:
-                        ok, fail_reason = await _enrich_one((client, loose), ctx, lead_id, website, get_browser)
+                        ok, fail_reason = await _enrich_one(
+                            (client, loose), ctx, lead_id, website, get_browser
+                        )
                         if ok:
                             ok_sites.append(website)
                         else:
@@ -1004,10 +1093,11 @@ async def _clear_mismatched_website(
     全是别人的数据——全清 + 重评分（大概率成空壳，交给 prune 规则），
     field_meta.website 记错配原因。session 缺省自建短事务；测试可注入共库会话。
     """
+    from sqlalchemy import delete as _delete
     from sqlalchemy import select as _select
 
     from app.crud.lead_events import rescore_and_log
-    from app.models.lead import Lead, LeadContact
+    from app.models.lead import Lead, LeadContact, LeadSignal
 
     owns = session is None
     if owns:
@@ -1030,6 +1120,26 @@ async def _clear_mismatched_website(
         lead.saas_signals = {}
         lead.overseas_signals = {}
         lead.social = {}
+        # 信号证据链（lead_signals）同样产自错站——一并清，否则详情页证据卡
+        # 仍展示错站的 WA/出海证据（FR-5.1「全部信号全清」）
+        await session.execute(_delete(LeadSignal).where(LeadSignal.lead_id == lead_id))
+        # 身份键回退「无官网」状态：domain: 键失效（否则官网发现再找到真身时
+        # 会反向并入这条错配行），tel 已清 → namecity 兜底
+        from app.collectors.normalize import make_dedupe_key as _mk_key
+        from app.crud.lead import _namecity_key
+
+        lead.namecity_key = _namecity_key(lead.name, lead.city)
+        new_key = (
+            _mk_key(name=lead.name, city=lead.city) or f"raw:{lead.name.strip().lower()}|manual"
+        )
+        if new_key != lead.dedupe_key:
+            conflict = (
+                await session.execute(
+                    _select(Lead.id).where(Lead.dedupe_key == new_key, Lead.id != lead_id)
+                )
+            ).scalar_one_or_none()
+            if conflict is None:
+                lead.dedupe_key = new_key
         meta = dict(lead.field_meta or {})
         meta["website"] = {
             "source": "mismatch_clear",
@@ -1042,13 +1152,17 @@ async def _clear_mismatched_website(
         # 建的联系人带的是采集器 source 如 web_search，2026-09-01 调试实锤）；
         # manual 是人工录入，保留
         rows = (
-            await session.execute(
-                _select(LeadContact).where(
-                    LeadContact.lead_id == lead_id,
-                    LeadContact.source != "manual",
+            (
+                await session.execute(
+                    _select(LeadContact).where(
+                        LeadContact.lead_id == lead_id,
+                        LeadContact.source != "manual",
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         for c in rows:
             await session.delete(c)
         await rescore_and_log(session, lead)
@@ -1123,20 +1237,29 @@ async def _enrich_one(
     inner_urls = find_inner_page_urls(homepage, base, base_domain)
     # 常规联系路径探测（2026-09-01 用户需求：每家联系页路径不一样）——首页
     # 链接里没有联系页时（导航 JS 渲染/路径冷门），直接探惯例路径，抓到即补
-    has_contact_page = any(
-        _INNER_CONTACT_WORDS_RE.search(u) for u in inner_urls
-    )
+    has_contact_page = any(_INNER_CONTACT_WORDS_RE.search(u) for u in inner_urls)
     if not has_contact_page:
         for path in (
-            "/contact", "/contact/", "/contact-us", "/contact-us/",
-            "/contact.html", "/Contact/contact.html", "/lianxi", "/lianxiwomen",
-            "/about", "/about-us", "/support", "/get-in-touch",
+            "/contact",
+            "/contact/",
+            "/contact-us",
+            "/contact-us/",
+            "/contact.html",
+            "/Contact/contact.html",
+            "/lianxi",
+            "/lianxiwomen",
+            "/about",
+            "/about-us",
+            "/support",
+            "/get-in-touch",
         ):
             probe = _resolve_url(base, path)
             if probe and probe not in inner_urls:
                 html_probe = await _fetch_site(clients, probe)
                 if html_probe and ("联系" in html_probe or "contact" in html_probe.lower()):
                     inner_urls.insert(0, probe)  # 联系页优先补入
+                    # 补入后截断：联系页把优先级最低的产品页挤出去，内页仍 ≤3
+                    del inner_urls[_MAX_INNER_PAGES:]
                     await ctx.log("info", f"[lead {lead_id}] 🔍 常规路径探测命中联系页：{path}")
                     break
     pages = [homepage]
@@ -1151,10 +1274,10 @@ async def _enrich_one(
 
     whatsapp_hit, whatsapp_url = detect_whatsapp(pages)
     wa_numbers = detect_whatsapp_numbers(pages)
-    email = detect_email(pages)
-    # schema.org JSON-LD 声明的联系方式——网站主的机器可读数据，权威度高于正则
+    # schema.org JSON-LD 声明的联系方式——网站主的机器可读数据，权威度高于正则启发；
+    # 邮箱取值次序（FR-1.5）：mailto 显式链接 > JSON-LD 声明 > 正文正则
     jsonld = detect_jsonld_contacts(pages)
-    email = email or jsonld.get("email")
+    email = detect_email(pages, mailto_only=True) or jsonld.get("email") or detect_email(pages)
     social = detect_social(pages)
     scenes = detect_scenes(pages)
     saas_signals = detect_saas_signals(pages)
@@ -1208,9 +1331,7 @@ async def _enrich_one(
                 if n not in merged_numbers:
                     merged_numbers.append(n)
             lead.whatsapp_numbers = merged_numbers
-            touch_field_meta(
-                lead, "whatsapp_numbers", "website_enrich", confidence=95, now=now
-            )
+            touch_field_meta(lead, "whatsapp_numbers", "website_enrich", confidence=95, now=now)
         if email and not lead.email:
             lead.email = email
             touch_field_meta(lead, "email", "website_enrich", confidence=90, now=now)
@@ -1267,22 +1388,37 @@ async def _enrich_one(
         # 群邀请链接 = 社群私域运营证据（§4.1/§4.4-E）
         for g in wa_groups:
             await upsert_signal(
-                session, lead.id, "whatsapp_group", g,
-                source="website_enrich", evidence_url=base,
-                evidence_raw=g, confidence=90,
+                session,
+                lead.id,
+                "whatsapp_group",
+                g,
+                source="website_enrich",
+                evidence_url=base,
+                evidence_raw=g,
+                confidence=90,
             )
         if wa_business:
             await upsert_signal(
-                session, lead.id, "wa_business", "WhatsApp Business",
-                source="website_enrich", evidence_url=base,
-                evidence_raw="页面自述使用 WhatsApp Business", confidence=75,
+                session,
+                lead.id,
+                "wa_business",
+                "WhatsApp Business",
+                source="website_enrich",
+                evidence_url=base,
+                evidence_raw="页面自述使用 WhatsApp Business",
+                confidence=75,
             )
         if icp_license:
             # CN 证据入证据链：销售可见"为什么判定是中国企业"
             await upsert_signal(
-                session, lead.id, "cn_icp", icp_license,
-                source="website_enrich", evidence_url=base,
-                evidence_raw=f"页脚备案号：{icp_license}", confidence=98,
+                session,
+                lead.id,
+                "cn_icp",
+                icp_license,
+                source="website_enrich",
+                evidence_url=base,
+                evidence_raw=f"页脚备案号：{icp_license}",
+                confidence=98,
             )
 
         for i, page_html in enumerate(pages):
@@ -1292,23 +1428,38 @@ async def _enrich_one(
                     raw = (m.group(1) or "").lstrip("+")
                     if raw:
                         await upsert_signal(
-                            session, lead.id, "whatsapp_number", raw,
-                            source="website_enrich", evidence_url=page_url,
-                            evidence_raw=m.group(0), confidence=95,
+                            session,
+                            lead.id,
+                            "whatsapp_number",
+                            raw,
+                            source="website_enrich",
+                            evidence_url=page_url,
+                            evidence_raw=m.group(0),
+                            confidence=95,
                         )
             for pat in _PLUGIN_PATTERNS:
                 m = pat.search(page_html or "")
                 if m:
                     await upsert_signal(
-                        session, lead.id, "whatsapp_plugin", "detected",
-                        source="website_enrich", evidence_url=page_url,
-                        evidence_raw=m.group(0)[:200], confidence=75,
+                        session,
+                        lead.id,
+                        "whatsapp_plugin",
+                        "detected",
+                        source="website_enrich",
+                        evidence_url=page_url,
+                        evidence_raw=m.group(0)[:200],
+                        confidence=75,
                     )
         if whatsapp_url:
             await upsert_signal(
-                session, lead.id, "whatsapp_link", whatsapp_url,
-                source="website_enrich", evidence_url=base,
-                evidence_raw=whatsapp_url, confidence=98,
+                session,
+                lead.id,
+                "whatsapp_link",
+                whatsapp_url,
+                source="website_enrich",
+                evidence_url=base,
+                evidence_raw=whatsapp_url,
+                confidence=98,
             )
         _OV_TYPE_MAP = {
             "currencies": ("overseas_currency", 85),
@@ -1322,9 +1473,14 @@ async def _enrich_one(
             sig_type, conf = _OV_TYPE_MAP.get(ov_key, (ov_key, 75))
             for v in vals or []:
                 await upsert_signal(
-                    session, lead.id, sig_type, str(v),
-                    source="website_enrich", evidence_url=base,
-                    evidence_raw=str(v)[:200], confidence=conf,
+                    session,
+                    lead.id,
+                    sig_type,
+                    str(v),
+                    source="website_enrich",
+                    evidence_url=base,
+                    evidence_raw=str(v)[:200],
+                    confidence=conf,
                 )
         if email:
             # 抓到公开邮箱 → 自动生成「待补全」联系人（同邮箱已存在则跳过）
@@ -1380,9 +1536,14 @@ async def _enrich_one(
             from app.models.lead import LeadContact
 
             existing_phones = {
-                c.phone for c in (await session.execute(
-                    _sa_select(LeadContact).where(LeadContact.lead_id == lead.id)
-                )).scalars().all()
+                c.phone
+                for c in (
+                    await session.execute(
+                        _sa_select(LeadContact).where(LeadContact.lead_id == lead.id)
+                    )
+                )
+                .scalars()
+                .all()
             }
             added = 0
             for psn in persons:
@@ -1390,15 +1551,23 @@ async def _enrich_one(
                     continue
                 title = psn.get("title", "")
                 seniority = (
-                    "tier1" if re.search(r"负责人|总监|总经理|创始人|CEO", title)
-                    else "tier2" if re.search(r"经理|主管|部长", title)
+                    "tier1"
+                    if re.search(r"负责人|总监|总经理|创始人|CEO", title)
+                    else "tier2"
+                    if re.search(r"经理|主管|部长", title)
                     else "unknown"
                 )
-                session.add(LeadContact(
-                    lead_id=lead.id, name=psn["name"], job_title=title or None,
-                    phone=psn["phone"], seniority=seniority,
-                    source="website_enrich", confidence=88,
-                ))
+                session.add(
+                    LeadContact(
+                        lead_id=lead.id,
+                        name=psn["name"],
+                        job_title=title or None,
+                        phone=psn["phone"],
+                        seniority=seniority,
+                        source="website_enrich",
+                        confidence=88,
+                    )
+                )
                 existing_phones.add(psn["phone"])
                 added += 1
             if added:

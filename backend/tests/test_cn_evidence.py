@@ -9,10 +9,7 @@ def test_cn_evidence_strong_paths():
     assert cn_evidence_of(is_cn=False, country="CN") == "strong"
     assert cn_evidence_of(is_cn=True, country="MY", phone_e164="+8613800138000") == "strong"
     # 中国招聘站来源 = 中国公司的一手证据
-    assert (
-        cn_evidence_of(is_cn=True, country=None, sources=[{"source": "job_posting"}])
-        == "strong"
-    )
+    assert cn_evidence_of(is_cn=True, country=None, sources=[{"source": "job_posting"}]) == "strong"
     # 人工录入/种子导入 = 显式人为断言
     assert cn_evidence_of(is_cn=True, sources=[{"source": "seed_import"}]) == "strong"
 
@@ -24,9 +21,7 @@ def test_cn_evidence_weak_when_only_cjk_heuristic():
     """
     from app.collectors.icp import cn_evidence_of
 
-    assert (
-        cn_evidence_of(is_cn=True, country="MY", sources=[{"source": "meta_ads"}]) == "weak"
-    )
+    assert cn_evidence_of(is_cn=True, country="MY", sources=[{"source": "meta_ads"}]) == "weak"
     assert cn_evidence_of(is_cn=True, sources=[{"source": "web_search"}]) == "weak"
     assert cn_evidence_of(is_cn=True, sources=None) == "weak"
 
@@ -36,6 +31,15 @@ def test_cn_evidence_empty_when_not_cn():
 
     assert cn_evidence_of(is_cn=False, country="MY") == ""
     assert cn_evidence_of(is_cn=False, country=None, phone_e164="+60111222333") == ""
+
+
+def test_career_site_is_not_cn_strong_evidence():
+    """官网招聘页巡检 ≠ 中国招聘站来源（§2.3 strong 四项口径）——
+    对象含 Moka/北森/Workday 等任意 ATS，不构成 CN 硬证据，防止
+    弱 CJK 东南亚企业被升格 strong 后回填 country=CN。"""
+    from app.collectors.icp import cn_evidence_of
+
+    assert cn_evidence_of(is_cn=True, country="MY", sources=[{"source": "career_site"}]) == "weak"
 
 
 def test_mixed_sources_upgrade_weak_to_strong():

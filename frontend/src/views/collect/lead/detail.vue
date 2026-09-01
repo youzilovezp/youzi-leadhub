@@ -600,7 +600,7 @@ onMounted(fetchDetail)
                 <span class="k">ICP 资格</span><span>
                   {{ ICP_STATUS_LABELS[detail.icp_status] ?? detail.icp_status }}
                   <n-tag
-                    v-if="detail.icp_status === 'qualified' && detail.cn_evidence === 'weak'"
+                    v-if="detail.cn_evidence === 'weak'"
                     size="small"
                     type="warning"
                     :bordered="false"

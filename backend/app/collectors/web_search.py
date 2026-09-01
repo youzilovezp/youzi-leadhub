@@ -25,6 +25,7 @@ from typing import Any
 import httpx
 
 from app.collectors.base import Collector, LeadDraft, TaskContext, require_params, split_csv
+from app.collectors.icp import NON_BUYER_DOMAINS as _NON_BUYER_DOMAINS
 from app.collectors.normalize import extract_domain
 from app.core.config import settings
 from app.core.exceptions import BusinessError
@@ -34,39 +35,83 @@ _UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 )
-# 搜索结果里不算「企业官网」的域（平台/文档/社媒/中国门户与内容社区——
-# 门户站不是销售对象，混进来只会污染线索池）
-_NON_SITE_DOMAINS = (
-    "facebook.com", "instagram.com", "linkedin.com", "tiktok.com", "youtube.com",
-    "twitter.com", "x.com", "amazon.", "shopee.", "lazada.", "alibaba.com",
-    "aliexpress.com", "ebay.", "wikipedia.org", "reddit.com", "quora.com",
-    "medium.com", "github.com", "google.com", "microsoft.com", "apple.com",
-    "zapier.com", "hubspot.com", "salesforce.com", "zendesk.com",
-    "whatsapp.com", "wa.me", "blogspot.", "wordpress.com", "wixsite.com",
-    "duckduckgo.com", "searx", "bing.com", "baidu.com",
-    # 中国门户/媒体/内容社区（实测 sohu.com 被当线索入库）
-    "sohu.com", "sina.com", "163.com", "qq.com", "zhihu.com", "weibo.com",
-    "jd.com", "tmall.com", "taobao.com", "toutiao.com", "36kr.com", "csdn.net",
-    "bilibili.com", "douyin.com", "xiaohongshu.com", "ifeng.com", "cnblogs.com",
-    "jianshu.com", "oschina.net", "gitee.com",
-    # 平台补漏（2026-08-31 审计）：微信/ Etsy / Temu / B2B 平台 / Pinterest 等
-    "wechat.com", "etsy.com", "temu.com", "1688.com", "made-in-china.com",
-    "globalsources.com", "pinterest.com", "t.me", "threads.net", "discord.com",
-    # 跨境行业媒体/社区/平台门户（2026-08-31 dev 库实测霸榜的"假线索"；
-    # 与 collectors/icp.py NON_BUYER_DOMAINS 同源——这里入库拦截，那边存量兜底）
-    "ikjzd.com", "wearesellers.com", "cifnews.com", "kuajingyan.com",
-    "kjtong.com", "mckinsey.com.cn", "gizmodo.com", "whatsappbusiness.com",
-    # 36氪出海（2026-09-01 实测：36kr.com 在清单里但独立域漏网，混入还拿 qualified）
-    "letschuhai.com",
-    # 词典站（同日实测：爱词霸词条页整条入库）
-    "iciba.com",
-    # 政府事业单位/教育机构 TLD（2026-09-01 用户裁决：目标只有企业本体）
-    "gov.cn", "edu.cn",
-    # 出海媒体/素材站/博客（2026-09-01 实测批次漏网）
-    "baijing.cn", "chwang.com", "haiwainet.cn", "nipic.com",
-    "chuhaijiang.com", "onexiaobai.com",
-    # 知名平台/词典站（2026-09-01 官网错配实测：被当官网绑给无关公司）
-    "kugou.com", "zdic.net",
+# 买家黑名单单源（2026-09-01 巡检裁决：两处人工双写已实锤漏改——letschuhai/
+# iciba 都是「只补一边」后复现）：icp.NON_BUYER_DOMAINS 是唯一真源（存量兜底），
+# 这里整包叠加做入库前拦截，增补只改 icp.py 一处。下面另加的是搜索引擎结果
+# 特有的平台/社媒/门户域（不是买家门语义）
+_NON_SITE_DOMAINS = tuple(
+    dict.fromkeys(
+        (
+            "facebook.com",
+            "instagram.com",
+            "linkedin.com",
+            "tiktok.com",
+            "youtube.com",
+            "twitter.com",
+            "x.com",
+            "amazon.",
+            "shopee.",
+            "lazada.",
+            "alibaba.com",
+            "aliexpress.com",
+            "ebay.",
+            "wikipedia.org",
+            "reddit.com",
+            "quora.com",
+            "medium.com",
+            "github.com",
+            "google.com",
+            "microsoft.com",
+            "apple.com",
+            "zapier.com",
+            "hubspot.com",
+            "salesforce.com",
+            "zendesk.com",
+            "whatsapp.com",
+            "wa.me",
+            "blogspot.",
+            "wordpress.com",
+            "wixsite.com",
+            "duckduckgo.com",
+            "searx",
+            "bing.com",
+            "baidu.com",
+            # 中国门户/媒体/内容社区（实测 sohu.com 被当线索入库）
+            "sohu.com",
+            "sina.com",
+            "163.com",
+            "qq.com",
+            "zhihu.com",
+            "weibo.com",
+            "jd.com",
+            "tmall.com",
+            "taobao.com",
+            "toutiao.com",
+            "36kr.com",
+            "csdn.net",
+            "bilibili.com",
+            "douyin.com",
+            "xiaohongshu.com",
+            "ifeng.com",
+            "cnblogs.com",
+            "jianshu.com",
+            "oschina.net",
+            "gitee.com",
+            # 平台补漏（2026-08-31 审计）：微信/ Etsy / Temu / B2B 平台 / Pinterest 等
+            "wechat.com",
+            "etsy.com",
+            "temu.com",
+            "1688.com",
+            "made-in-china.com",
+            "globalsources.com",
+            "pinterest.com",
+            "t.me",
+            "threads.net",
+            "discord.com",
+            # 买家门同源黑名单（gov.cn/edu.cn TLD、行业媒体、词典站、错配宿主域等）
+            *_NON_BUYER_DOMAINS,
+        )
+    )
 )
 
 
@@ -89,10 +134,9 @@ def _is_blocked_domain(domain: str) -> bool:
             return True
     return False
 
+
 # DDG HTML 结果：标题链接与跳转参数
-_DDGLINK_RE = re.compile(
-    r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', re.S
-)
+_DDGLINK_RE = re.compile(r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', re.S)
 _DDGTAG_RE = re.compile(r"<[^>]+>")
 _DDGUDDG_RE = re.compile(r"[?&]uddg=([^&]+)")
 # 下一页链接（class="result__pagination"）里的 s= 偏移——单页 ~10-30 条不满
@@ -104,20 +148,77 @@ _DDG_S_RE = re.compile(r"[?&]s=(\d+)")
 # 文章/内容页启发词（标题或 URL 路径命中即弃——搜索「whatsapp 客服」类词
 # 首页结果大量是内容平台文章，不是要找的企业官网）
 _ARTICLE_TITLE_WORDS = (
-    "指南", "测评", "手册", "必看", "攻略", "如何", "怎么办", "完整", "清单",
-    "排行", "对比", "top 10", "top10", "best ", "how to", "guide", "review", "tutorial",
-    "vs ", "tips", "checklist", "解密", "深度", "解析", "入门", "实战",
+    "指南",
+    "测评",
+    "手册",
+    "必看",
+    "攻略",
+    "如何",
+    "怎么办",
+    "完整",
+    "清单",
+    "排行",
+    "对比",
+    "top 10",
+    "top10",
+    "best ",
+    "how to",
+    "guide",
+    "review",
+    "tutorial",
+    "vs ",
+    "tips",
+    "checklist",
+    "解密",
+    "深度",
+    "解析",
+    "入门",
+    "实战",
     # 内容门户/知识站（2026-08-31 实测漏网：「外贸知识大全-外贸知识网」混进线索池）
-    "大全", "知识网", "百科", "资讯网", "论坛", "问答", "导航",
+    "大全",
+    "知识网",
+    "百科",
+    "资讯网",
+    "论坛",
+    "问答",
+    "导航",
     # 词典/翻译/释义页（2026-09-01 实测漏网：「制造是什么意思_制造的翻译_音标_读音_
     # 用法_例句_爱词霸」整条当线索入库——品类词搜索结果页全是这类页，不是企业官网）
-    "是什么", "什么意思", "翻译", "音标", "读音", "例句", "词典", "辞典", "释义", "词霸",
-    "definition", "meaning", "translation", "pronunciation",
+    "是什么",
+    "什么意思",
+    "翻译",
+    "音标",
+    "读音",
+    "例句",
+    "词典",
+    "辞典",
+    "释义",
+    "词霸",
+    "definition",
+    "meaning",
+    "translation",
+    "pronunciation",
 )
 _ARTICLE_PATH_WORDS = (
-    "/blog", "/article", "/articles", "/news", "/docs", "/doc/", "/archives",
-    "/zh_cn/", "/zh-cn/", "/support/", "/help/", "/learn/", "/resources",
-    "/post/", "/dy/article", "/p/", ".html", ".htm", ".php",
+    "/blog",
+    "/article",
+    "/articles",
+    "/news",
+    "/docs",
+    "/doc/",
+    "/archives",
+    "/zh_cn/",
+    "/zh-cn/",
+    "/support/",
+    "/help/",
+    "/learn/",
+    "/resources",
+    "/post/",
+    "/dy/article",
+    "/p/",
+    ".html",
+    ".htm",
+    ".php",
 )
 # 聚合内容页分隔符（爱词霸式「词_翻译_音标_例句」堆叠栏标题）；
 # 不含 "-"——合法品牌名带连字符常见（Coca-Cola），误杀面不可接受
@@ -263,7 +364,9 @@ def drafts_with_stats(
     stats = {"platform_domain": 0, "article_page": 0, "dup_domain": 0}
     seen_domains: set[str] = set()
     is_cn_param = (
-        str(params_is_cn).lower() != "false" if isinstance(params_is_cn, str) else bool(params_is_cn)
+        str(params_is_cn).lower() != "false"
+        if isinstance(params_is_cn, str)
+        else bool(params_is_cn)
     )
     for it in items:
         url = (it.get("url") or it.get("link") or "").strip()
@@ -474,9 +577,13 @@ class WebSearchCollector(Collector):
         require_params(params, "keywords", collector=self.title)
         engine = settings.SEARCH_ENGINE
         if engine == "searxng" and not settings.SEARXNG_URL:
-            raise BusinessError(code=40001, message="SEARCH_ENGINE=searxng 需在 .env 配 SEARXNG_URL")
+            raise BusinessError(
+                code=40001, message="SEARCH_ENGINE=searxng 需在 .env 配 SEARXNG_URL"
+            )
         if engine == "google_cse" and not (settings.GOOGLE_CSE_KEY and settings.GOOGLE_CSE_CX):
-            raise BusinessError(code=40001, message="SEARCH_ENGINE=google_cse 需配 GOOGLE_CSE_KEY/CX")
+            raise BusinessError(
+                code=40001, message="SEARCH_ENGINE=google_cse 需配 GOOGLE_CSE_KEY/CX"
+            )
         if engine == "bing" and not settings.BING_SEARCH_KEY:
             raise BusinessError(code=40001, message="SEARCH_ENGINE=bing 需配 BING_SEARCH_KEY")
 
@@ -511,7 +618,9 @@ class WebSearchCollector(Collector):
                     )
                     if engine_used == "bing_cn":
                         ddg_dead = True
-                        await ctx.log("info", "DDG 本轮不可达，后续关键词直接走必应（省去每词超时等待）")
+                        await ctx.log(
+                            "info", "DDG 本轮不可达，后续关键词直接走必应（省去每词超时等待）"
+                        )
                 if err:
                     await ctx.log("error", f"「{kw}」搜索失败：{err}")
                 else:

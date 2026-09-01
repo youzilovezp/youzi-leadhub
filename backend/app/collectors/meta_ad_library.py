@@ -53,20 +53,32 @@ _PROBE_DELAY = 1.5  # 主页探测节流（秒）：对 FB 礼貌一点，别触
 _API_DELAY = 0.5  # 翻页间隔
 _TIMEOUT = httpx.Timeout(20.0, connect=10.0)
 
-# wa.me/60123456789 或 api.whatsapp.com/send?phone=60123456789 → 直接抠号码
+# wa.me/60123456789 或 api/web.whatsapp.com/send?phone=60123456789 → 直接抠号码
+# （web.whatsapp.com/send 是人工复制的分享链接形态，2026-09-01 联系页实测）
 _WA_PHONE_RES = (
     re.compile(r"wa\.me/(\d{6,15})"),
-    re.compile(r"api\.whatsapp\.com/send\?[^\"'\s<>]*?phone=(\d{6,15})"),
+    re.compile(r"(?:api|web)\.whatsapp\.com/send\?[^\"'\s<>]*?phone=(\d{6,15})"),
 )
 # FB 页里外链常包一层 l.facebook.com/l.php?u=<urlencode>
 _FB_REDIRECT_RE = re.compile(r"l\.facebook\.com/l\.php\?u=([^\"'\s&]+)")
 _URL_RE = re.compile(r"https?://[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?:/[^\s\"'<>]*)?")
 # 这些域不算「官网」
 _NON_SITE_DOMAINS = (
-    "facebook.com", "fb.com", "fb.me", "fb.watch", "messenger.com",
-    "instagram.com", "whatsapp.com", "wa.me", "threads.net",
-    "google.com", "goo.gl", "apple.com", "play.google.com",
-    "bit.ly", "tinyurl.com",
+    "facebook.com",
+    "fb.com",
+    "fb.me",
+    "fb.watch",
+    "messenger.com",
+    "instagram.com",
+    "whatsapp.com",
+    "wa.me",
+    "threads.net",
+    "google.com",
+    "goo.gl",
+    "apple.com",
+    "play.google.com",
+    "bit.ly",
+    "tinyurl.com",
 )
 _CJK_RE = re.compile(r"[一-鿿]")
 _UA = (
@@ -84,18 +96,84 @@ _CATEGORY_RES = (
 # 非企业类目关键词（小写子串匹配；命中即跳过）。公众人物/自媒体/媒体/政府/社区不是我们的买家。
 _NON_COMPANY_KEYWORDS = (
     # 英文（FB 常见类目）
-    "public figure", "publicfigure", "artist", "musician", "musician/band", "band",
-    "politician", "political", "athlete", "actor", "actress", "writer", "author",
-    "photographer", "model", "personal blog", "blogger", "just for fun", "community",
-    "government", "government official", "news", "media", "tv channel", "radio station",
-    "journalist", "producer", "director", "comedian", "dancer", "chef",
-    "education website", "school", "university", "college", "non-profit", "nonprofit",
-    "religious", "church", "sports team", "sports league", "movie", "theatre", "arts",
+    "public figure",
+    "publicfigure",
+    "artist",
+    "musician",
+    "musician/band",
+    "band",
+    "politician",
+    "political",
+    "athlete",
+    "actor",
+    "actress",
+    "writer",
+    "author",
+    "photographer",
+    "model",
+    "personal blog",
+    "blogger",
+    "just for fun",
+    "community",
+    "government",
+    "government official",
+    "news",
+    "media",
+    "tv channel",
+    "radio station",
+    "journalist",
+    "producer",
+    "director",
+    "comedian",
+    "dancer",
+    "chef",
+    "education website",
+    "school",
+    "university",
+    "college",
+    "non-profit",
+    "nonprofit",
+    "religious",
+    "church",
+    "sports team",
+    "sports league",
+    "movie",
+    "theatre",
+    "arts",
     # 中文
-    "公众人物", "个人博主", "自媒体", "艺术家", "音乐人", "乐队", "歌手", "演员", "作家",
-    "模特", "摄影师", "政治人物", "运动员", "社区", "政府", "新闻", "媒体", "电视台",
-    "电台", "记者", "导演", "喜剧演员", "舞者", "学校", "大学", "非营利", "宗教", "教会",
-    "球队", "联盟", "电影", "剧院", "艺术",
+    "公众人物",
+    "个人博主",
+    "自媒体",
+    "艺术家",
+    "音乐人",
+    "乐队",
+    "歌手",
+    "演员",
+    "作家",
+    "模特",
+    "摄影师",
+    "政治人物",
+    "运动员",
+    "社区",
+    "政府",
+    "新闻",
+    "媒体",
+    "电视台",
+    "电台",
+    "记者",
+    "导演",
+    "喜剧演员",
+    "舞者",
+    "学校",
+    "大学",
+    "非营利",
+    "宗教",
+    "教会",
+    "球队",
+    "联盟",
+    "电影",
+    "剧院",
+    "艺术",
 )
 
 # 常见 FB 企业类目 → 中文（存进 Lead.industry，列表筛选/展示直接可读；未收录原样保留）
@@ -231,9 +309,7 @@ async def _ads_get(
     return None
 
 
-async def _fetch_page(
-    clients: tuple[httpx.AsyncClient, httpx.AsyncClient], url: str
-) -> str | None:
+async def _fetch_page(clients: tuple[httpx.AsyncClient, httpx.AsyncClient], url: str) -> str | None:
     """抓 FB 主页 HTML。三层递进：代理优先双通道 → Chrome 指纹伪装 → 失败返回 None。"""
     for client in clients:
         try:
@@ -327,7 +403,9 @@ class MetaAdsCollector(Collector):
         # page_id 去重（一次运行里同一广告主多个广告只处理一次）
         seen_pages: dict[str, dict[str, Any]] = {}
         query_ok = 0
-        failed_kws: list[str] = []  # 部分失败点名（2026-08-31 审计：限流/抖动时半截覆盖不得静默假成功）
+        failed_kws: list[
+            str
+        ] = []  # 部分失败点名（2026-08-31 审计：限流/抖动时半截覆盖不得静默假成功）
         headers = {"User-Agent": _UA}
 
         # 双通道：代理优先（国内网络 Meta 域直连被墙，实测直连 000），直连兜底（海外部署）
@@ -355,13 +433,21 @@ class MetaAdsCollector(Collector):
                         params["after"] = after
                     resp = await _ads_get(clients, params)
                     if resp is None:
-                        await ctx.log("error", f"「{kw}」请求失败：代理/直连两条通道都不通（检查网络或代理）")
+                        await ctx.log(
+                            "error", f"「{kw}」请求失败：代理/直连两条通道都不通（检查网络或代理）"
+                        )
                         failed_kws.append(kw)
                         break
                     if resp.status_code != 200:
                         # token 无效/过期是常见配置问题，给可直接行动的提示
-                        hint = "（token 无效或过期，去 Ads Library API 重新生成）" if '"code":190' in resp.text else ""
-                        await ctx.log("error", f"「{kw}」API {resp.status_code}{hint}：{resp.text[:200]}")
+                        hint = (
+                            "（token 无效或过期，去 Ads Library API 重新生成）"
+                            if '"code":190' in resp.text
+                            else ""
+                        )
+                        await ctx.log(
+                            "error", f"「{kw}」API {resp.status_code}{hint}：{resp.text[:200]}"
+                        )
                         failed_kws.append(kw)
                         break
                     data = resp.json()
@@ -370,14 +456,17 @@ class MetaAdsCollector(Collector):
                         if not pid:
                             continue
                         kw_ads += 1
-                        rec = seen_pages.setdefault(pid, {
-                            "page_name": ad.get("page_name") or "",
-                            "page_profile_uri": ad.get("page_profile_uri") or "",
-                            "bodies": [],
-                            "ad_count": 0,
-                            "countries": [],
-                            "last_ad_at": None,
-                        })
+                        rec = seen_pages.setdefault(
+                            pid,
+                            {
+                                "page_name": ad.get("page_name") or "",
+                                "page_profile_uri": ad.get("page_profile_uri") or "",
+                                "bodies": [],
+                                "ad_count": 0,
+                                "countries": [],
+                                "last_ad_at": None,
+                            },
+                        )
                         rec["ad_count"] += 1
                         # 最近投放开始时间（§4.1 出海画像：广告活跃度的时间维度）
                         start = _parse_ad_time(ad.get("ad_delivery_start_time"))
@@ -402,11 +491,16 @@ class MetaAdsCollector(Collector):
                     await asyncio.sleep(_API_DELAY)
                 if kw_ads:
                     query_ok += 1
-                    await ctx.log("info", f"「{kw}」命中 {kw_ads} 条在投广告，涉及 {len(seen_pages)} 个广告主（累计）")
+                    await ctx.log(
+                        "info",
+                        f"「{kw}」命中 {kw_ads} 条在投广告，涉及 {len(seen_pages)} 个广告主（累计）",
+                    )
                 ctx.inc_progress(1)
 
             if query_ok == 0:
-                raise BusinessError(code=40001, message="全部关键词查询失败，任务判 failed（不产出空结果假成功）")
+                raise BusinessError(
+                    code=40001, message="全部关键词查询失败，任务判 failed（不产出空结果假成功）"
+                )
             if failed_kws:
                 await ctx.log(
                     "warn",
@@ -414,7 +508,11 @@ class MetaAdsCollector(Collector):
                     f"{'、'.join(failed_kws[:10])}——本次结果为部分覆盖，建议稍后单独重跑这些词",
                 )
 
-            await ctx.log("info", f"去重后共 {len(seen_pages)} 个广告主，开始产出线索" + ("并探测主页" if probe else ""))
+            await ctx.log(
+                "info",
+                f"去重后共 {len(seen_pages)} 个广告主，开始产出线索"
+                + ("并探测主页" if probe else ""),
+            )
             # 进度第二阶段（2026-08-31 审计）：探测期此前恒满格、任务还能跑几十分钟
             if probe:
                 ctx.set_total(len(keywords) + len(seen_pages))
@@ -422,13 +520,18 @@ class MetaAdsCollector(Collector):
             # 第二阶段：产出 + 主页探测。多国投放时 country 记第一个（列是单值）
             primary_country = countries[0] if countries else None
             if len(countries) > 1:
-                await ctx.log("info", f"多国投放，线索 country 统一记为 {primary_country}（投放国明细看任务日志）")
+                await ctx.log(
+                    "info",
+                    f"多国投放，线索 country 统一记为 {primary_country}（投放国明细看任务日志）",
+                )
             probe_fail = 0
             skipped_non_company = 0
             for pid, rec in seen_pages.items():
                 ctx.check_cancelled()
                 name = rec["page_name"] or f"FB主页 {pid}"
-                profile_uri = rec["page_profile_uri"] or f"https://www.facebook.com/profile.php?id={pid}"
+                profile_uri = (
+                    rec["page_profile_uri"] or f"https://www.facebook.com/profile.php?id={pid}"
+                )
                 draft = LeadDraft(
                     source="meta_ads",
                     name=name,
@@ -505,8 +608,12 @@ class MetaAdsCollector(Collector):
                     async with async_session() as session:
                         last = rec.get("last_ad_at")
                         await upsert_signal(
-                            session, lead_id, "meta_ad", str(pid),
-                            source="meta_ads", evidence_url=profile_uri,
+                            session,
+                            lead_id,
+                            "meta_ad",
+                            str(pid),
+                            source="meta_ads",
+                            evidence_url=profile_uri,
                             evidence_raw=(
                                 f"{rec['ad_count']} 条在投（{','.join(sorted(rec.get('countries') or []))}）"
                                 + (f"，最近投放 {last:%Y-%m-%d}" if last else "")
@@ -515,24 +622,39 @@ class MetaAdsCollector(Collector):
                         )
                         if draft.fb_whatsapp:
                             await upsert_signal(
-                                session, lead_id, "fb_whatsapp", draft.phone_raw or "button",
-                                source="meta_ads", evidence_url=profile_uri,
-                                evidence_raw=draft.whatsapp_url, confidence=90,
+                                session,
+                                lead_id,
+                                "fb_whatsapp",
+                                draft.phone_raw or "button",
+                                source="meta_ads",
+                                evidence_url=profile_uri,
+                                evidence_raw=draft.whatsapp_url,
+                                confidence=90,
                             )
                             for n in draft.whatsapp_numbers or []:
                                 await upsert_signal(
-                                    session, lead_id, "whatsapp_number", n,
-                                    source="meta_ads", evidence_url=profile_uri,
-                                    evidence_raw=f"https://wa.me/{n}", confidence=90,
+                                    session,
+                                    lead_id,
+                                    "whatsapp_number",
+                                    n,
+                                    source="meta_ads",
+                                    evidence_url=profile_uri,
+                                    evidence_raw=f"https://wa.me/{n}",
+                                    confidence=90,
                                 )
                         await session.commit()
                 except Exception as exc:  # noqa: BLE001  证据缺失可接受，任务假失败不可接受
-                    await ctx.log("warn", f"[{name}] 信号证据写库失败（忽略）：{type(exc).__name__}: {str(exc)[:60]}")
+                    await ctx.log(
+                        "warn",
+                        f"[{name}] 信号证据写库失败（忽略）：{type(exc).__name__}: {str(exc)[:60]}",
+                    )
                 if probe:
                     ctx.inc_progress(1)
 
             if probe and probe_fail:
-                await ctx.log("warn", f"主页探测失败 {probe_fail} 个（登录墙/网络），线索已按无探测信息落库")
+                await ctx.log(
+                    "warn", f"主页探测失败 {probe_fail} 个（登录墙/网络），线索已按无探测信息落库"
+                )
             await ctx.log(
                 "info",
                 f"完成：{len(seen_pages)} 个广告主，跳过非企业 {skipped_non_company} 个 → "
