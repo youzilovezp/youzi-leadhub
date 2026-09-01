@@ -31,7 +31,8 @@ def test_score_full_hits():
     )
     assert score == 55
     assert {it["key"]: it["points"] for it in items} == {
-        "site_whatsapp": 25, "wa_ops_job": 30,
+        "site_whatsapp": 25,
+        "wa_ops_job": 30,
     }
     assert grade == "B"
 
@@ -88,6 +89,20 @@ def test_normalize_company_name():
     assert normalize_company_name("Acme Sdn. Bhd.") == "acme"
     assert normalize_company_name("PT Maju Jaya!") == "maju jaya"
     assert normalize_company_name("Foo PTE LTD") == "foo"
+
+
+def test_normalize_company_name_strips_cn_legal_suffixes():
+    """中文组织形态后缀（FR-2 归一化）：「XX有限公司」vs「XX有限责任公司」
+    必须归出同一 namecity 键——job_posting 巡检主通道靠它跨来源合并。"""
+    a = normalize_company_name("宁波凯越国际贸易有限公司")
+    b = normalize_company_name("宁波凯越国际贸易有限责任公司")
+    c = normalize_company_name("宁波凯越国际贸易股份有限公司")
+    assert a == b == c == "宁波凯越国际贸易"
+    # 叠形态（集团有限公司）多轮剥离；分公司/集团/总公司 单形态
+    assert normalize_company_name("华东实业集团有限公司") == "华东实业"
+    assert normalize_company_name("华南供应链总公司") == "华南供应链"
+    # 公司名主体含「公司」字样不受影响（只剥尾部）
+    assert normalize_company_name("公公司贸易") == "公公司贸易"
 
 
 # ---------- dedupe_key 优先级 ----------
@@ -353,14 +368,24 @@ def test_job_posting_jobui_parsing():
     assert "wa_ops" in d1.job_signals and "overseas_cs" in d1.job_signals
     assert d2.whatsapp_job is False and d2.job_signals == {}  # 普通岗不误标
 
+
 async def test_source_filter_regression(client, admin_credentials):
     """source 筛选回归：JSON 列 cast(Text) 写法在 SQLAlchemy 2.x 下构造即抛
     TypeError（存量 bug——cast(func.text()) 非法），此前是无测试盲区。"""
-    h = {"Authorization": f"Bearer {(await client.post('/api/v1/auth/login', json=admin_credentials)).json()['data']['access_token']}"}
-    for name, web in (("SrcFilterA Co", "https://srcfiltera.com"), ("SrcFilterB Co", "https://srcfilterb.com")):
-        await client.post("/api/v1/collect/leads", headers=h, json={"name": name, "country": "MY", "website": web})
+    h = {
+        "Authorization": f"Bearer {(await client.post('/api/v1/auth/login', json=admin_credentials)).json()['data']['access_token']}"
+    }
+    for name, web in (
+        ("SrcFilterA Co", "https://srcfiltera.com"),
+        ("SrcFilterB Co", "https://srcfilterb.com"),
+    ):
+        await client.post(
+            "/api/v1/collect/leads", headers=h, json={"name": name, "country": "MY", "website": web}
+        )
     # 不带 source：两条都在
-    all_items = (await client.get("/api/v1/collect/leads?keyword=SrcFilter", headers=h)).json()["data"]["items"]
+    all_items = (await client.get("/api/v1/collect/leads?keyword=SrcFilter", headers=h)).json()[
+        "data"
+    ]["items"]
     assert len(all_items) == 2
     # 带 source=manual：筛选不炸且命中（此前 500）
     r = await client.get("/api/v1/collect/leads?keyword=SrcFilter&source=manual", headers=h)
@@ -375,8 +400,11 @@ async def test_export_intent_detail_field(client, admin_credentials):
     """v3 导出：dim_* 六列已删，intent_detail 输出命中信号明细文本。"""
     r = await client.post("/api/v1/auth/login", json=admin_credentials)
     h = {"Authorization": f"Bearer {r.json()['data']['access_token']}"}
-    await client.post("/api/v1/collect/leads", headers=h, json={
-        "name": "IntentDetail Co", "country": "MY", "website": "https://intentdetail.com"})
+    await client.post(
+        "/api/v1/collect/leads",
+        headers=h,
+        json={"name": "IntentDetail Co", "country": "MY", "website": "https://intentdetail.com"},
+    )
     r = await client.get(
         "/api/v1/collect/leads/export",
         headers=h,
@@ -431,10 +459,17 @@ def test_job_posting_51job_parsing():
 
     from app.collectors.job_posting import parse_51job_html
 
-    sensors = _html.escape(_json.dumps(
-        {"jobId": "173460250", "jobTitle": "海外销售代表（船司）", "jobArea": "上海·虹口区",
-         "jobSalary": "1-1.5万", "companyId": "9750561"}
-    ))
+    sensors = _html.escape(
+        _json.dumps(
+            {
+                "jobId": "173460250",
+                "jobTitle": "海外销售代表（船司）",
+                "jobArea": "上海·虹口区",
+                "jobSalary": "1-1.5万",
+                "companyId": "9750561",
+            }
+        )
+    )
     html = f"""
     <div class="joblist-item"><div sensorsname="JobShortExposure" sensorsdata="{sensors}">
       <span class="jname text-cut">海外销售代表（船司）</span>
@@ -486,8 +521,11 @@ async def test_upsert_patrol_mode_no_create(client, admin_credentials, db_sessio
     lead, created = await upsert_lead(
         db_session,
         LeadDraft(
-            source="job_posting", name="巡检模式外部公司（成都）有限公司",
-            country="CN", city="成都", is_cn=True,
+            source="job_posting",
+            name="巡检模式外部公司（成都）有限公司",
+            country="CN",
+            city="成都",
+            is_cn=True,
             job_signals={"wa_ops": {"label": "WhatsApp 运营/客服", "points": 30}},
             job_urls=["https://jobui.com/job/1/"],
         ),
@@ -496,22 +534,32 @@ async def test_upsert_patrol_mode_no_create(client, admin_credentials, db_sessio
     assert lead is None and created is False
     assert (
         await db_session.execute(
-            select(func.count()).select_from(Lead).where(Lead.name == "巡检模式外部公司（成都）有限公司")
+            select(func.count())
+            .select_from(Lead)
+            .where(Lead.name == "巡检模式外部公司（成都）有限公司")
         )
     ).scalar_one() == 0
 
     # 先建一条库内公司，再以巡检模式合并 → 信号进来了
     seeded, _ = await upsert_lead(
         db_session,
-        LeadDraft(source="seed_import", name="巡检模式库内公司（杭州）有限公司",
-                  country="CN", website="https://patrol-seeded.com", is_cn=True),
+        LeadDraft(
+            source="seed_import",
+            name="巡检模式库内公司（杭州）有限公司",
+            country="CN",
+            website="https://patrol-seeded.com",
+            is_cn=True,
+        ),
     )
     await db_session.commit()
     merged, created = await upsert_lead(
         db_session,
         LeadDraft(
-            source="job_posting", name="巡检模式库内公司（杭州）有限公司",
-            website="https://patrol-seeded.com", country="CN", is_cn=True,
+            source="job_posting",
+            name="巡检模式库内公司（杭州）有限公司",
+            website="https://patrol-seeded.com",
+            country="CN",
+            is_cn=True,
             job_signals={"overseas_cs": {"label": "海外/英文客服", "points": 20}},
             job_urls=["https://jobui.com/job/2/"],
         ),
@@ -522,7 +570,9 @@ async def test_upsert_patrol_mode_no_create(client, admin_credentials, db_sessio
     assert "overseas_cs" in (merged.job_signals or {})
 
     # 清理（共享测试库）：与 test_daily_batch.py 同款 DELETE 端点
-    h = {"Authorization": f"Bearer {(await client.post('/api/v1/auth/login', json=admin_credentials)).json()['data']['access_token']}"}
+    h = {
+        "Authorization": f"Bearer {(await client.post('/api/v1/auth/login', json=admin_credentials)).json()['data']['access_token']}"
+    }
     await client.delete(f"/api/v1/collect/leads/{seeded.id}", headers=h)
 
 
@@ -539,7 +589,10 @@ def test_career_site_link_and_signal_extraction():
     url = find_career_link(homepage, "https://www.ugreen.com/", "ugreen.com")
     assert url == "https://app.mokahr.com/campus-apply/ugreen"  # ATS 外链放行
 
-    assert find_career_link('<a href="/careers">Careers</a>', "https://a.com/", "a.com") == "https://a.com/careers"
+    assert (
+        find_career_link('<a href="/careers">Careers</a>', "https://a.com/", "a.com")
+        == "https://a.com/careers"
+    )
     assert find_career_link('<a href="/news">新闻</a>', "https://a.com/", "a.com") is None
 
     career_page = """

@@ -183,13 +183,20 @@ async def auto_assign_leads(
 
 
 async def upsert_lead(
-    db: AsyncSession, draft: LeadDraft, *, create_if_missing: bool = True
+    db: AsyncSession,
+    draft: LeadDraft,
+    *,
+    create_if_missing: bool = True,
+    auto_contact: bool = True,
 ) -> tuple[Lead | None, bool]:
     """归一化 → dedupe_key → 新建或合并。返回 (lead, 是否新建)。
 
     create_if_missing=False（巡检模式，job_posting 信号巡检用）：
     三身份列反查不中 → (None, False)，不建行——招聘数据的价值是给库内
     公司补信号，不是发现新公司（92% 无官网 → 富化无米下锅 → 全员 C 的教训）。
+
+    auto_contact=False（手工录入入口）：不自动生成联系人（FR-10——
+    manual 渠道用户自己维护联系人表，与 note_source 备注值无关）。
 
     并发安全：两个 worker 同时新建同一 dedupe_key 时，后 insert 的一方命中唯一约束。
     用 savepoint 包住 insert，IntegrityError 后重查存量并退化为合并（此时必命中）。
@@ -248,23 +255,26 @@ async def upsert_lead(
                 )
             )
             await db.flush()
-            await _auto_contact_from_draft(db, lead, draft)
+            await _auto_contact_from_draft(db, lead, draft, auto_contact=auto_contact)
             return lead, True
 
     await _merge_into(db, existing, draft, domain, phone_e164, namecity_key, now)
     await db.flush()
-    await _auto_contact_from_draft(db, existing, draft)
+    await _auto_contact_from_draft(db, existing, draft, auto_contact=auto_contact)
     return existing, False
 
 
-async def _auto_contact_from_draft(db: AsyncSession, lead: Lead, draft: LeadDraft) -> None:
+async def _auto_contact_from_draft(
+    db: AsyncSession, lead: Lead, draft: LeadDraft, *, auto_contact: bool = True
+) -> None:
     """采集器抓到的联系方式 → 自动生成「待补全」联系人（「找谁」的直接答案）。
 
     邮箱（auto_create_from_email）+ WhatsApp 号码（auto_create_from_phone，
     meta_ads 主页探测的 wa.me 号码是销售建联的第一入口）。手工录入不自动生成
-    （用户自己维护联系人表）。
+    （用户自己维护联系人表）：source=manual 或调用方显式 auto_contact=False
+    （手工录入端点带 note_source 备注时 source 不是 "manual" 字面量）。
     """
-    if draft.source == "manual":
+    if draft.source == "manual" or not auto_contact:
         return
     from app.crud.contact import auto_create_from_email, auto_create_from_phone
 
@@ -274,7 +284,9 @@ async def _auto_contact_from_draft(db: AsyncSession, lead: Lead, draft: LeadDraf
             await auto_create_from_email(db, lead, draft.email, source=draft.source)
         ) is not None or created
     for n in (draft.whatsapp_numbers or [])[:3]:
-        created = (await auto_create_from_phone(db, lead, n, source=draft.source)) is not None or created
+        created = (
+            await auto_create_from_phone(db, lead, n, source=draft.source)
+        ) is not None or created
     if created:
         await rescore_and_log(db, lead)  # 联系人维变化 → 重评（可能升分/升级）
 
@@ -327,9 +339,7 @@ def _new_lead(
         whatsapp_job=draft.whatsapp_job,
         job_urls=list(draft.job_urls or []),
         # CN 证据（ICP 门1）：来源标记 / 国家码 CN / +86 号码，任一命中
-        is_cn=has_cn_evidence(
-            is_cn=draft.is_cn, country=draft.country, phone_e164=phone_e164
-        ),
+        is_cn=has_cn_evidence(is_cn=draft.is_cn, country=draft.country, phone_e164=phone_e164),
         fb_whatsapp=draft.fb_whatsapp,
         target_countries=list(draft.target_countries or []),
         whatsapp_numbers=list(draft.whatsapp_numbers or []),
@@ -338,7 +348,9 @@ def _new_lead(
         job_signals=dict(draft.job_signals or {}),
         ad_count=draft.ad_count or 0,
         last_ad_at=draft.last_ad_at,
-        sources=[{"source": draft.source, "first_seen": now.isoformat(), "last_seen": now.isoformat()}],
+        sources=[
+            {"source": draft.source, "first_seen": now.isoformat(), "last_seen": now.isoformat()}
+        ],
         dedupe_key=dedupe_key,
         namecity_key=namecity_key,
     )
@@ -489,7 +501,6 @@ async def _merge_into(
             touch_field_meta(existing, field, draft.source, confidence=95, now=now)
     _touch_source(existing, draft.source, now)
 
-
     # 合并后键升级：优先 domain（新数据可能补上了官网），冲突则保留旧键
     upgraded = make_dedupe_key(
         website=existing.website,
@@ -595,8 +606,10 @@ def _lead_conditions(
         # （"source":"x"）——两种都匹配，否则 PG 下筛选直接失灵。
         src_text = Lead.sources.cast(Text)
         conds.append(
-            or_(src_text.contains(f'"source": "{source}"'),
-                src_text.contains(f'"source":"{source}"'))
+            or_(
+                src_text.contains(f'"source": "{source}"'),
+                src_text.contains(f'"source":"{source}"'),
+            )
         )
     if keyword:
         # 转义 %/_ 通配符：用户输入 "%" 不应变成全匹配

@@ -9,10 +9,20 @@ class _C:  # 最小联系人桩（属性访问与 ORM LeadContact 同构）
 class _L:  # 最小 Lead 桩
     def __init__(self, **kw):
         base = {
-            "name": "测试公司", "whatsapp_hit": False, "whatsapp_url": None, "whatsapp_job": False,
-            "whatsapp_numbers": [], "saas_signals": {}, "scenes": [], "sources": [],
-            "industry": None, "score_breakdown": {}, "job_signals": {}, "fb_whatsapp": False,
-            "email": None, "website": None,
+            "name": "测试公司",
+            "whatsapp_hit": False,
+            "whatsapp_url": None,
+            "whatsapp_job": False,
+            "whatsapp_numbers": [],
+            "saas_signals": {},
+            "scenes": [],
+            "sources": [],
+            "industry": None,
+            "score_breakdown": {},
+            "job_signals": {},
+            "fb_whatsapp": False,
+            "email": None,
+            "website": None,
         }
         base.update(kw)
         for k, v in base.items():
@@ -45,18 +55,70 @@ def test_why_top3_by_points_with_evidence():
     )
     tq = build_three_questions(lead)
     assert [w["key"] for w in tq["why"]] == ["wa_ops_job", "site_whatsapp", "overseas_cs_job"]
-    assert tq["why"][1]["evidence_url"] == "https://wa.me/8613800138000"  # site_whatsapp → whatsapp_url
+    assert (
+        tq["why"][1]["evidence_url"] == "https://wa.me/8613800138000"
+    )  # site_whatsapp → whatsapp_url
+
+
+def test_why_evidence_url_covers_all_signal_keys():
+    """FR-4「每 1 分可溯源」：14 信号键全部能给出证据 URL（行属性或信号链），
+    不再只有 7/14——wa_bsp_competitor(+30) 常驻 top-3 却无 URL 是可点开核对落空。"""
+    from app.collectors.intent import _evidence_url
+
+    lead = _L(
+        website="https://x.com",
+        whatsapp_url="https://wa.me/86137",
+        job_urls=["https://x.com/jobs"],
+    )
+    for key in (
+        "ctwa_ad",
+        "wa_ops_job",
+        "wa_bsp_competitor",
+        "site_whatsapp",
+        "overseas_cs_job",
+        "wa_business",
+        "meta_ads_running",
+        "overseas_biz",
+        "saas_buying",
+        "overseas_site",
+        "crm_job",
+        "three_markets",
+        "multi_numbers",
+        "social_active",
+    ):
+        assert _evidence_url(lead, key) is not None, key
+
+
+def test_why_evidence_url_prefers_signal_chain():
+    """信号证据链优先：meta_ads_running 的真实证据是 FB 主页 URI（lead_signals），
+    ctwa_ad 的 fb_whatsapp 证据同源；行属性 website 只是回退。"""
+    from app.collectors.intent import _evidence_url
+
+    lead = _L(website="https://x.com")
+    sig = {
+        "meta_ad": "https://facebook.com/pages/12345",
+        "fb_whatsapp": "https://facebook.com/pages/999",
+    }
+    assert _evidence_url(lead, "meta_ads_running", sig) == "https://facebook.com/pages/12345"
+    assert _evidence_url(lead, "ctwa_ad", sig) == "https://facebook.com/pages/999"
+    # 无信号链时回退行属性
+    assert _evidence_url(lead, "meta_ads_running") == "https://x.com"
 
 
 def test_what_aggregates_products_needs_scenes():
     from app.collectors.intent import build_three_questions
 
     lead = _L(
-        whatsapp_hit=True, whatsapp_url="https://wa.me/8613", whatsapp_job=True,
+        whatsapp_hit=True,
+        whatsapp_url="https://wa.me/8613",
+        whatsapp_job=True,
         scenes=["customer_service", "marketing"],
         saas_signals={"crm": 1, "helpdesk": 1},
         sources=[{"source": "meta_ads"}],
-        score_breakdown={"total": 40, "items": [{"key": "site_whatsapp", "label": "官网 WhatsApp 入口", "points": 25}]},
+        score_breakdown={
+            "total": 40,
+            "items": [{"key": "site_whatsapp", "label": "官网 WhatsApp 入口", "points": 25}],
+        },
     )
     tq = build_three_questions(lead)
     assert any(p["key"] == "wa_cs" for p in tq["what"]["products"])
@@ -93,18 +155,26 @@ def test_completeness_rule():
 
     # 信号≥2 + 产品≥1 + who 兜底 → complete
     strong = _L(
-        whatsapp_hit=True, whatsapp_url="https://wa.me/8613", whatsapp_job=True,
-        score_breakdown={"total": 55, "items": [
-            {"key": "site_whatsapp", "label": "官网 WhatsApp 入口", "points": 25},
-            {"key": "wa_ops_job", "label": "在招 WhatsApp 运营岗", "points": 30},
-        ]},
+        whatsapp_hit=True,
+        whatsapp_url="https://wa.me/8613",
+        whatsapp_job=True,
+        score_breakdown={
+            "total": 55,
+            "items": [
+                {"key": "site_whatsapp", "label": "官网 WhatsApp 入口", "points": 25},
+                {"key": "wa_ops_job", "label": "在招 WhatsApp 运营岗", "points": 30},
+            ],
+        },
     )
     assert build_three_questions(strong)["complete"] is True
 
     # 单信号无产品 → 不齐备
     weak = _L(
         overseas_signals={"shipping": ["worldwide"]},
-        score_breakdown={"total": 15, "items": [{"key": "overseas_biz", "label": "出海业务证据", "points": 15}]},
+        score_breakdown={
+            "total": 15,
+            "items": [{"key": "overseas_biz", "label": "出海业务证据", "points": 15}],
+        },
     )
     assert build_three_questions(weak)["complete"] is False
 
@@ -115,11 +185,16 @@ def test_roles_do_not_satisfy_who():
     # why≥2 + 产品≥1，但无联系人/无号码/无 whatsapp_url：
     # roles 再多也只是「该找谁的角色」，不是建联入口 → 不齐备（spec §六头号定义）
     lead = _L(
-        whatsapp_hit=True, whatsapp_url=None, whatsapp_job=True,
-        score_breakdown={"total": 55, "items": [
-            {"key": "site_whatsapp", "label": "官网 WhatsApp 入口", "points": 25},
-            {"key": "wa_ops_job", "label": "在招 WhatsApp 运营岗", "points": 30},
-        ]},
+        whatsapp_hit=True,
+        whatsapp_url=None,
+        whatsapp_job=True,
+        score_breakdown={
+            "total": 55,
+            "items": [
+                {"key": "site_whatsapp", "label": "官网 WhatsApp 入口", "points": 25},
+                {"key": "wa_ops_job", "label": "在招 WhatsApp 运营岗", "points": 30},
+            ],
+        },
     )
     tq = build_three_questions(lead)
     assert len(tq["why"]) >= 2

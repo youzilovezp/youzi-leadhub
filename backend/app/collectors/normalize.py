@@ -54,6 +54,11 @@ _SUFFIX_RE = re.compile(
     r"\b(" + "|".join(re.escape(s).replace(r"\ ", r"[\s.,]*") for s in _LEGAL_SUFFIXES) + r")\b\.?",
     re.IGNORECASE,
 )
+# 中文组织形态后缀（长词在前防「分公司」被「公司」截断）；CJK 全是 \w，
+# \b 在汉字之间不成立，改用尾部锚定。多轮剥离处理「集团有限公司」叠形态。
+_CN_SUFFIX_RE = re.compile(
+    r"(?:股份有限公司|有限责任公司|有限公司|集团公司|总公司|分公司|控股公司|集团|公司)$"
+)
 _PUNCT_RE = re.compile(r"[^\w\s]+")
 _WS_RE = re.compile(r"\s+")
 
@@ -102,12 +107,18 @@ def extract_domain(value: str | None) -> str | None:
 
 @lru_cache(maxsize=10000)
 def normalize_company_name(name: str | None) -> str | None:
-    """公司名 → 小写 + 去标点 + 剥法律后缀。"""
+    """公司名 → 小写 + 去标点 + 剥法律后缀（拉丁 + 中文组织形态）。"""
     if not name:
         return None
     s = name.strip().lower()
     s = _PUNCT_RE.sub(" ", s)
     s = _SUFFIX_RE.sub(" ", s)
+    # 中文后缀剥离：循环至稳定（≤3 轮足够「集团有限公司」级叠加）
+    for _ in range(3):
+        stripped = _CN_SUFFIX_RE.sub("", s).strip()
+        if stripped == s:
+            break
+        s = stripped
     s = _WS_RE.sub(" ", s).strip()
     return s or None
 

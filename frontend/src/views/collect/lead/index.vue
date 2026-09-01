@@ -273,6 +273,7 @@ async function handleExport() {
         owner_id: query.owner_id ?? undefined,
         due_follow: query.due_follow || undefined,
         is_cn: query.is_cn || undefined,
+        icp: query.icp || undefined,
         fields: exportFields.value.join(','),
       },
       `leads_${stamp}.csv`,

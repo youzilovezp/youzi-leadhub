@@ -73,13 +73,18 @@ def _lead_context(lead: Any, contacts: list[Any]) -> str:
         f"等级：{lead.grade}（意向分 {lead.score}；"
         + (
             "，".join(
-                f"{INTENT_LABELS_ZH.get(k, k)} {v}"
-                for k, v in (lead.score_signals or {}).items()
+                f"{INTENT_LABELS_ZH.get(k, k)} {v}" for k, v in (lead.score_signals or {}).items()
             )
             or "暂未检测到意向信号"
         )
         + "）",
-        f"WhatsApp：{'已发现 ' + (lead.whatsapp_url or '') if (lead.whatsapp_hit or lead.whatsapp_url) else '未发现'}；"
+        f"WhatsApp：{'已发现 ' + (lead.whatsapp_url or '') if (lead.whatsapp_hit or lead.whatsapp_url) else '未发现'}"
+        + (
+            f"（另有号码 {'、'.join((getattr(lead, 'whatsapp_numbers', None) or [])[:5])}）"
+            if (getattr(lead, "whatsapp_numbers", None) or [])
+            else ""
+        )
+        + "；"
         f"FB 私域：{'是' if lead.fb_whatsapp else '否'}；在招 WA 岗位：{'是' if lead.whatsapp_job else '否'}",
         "场景："
         + ("、".join(SCENE_LABELS_ZH.get(s) or s for s in (lead.scenes or [])) or "未检测"),
@@ -100,16 +105,26 @@ async def ai_analysis(lead: Any, contacts: list[Any]) -> dict[str, Any]:
     recs = recommend_products(
         whatsapp_hit=lead.whatsapp_hit,
         whatsapp_url=lead.whatsapp_url,
+        whatsapp_numbers=list(getattr(lead, "whatsapp_numbers", None) or []),
         whatsapp_job=lead.whatsapp_job,
         scenes=lead.scenes,
         saas_signals=lead.saas_signals,
         industry=lead.industry,
         sources=lead.sources,
     )
+    uses_wa = bool(
+        lead.whatsapp_hit or lead.whatsapp_url or (getattr(lead, "whatsapp_numbers", None) or [])
+    )
     fallback = {
         "summary": f"{lead.name}（{lead.industry or '行业未知'}，{lead.country or '地区未知'}），等级 {lead.grade}",
-        "whatsapp_opportunity": "已发现 WhatsApp 使用痕迹，可直接以 WhatsApp 建联切入" if (lead.whatsapp_hit or lead.whatsapp_url) else "暂无 WhatsApp 使用证据，建议先富化检测",
-        "pain_points": ["海外客服分散在个人号，缺乏统一管理", "客服协作与客户分配无系统支撑", "营销触达缺自动化工具"][: 2 + (1 if lead.whatsapp_job else 0)],
+        "whatsapp_opportunity": "已发现 WhatsApp 使用痕迹，可直接以 WhatsApp 建联切入"
+        if uses_wa
+        else "暂无 WhatsApp 使用证据，建议先富化检测",
+        "pain_points": [
+            "海外客服分散在个人号，缺乏统一管理",
+            "客服协作与客户分配无系统支撑",
+            "营销触达缺自动化工具",
+        ][: 2 + (1 if lead.whatsapp_job else 0)],
         "products": [{"name": r["name"], "stars": 6 - r["priority"]} for r in recs],
         "entry_point": recs[0]["reason"].split("，")[0] if recs else "先建立联系了解现状",
     }
@@ -134,6 +149,7 @@ def _script_fallback(lead: Any) -> str:
     recs = recommend_products(
         whatsapp_hit=lead.whatsapp_hit,
         whatsapp_url=lead.whatsapp_url,
+        whatsapp_numbers=list(getattr(lead, "whatsapp_numbers", None) or []),
         whatsapp_job=lead.whatsapp_job,
         scenes=lead.scenes,
         saas_signals=lead.saas_signals,
@@ -141,9 +157,12 @@ def _script_fallback(lead: Any) -> str:
         sources=lead.sources,
     )
     top = recs[0]["name"] if recs else "WhatsApp 商业化解决方案"
+    uses_wa = bool(
+        lead.whatsapp_hit or lead.whatsapp_url or (getattr(lead, "whatsapp_numbers", None) or [])
+    )
     return (
         f"您好！注意到贵司（{lead.name}）正在服务海外市场"
-        f"{'，官网已提供 WhatsApp 入口' if (lead.whatsapp_hit or lead.whatsapp_url) else ''}。"
+        f"{'，已提供 WhatsApp 联系入口' if uses_wa else ''}。"
         f"我们专注帮助出海企业统一管理 WhatsApp 客服与营销触达，{top}已在同行业客户落地。"
         "如果贵司在多客服账号管理、客户分配或营销自动化上有困扰，欢迎约 15 分钟交流，我可以发一份方案给您。"
     )

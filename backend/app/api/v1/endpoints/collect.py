@@ -144,8 +144,13 @@ async def _fill_lead_list_fields(db: SessionDep, items: list[Lead], outs: list[L
 
 
 async def _attach_three_questions(db: SessionDep, leads: list[Lead]) -> dict[int, dict]:
-    """批量为线索构建三问（一次 IN 查询取联系人，防 N+1）。返回 {lead_id: 三问}。"""
+    """批量为线索构建三问（一次 IN 查询取联系人与信号证据链，防 N+1）。
+
+    signal_urls 从 lead_signals 取 {signal_type: evidence_url}，让 why 的
+    证据 URL 指向真实发现页（meta_ad→FB 主页）而非只有行属性可回退。
+    """
     contact_map: dict[int, list[LeadContact]] = {}
+    signal_map: dict[int, dict[str, str]] = {}
     if leads:
         rows = (
             (
@@ -158,7 +163,24 @@ async def _attach_three_questions(db: SessionDep, leads: list[Lead]) -> dict[int
         )
         for c in rows:
             contact_map.setdefault(c.lead_id, []).append(c)
-    return {i.id: build_three_questions(i, contacts=contact_map.get(i.id)) for i in leads}
+        sig_rows = (
+            await db.execute(
+                select(LeadSignal.lead_id, LeadSignal.signal_type, LeadSignal.evidence_url)
+                .where(
+                    LeadSignal.lead_id.in_([i.id for i in leads]),
+                    LeadSignal.evidence_url.is_not(None),
+                )
+                .order_by(LeadSignal.id)
+            )
+        ).all()
+        for lead_id, signal_type, evidence_url in sig_rows:
+            signal_map.setdefault(lead_id, {}).setdefault(signal_type, evidence_url)
+    return {
+        i.id: build_three_questions(
+            i, contacts=contact_map.get(i.id), signal_urls=signal_map.get(i.id)
+        )
+        for i in leads
+    }
 
 
 @router.get("/leads", response_model=ResponseModel[PageResponse[LeadOut]], summary="线索列表")
@@ -234,7 +256,7 @@ async def create_lead(db: SessionDep, _user: CurrentUser, payload: LeadCreate):
         website=payload.website,
         email=payload.email,
     )
-    lead, _ = await upsert_lead(db, draft)
+    lead, _ = await upsert_lead(db, draft, auto_contact=False)
     await db.commit()
     # 合并路径 UPDATE 后 updated_at（server onupdate）处于 expired 状态，
     # 直接 model_validate 会触发懒加载 IO → MissingGreenlet 422。显式刷新。
@@ -276,7 +298,9 @@ async def import_leads(db: SessionDep, user: CurrentUser, payload: LeadImportPay
         header = {c: i for i, c in enumerate(first)}
         rows = rows[1:]
     else:
-        header = {c: i for i, c in enumerate(("name", "website", "phone", "country", "city", "industry"))}
+        header = {
+            c: i for i, c in enumerate(("name", "website", "phone", "country", "city", "industry"))
+        }
     if not rows:
         raise BusinessError(code=40001, message="CSV 没有数据行（只有表头或空行）")
 
@@ -290,7 +314,6 @@ async def import_leads(db: SessionDep, user: CurrentUser, payload: LeadImportPay
         return v or None
 
     for idx, row in enumerate(rows, start=1):
-
         name = _col(row, "name")
         if not name:
             result.skipped += 1
@@ -400,7 +423,11 @@ async def export_leads(
                     for it in (lead.score_breakdown or {}).get("items", [])
                 )
             elif key == "contacts_count":
-                value = len(contact_lines.get(lead.id, "").split("; ")) if contact_lines.get(lead.id) else 0
+                value = (
+                    len(contact_lines.get(lead.id, "").split("; "))
+                    if contact_lines.get(lead.id)
+                    else 0
+                )
             elif key == "contacts_summary":
                 value = contact_lines.get(lead.id, "")
             elif key == "recommended_products":
@@ -409,6 +436,7 @@ async def export_leads(
                     for r in recommend_products(
                         whatsapp_hit=lead.whatsapp_hit,
                         whatsapp_url=lead.whatsapp_url,
+                        whatsapp_numbers=lead.whatsapp_numbers,
                         whatsapp_job=lead.whatsapp_job,
                         scenes=lead.scenes,
                         saas_signals=lead.saas_signals,
@@ -454,6 +482,7 @@ async def export_leads(
             if value is None:
                 return ""
             return str(value)
+
         return _cell
 
     selected_set = set(selected)
@@ -475,10 +504,8 @@ async def export_leads(
                 break
             name_map = await _user_display_map(db, {i.owner_id for i in chunk})
             contact_lines: dict[int, str] = {}
-            rows = (
-                await db.execute(
-                    select(LeadContact).where(LeadContact.lead_id.in_([i.id for i in chunk]))
-                )
+            rows = await db.execute(
+                select(LeadContact).where(LeadContact.lead_id.in_([i.id for i in chunk]))
             )
             grouped: dict[int, list[str]] = {}
             for c in rows.scalars():
@@ -562,15 +589,19 @@ async def daily_batch_endpoint(db: SessionDep, user: CurrentUser):
 
     today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
 
-    # 今日等级变化事件 → 新晋 S/A（内存过滤 payload，事件量级小）
+    # 今日等级变化事件 → 新晋 S/A（内存过滤 payload，事件量级小）；
+    # 不设 limit——2026-09-01 裁决「质量门槛内不设数量上限」，当日事件天然有界
     ev_rows = (
-        await db.execute(
-            select(LeadEvent)
-            .where(LeadEvent.event_type == "grade_change", LeadEvent.created_at >= today)
-            .order_by(LeadEvent.created_at.desc())
-            .limit(500)
+        (
+            await db.execute(
+                select(LeadEvent)
+                .where(LeadEvent.event_type == "grade_change", LeadEvent.created_at >= today)
+                .order_by(LeadEvent.created_at.desc())
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     promoted_ids: list[int] = []
     for ev in ev_rows:
         new_g = (ev.payload or {}).get("new")
@@ -614,41 +645,57 @@ async def daily_batch_endpoint(db: SessionDep, user: CurrentUser):
     new_conds = _base_conds() + [Lead.created_at >= today]
     if promoted_set:
         new_conds.append(Lead.id.notin_(promoted_set))
+    # 不设 limit（2026-09-01 裁决：质量门槛内越多越好）；当日新增天然有界
     new_leads = list(
+        (await db.execute(select(Lead).where(*new_conds).order_by(Lead.score.desc())))
+        .scalars()
+        .all()
+    )
+
+    # 预警切片：数据权限与 promoted/new 同口径（FR-9 今日商机强制过滤），
+    # ICP 门同预警中心；不设 limit（当日预警事件天然有界）
+    from sqlalchemy import or_ as _or
+
+    alert_conds = [
+        LeadEvent.is_alert,
+        LeadEvent.created_at >= today,
+        Lead.icp_status.notin_(("foreign", "non_buyer")),
+    ]
+    if scope_ids is not None:
+        visible = Lead.owner_id.in_(scope_ids)
+        if include_unassigned:
+            visible = _or(Lead.owner_id.is_(None), visible)
+        alert_conds.append(visible)
+    alert_rows = (
         (
             await db.execute(
-                select(Lead).where(*new_conds).order_by(Lead.score.desc()).limit(200)
+                select(LeadEvent)
+                .join(Lead, LeadEvent.lead_id == Lead.id)
+                .where(*alert_conds)
+                .order_by(LeadEvent.created_at.desc())
             )
         )
         .scalars()
         .all()
     )
-
-    alert_rows = (
-        await db.execute(
-            select(LeadEvent)
-            .join(Lead, LeadEvent.lead_id == Lead.id)
-            .where(
-                LeadEvent.is_alert,
-                LeadEvent.created_at >= today,
-                Lead.icp_status.notin_(("foreign", "non_buyer")),
-            )
-            .order_by(LeadEvent.created_at.desc())
-            .limit(100)
-        )
-    ).scalars().all()
     name_map = {i.id: i.name for i in [*promoted, *new_leads]}
     missing = {ev.lead_id for ev in alert_rows} - set(name_map)
+    alert_extra: list[Lead] = []
     if missing:
-        for row in (await db.execute(select(Lead.id, Lead.name).where(Lead.id.in_(missing)))).all():
-            name_map[row.id] = row.name
+        # 预警切片的线索也要过三问齐备门槛（FR-6：三问齐备才入批）——
+        # 取完整行参与 _attach_three_questions
+        alert_extra = list(
+            (await db.execute(select(Lead).where(Lead.id.in_(missing)))).scalars().all()
+        )
+        for i in alert_extra:
+            name_map[i.id] = i.name
 
     outs_promoted = [LeadOut.model_validate(i) for i in promoted]
     outs_new = [LeadOut.model_validate(i) for i in new_leads]
     await _fill_lead_list_fields(db, promoted, outs_promoted)
     await _fill_lead_list_fields(db, new_leads, outs_new)
 
-    tq_map = await _attach_three_questions(db, [*promoted, *new_leads])
+    tq_map = await _attach_three_questions(db, [*promoted, *new_leads, *alert_extra])
     # 齐备门槛（spec §七）：不齐备的行不进今日商机
     rows_promoted = [
         {**o.model_dump(mode="json"), "three_questions": tq_map[o.id]}
@@ -675,6 +722,7 @@ async def daily_batch_endpoint(db: SessionDep, user: CurrentUser):
                     "created_at": ev.created_at.isoformat(),
                 }
                 for ev in alert_rows
+                if tq_map.get(ev.lead_id, {}).get("complete")
             ],
         }
     )
@@ -763,12 +811,18 @@ async def get_lead_detail(db: SessionDep, user: CurrentUser, lead_id: int):
         saas_signals=lead.saas_signals,
         sources=lead.sources,
     )
-    # 三问（spec §六）：为什么需要你 / 应该卖什么 / 应该找谁
-    out.three_questions = build_three_questions(lead, contacts=contacts)
     # 信号体系（§4.2/§4.3/§4.1）：出海/招聘/广告信号 + 证据链
     from app.collectors.icp import cn_evidence_of_lead
     from app.crud.lead_signals import SIGNAL_TYPE_LABELS_ZH, list_signals
 
+    signal_rows = await list_signals(db, lead_id)
+    # 三问（spec §六）：为什么需要你 / 应该卖什么 / 应该找谁——
+    # why 证据 URL 优先取信号证据链（meta_ad → FB 主页等真实发现页）
+    _signal_urls: dict[str, str] = {}
+    for r in signal_rows:
+        if r.evidence_url:
+            _signal_urls.setdefault(r.signal_type, r.evidence_url)
+    out.three_questions = build_three_questions(lead, contacts=contacts, signal_urls=_signal_urls)
     out.overseas_signals = dict(lead.overseas_signals or {})
     out.score_breakdown = dict(lead.score_breakdown or {})
     out.wa_business = bool(lead.wa_business)
@@ -777,7 +831,6 @@ async def get_lead_detail(db: SessionDep, user: CurrentUser, lead_id: int):
     out.last_ad_at = lead.last_ad_at
     out.cn_evidence = cn_evidence_of_lead(lead)
     out.enrich_fail = (lead.field_meta or {}).get("enrich_fail")
-    signal_rows = await list_signals(db, lead_id)
 
     def _stale_days(last_seen: datetime | None) -> int | None:
         """距最近复现天数（SQLite naive datetime 按 UTC 补齐）。"""
@@ -822,14 +875,14 @@ async def list_lead_events(
     await _get_visible_lead(db, lead_id, user)
     base = select(LeadEvent).where(LeadEvent.lead_id == lead_id)
     total = (
-        await db.execute(select(func.count()).select_from(LeadEvent).where(LeadEvent.lead_id == lead_id))
+        await db.execute(
+            select(func.count()).select_from(LeadEvent).where(LeadEvent.lead_id == lead_id)
+        )
     ).scalar_one()
     items = list(
         (
             await db.execute(
-                base.order_by(LeadEvent.id.desc())
-                .offset((page - 1) * page_size)
-                .limit(page_size)
+                base.order_by(LeadEvent.id.desc()).offset((page - 1) * page_size).limit(page_size)
             )
         )
         .scalars()
@@ -866,7 +919,9 @@ async def _get_visible_lead(db: SessionDep, lead_id: int, user: User) -> Lead:
 )
 async def list_lead_contacts(db: SessionDep, user: CurrentUser, lead_id: int):
     await _get_visible_lead(db, lead_id, user)
-    return ResponseModel(data=[ContactOut.model_validate(c) for c in await list_contacts(db, lead_id)])
+    return ResponseModel(
+        data=[ContactOut.model_validate(c) for c in await list_contacts(db, lead_id)]
+    )
 
 
 @router.post(
@@ -907,9 +962,7 @@ async def update_lead_contact(
     response_model=ResponseModel[None],
     summary="删除联系人",
 )
-async def delete_lead_contact(
-    db: SessionDep, user: CurrentUser, lead_id: int, contact_id: int
-):
+async def delete_lead_contact(db: SessionDep, user: CurrentUser, lead_id: int, contact_id: int):
     lead = await _get_visible_lead(db, lead_id, user)
     contact = await get_contact(db, lead_id, contact_id)
     if contact is None:
@@ -1001,7 +1054,9 @@ async def claim_lead_endpoint(
     ).scalar_one_or_none()
     if claimed is None:
         await db.refresh(lead)
-        other = (await _user_display_map(db, {lead.owner_id})).get(lead.owner_id) or f"#{lead.owner_id}"
+        other = (await _user_display_map(db, {lead.owner_id})).get(
+            lead.owner_id
+        ) or f"#{lead.owner_id}"
         raise BusinessError(code=40001, message=f"该线索已由 {other} 跟进（撞单保护）")
     await db.refresh(lead)  # 拿回 UPDATE 后的行状态
     if not was_mine:
@@ -1092,7 +1147,7 @@ async def enrich_all(db: SessionDep, user: CurrentUser):
         TaskCreate(
             collector="website_enrich",
             name="手动全库富化",
-            params={"discover_limit": 500},
+            params={},
         ).model_dump()
         | {"is_implicit": True, "created_by": user.id},
     )
@@ -1134,9 +1189,7 @@ async def check_whatsapp(db: SessionDep, user: CurrentUser, payload: LeadCheckWh
 async def follow_options(db: SessionDep, _user: CurrentUser):
     rows = (
         await db.execute(
-            select(User.id, User.nickname, User.username)
-            .where(User.is_active)
-            .order_by(User.id)
+            select(User.id, User.nickname, User.username).where(User.is_active).order_by(User.id)
         )
     ).all()
     return ResponseModel(
@@ -1174,7 +1227,11 @@ async def create_follow_up(
 
     # 终态保护（2026-08-31 审计）：won/invalid 是成交回传与无效判定的唯一数据源，
     # 普通操作不可改出（月度成交统计会被一次误操作污染）；主管可显式纠正
-    if lead.follow_status in ("won", "invalid") and payload.status != lead.follow_status and not has_assign:
+    if (
+        lead.follow_status in ("won", "invalid")
+        and payload.status != lead.follow_status
+        and not has_assign
+    ):
         label = "已成交" if lead.follow_status == "won" else "已标记无效"
         raise BusinessError(
             code=40001,
@@ -1249,14 +1306,22 @@ async def get_collectors(_user: CurrentUser):
     return ResponseModel(data=[CollectorInfo(**c) for c in list_collectors()])
 
 
-@router.get("/geo-options", response_model=ResponseModel[dict], summary="国家/城市选项（表单联动数据源）")
+@router.get(
+    "/geo-options", response_model=ResponseModel[dict], summary="国家/城市选项（表单联动数据源）"
+)
 async def get_geo_options(_user: CurrentUser):
     from app.collectors.base import CITY_OPTIONS_BY_COUNTRY, COUNTRY_OPTIONS
 
-    return ResponseModel(data={"countries": COUNTRY_OPTIONS, "cities_by_country": CITY_OPTIONS_BY_COUNTRY})
+    return ResponseModel(
+        data={"countries": COUNTRY_OPTIONS, "cities_by_country": CITY_OPTIONS_BY_COUNTRY}
+    )
 
 
-@router.get("/industries", response_model=ResponseModel[list[dict]], summary="线索行业选项（库存 distinct，筛选数据源）")
+@router.get(
+    "/industries",
+    response_model=ResponseModel[list[dict]],
+    summary="线索行业选项（库存 distinct，筛选数据源）",
+)
 async def lead_industries(db: SessionDep, _user: CurrentUser):
     """行业筛选下拉的数据源：直接取库里实际存在的 industry 值。
 
@@ -1445,9 +1510,7 @@ async def collect_stats(db: SessionDep, _user: CurrentUser):
         await db.execute(select(func.count()).select_from(Lead).where(Lead.score >= 40))
     ).scalar_one()
     # 等级分布：S/A/B/C（销售优先级口径）
-    grade_rows = (
-        await db.execute(select(Lead.grade, func.count()).group_by(Lead.grade))
-    ).all()
+    grade_rows = (await db.execute(select(Lead.grade, func.count()).group_by(Lead.grade))).all()
     grade_counts = {g: 0 for g in ("S", "A", "B", "C")}
     for g, cnt in grade_rows:
         grade_counts[g] = cnt
@@ -1460,9 +1523,7 @@ async def collect_stats(db: SessionDep, _user: CurrentUser):
     ).scalar_one()
     # 跟进维度：从未跟进的（共享池待认领）+ 约定回访时间已到期的
     pending_follow = (
-        await db.execute(
-            select(func.count()).select_from(Lead).where(Lead.follow_status.is_(None))
-        )
+        await db.execute(select(func.count()).select_from(Lead).where(Lead.follow_status.is_(None)))
     ).scalar_one()
     due_follow = (
         await db.execute(
@@ -1499,8 +1560,11 @@ async def collect_stats(db: SessionDep, _user: CurrentUser):
     ).scalar_one()
     month_won = (
         await db.execute(
-            select(func.count()).select_from(Lead).where(
-                Lead.follow_status == "won", Lead.last_followed_at.is_not(None),
+            select(func.count())
+            .select_from(Lead)
+            .where(
+                Lead.follow_status == "won",
+                Lead.last_followed_at.is_not(None),
                 Lead.last_followed_at >= month_start,
             )
         )

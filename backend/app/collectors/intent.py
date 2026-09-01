@@ -15,16 +15,35 @@ from app.collectors.recommend import detect_need_types, recommend_products
 from app.collectors.scenes import SAAS_LABELS_ZH, SCENE_LABELS_ZH
 
 
-def _evidence_url(lead: Any, key: str) -> str | None:
+def _evidence_url(lead: Any, key: str, signal_urls: dict[str, str] | None = None) -> str | None:
+    """信号键 → 可点开核对的证据 URL（§1：每 1 分意向分可溯源到一条可核查证据）。
+
+    优先取 lead_signals 证据链（signal_urls：signal_type → evidence_url，如
+    meta_ad→FB 主页），行属性次之（website/whatsapp_url/job_urls）——富化类
+    信号都检自官网，website 即证据现场。
+    """
+    sig = signal_urls or {}
     job_urls = list(getattr(lead, "job_urls", None) or [])
     if key == "site_whatsapp":
-        return getattr(lead, "whatsapp_url", None)
+        return getattr(lead, "whatsapp_url", None) or sig.get("whatsapp_link")
     if key in ("wa_ops_job", "overseas_cs_job", "crm_job"):
-        return job_urls[0] if job_urls else None
+        return (job_urls[0] if job_urls else None) or sig.get("job_signal")
     if key in ("overseas_biz", "overseas_site"):
         return getattr(lead, "website", None)
     if key == "ctwa_ad":
-        return getattr(lead, "website", None) or getattr(lead, "whatsapp_url", None)
+        return (
+            sig.get("fb_whatsapp")
+            or getattr(lead, "website", None)
+            or getattr(lead, "whatsapp_url", None)
+        )
+    if key == "meta_ads_running":
+        return sig.get("meta_ad") or getattr(lead, "website", None)
+    # wa_bsp_competitor / wa_business / saas_buying / three_markets / social_active
+    # —— 全部是富化检测信号，证据现场就是官网
+    if key in ("wa_bsp_competitor", "wa_business", "saas_buying", "three_markets", "social_active"):
+        return getattr(lead, "website", None)
+    if key == "multi_numbers":
+        return getattr(lead, "whatsapp_url", None) or getattr(lead, "website", None)
     return None
 
 
@@ -34,8 +53,20 @@ def _evidence_url(lead: Any, key: str) -> str | None:
 _ROLE_RULES: list[tuple[tuple[str, ...], str, str]] = [
     (("wa_ops",), "WhatsApp/私域运营负责人", "在招 WhatsApp 运营岗 → 招聘页/官网联系页"),
     (("overseas_cs",), "海外客服负责人", "在招海外/英文客服岗 → 招聘页/官网联系页"),
-    (("crm", "crm_ops", "helpdesk", "chatbot", "ai_service", "marketing_automation", "omnichannel", "brand_stack"),
-     "CRM/客服系统负责人", "检测到 SaaS 工具栈或 CRM 招聘 → 官网联系页/招聘页"),
+    (
+        (
+            "crm",
+            "crm_ops",
+            "helpdesk",
+            "chatbot",
+            "ai_service",
+            "marketing_automation",
+            "omnichannel",
+            "brand_stack",
+        ),
+        "CRM/客服系统负责人",
+        "检测到 SaaS 工具栈或 CRM 招聘 → 官网联系页/招聘页",
+    ),
 ]
 _FB_ROLE = ("海外营销负责人", "FB 主页挂 WhatsApp 私域 → FB 主页/官网联系页")
 _FALLBACK_ROLE = ("海外业务负责人", "官网联系页 / 招聘页")
@@ -71,8 +102,17 @@ def _top_contacts(contacts: Sequence[Any] | None) -> list[dict[str, Any]]:
     return items[:3]
 
 
-def build_three_questions(lead: Any, *, contacts: Sequence[Any] | None = None) -> dict[str, Any]:
-    """行属性 + 联系人 → 三问结构（详见模块 docstring / spec §六）。"""
+def build_three_questions(
+    lead: Any,
+    *,
+    contacts: Sequence[Any] | None = None,
+    signal_urls: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """行属性 + 联系人 → 三问结构（详见模块 docstring / spec §六）。
+
+    signal_urls：lead_signals 证据链映射 {signal_type: evidence_url}，
+    有 DB 会话的调用方传入可让 why 证据指到 FB 主页等真实发现页。
+    """
     breakdown = getattr(lead, "score_breakdown", None) or {}
     items = sorted(
         breakdown.get("items", []),
@@ -83,7 +123,7 @@ def build_three_questions(lead: Any, *, contacts: Sequence[Any] | None = None) -
             "key": it["key"],
             "label": it.get("label", it["key"]),
             "points": int(it.get("points", 0)),
-            "evidence_url": _evidence_url(lead, it["key"]),
+            "evidence_url": _evidence_url(lead, it["key"], signal_urls),
         }
         for it in items[:3]
     ]

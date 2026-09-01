@@ -30,10 +30,10 @@ os.environ["DB_TYPE"] = "sqlite"
 os.environ["SQLITE_PATH"] = str(_TEST_DB)
 # Redis：测试一律走内存限流，不依赖真实 Redis（黑名单测试按 REDIS_ENABLED 分支断言）
 os.environ["REDIS_HOST"] = ""
+# 业务种子（中国企业线索）会污染共享测试库的计数断言——测试强制关闭
+os.environ["AUTO_SEED_BUSINESS"] = "false"
 # git clone 的项目没有 .env（被 gitignore）——测试也能跑：给一个兜底密钥
-os.environ.setdefault(
-    "SECRET_KEY", "test-only-secret-key-0123456789abcdef0123456789abcdef"
-)
+os.environ.setdefault("SECRET_KEY", "test-only-secret-key-0123456789abcdef0123456789abcdef")
 
 from app.core.config import settings  # noqa: E402  必须在环境变量设置之后
 from app.db.init_db import init_db  # noqa: E402

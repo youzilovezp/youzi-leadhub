@@ -12,7 +12,10 @@ def test_results_to_drafts_filters_platforms():
         {"title": "Acme Trading 另一页", "url": "https://acme-trading.com/products"},  # 同域去重
         {"title": "Facebook", "url": "https://www.facebook.com/acme"},  # 平台域滤掉
         {"title": "Wholesale Central | Suppliers", "url": "https://alibaba.com/supplier"},  # 平台域
-        {"title": "Shenzhen Glow Tech Co Ltd", "url": "https://glowtech.com.sg/"},  # 海外 ccTLD 官网
+        {
+            "title": "Shenzhen Glow Tech Co Ltd",
+            "url": "https://glowtech.com.sg/",
+        },  # 海外 ccTLD 官网
         {"title": "", "url": "https://empty-title.com/"},  # 无标题丢弃
     ]
     drafts = results_to_drafts(items)
@@ -81,10 +84,22 @@ def test_article_pages_filtered():
     from app.collectors.web_search import results_to_drafts
 
     items = [
-        {"title": "跨境电商WhatsApp客服必备功能指南", "url": "https://www.zoho.com.cn/desk/articles/whatsapp-ticketing"},  # 标题+路径双中
-        {"title": "2026跨境电商必看：5款WhatsApp工具测评", "url": "https://www.163.com/dy/article/ABC.html"},  # 标题中
-        {"title": "WhatsApp运营指南", "url": "https://blog.respon.ai/zh/docs/whatsapp-guide"},  # 路径中
-        {"title": "Glow Tech Official Site", "url": "https://glowtech.com.sg/products/led-light"},  # 企业官网 ✓
+        {
+            "title": "跨境电商WhatsApp客服必备功能指南",
+            "url": "https://www.zoho.com.cn/desk/articles/whatsapp-ticketing",
+        },  # 标题+路径双中
+        {
+            "title": "2026跨境电商必看：5款WhatsApp工具测评",
+            "url": "https://www.163.com/dy/article/ABC.html",
+        },  # 标题中
+        {
+            "title": "WhatsApp运营指南",
+            "url": "https://blog.respon.ai/zh/docs/whatsapp-guide",
+        },  # 路径中
+        {
+            "title": "Glow Tech Official Site",
+            "url": "https://glowtech.com.sg/products/led-light",
+        },  # 企业官网 ✓
     ]
     drafts = results_to_drafts(items)
     assert len(drafts) == 1
@@ -181,10 +196,27 @@ def test_blocked_domains_include_cn_trade_media():
     """买家门同源黑名单：跨境媒体/社区/门户不再当企业官网入库（2026-08-31 实测漏网）。"""
     from app.collectors.web_search import _is_blocked_domain
 
-    for d in ("ikjzd.com", "wearesellers.com", "cifnews.com", "kuajingyan.com",
-              "kjtong.com", "mckinsey.com.cn", "www.cifnews.com"):
+    for d in (
+        "ikjzd.com",
+        "wearesellers.com",
+        "cifnews.com",
+        "kuajingyan.com",
+        "kjtong.com",
+        "mckinsey.com.cn",
+        "www.cifnews.com",
+    ):
         assert _is_blocked_domain(d), d
     assert not _is_blocked_domain("anker.com")
+
+
+def test_non_buyer_domains_single_source_parity():
+    """黑名单单源（2026-09-01 巡检）：web_search 入库拦截必须整包含
+    icp.NON_BUYER_DOMAINS——增补只改 icp.py 一处，防止再出现「只补一边」。"""
+    from app.collectors.icp import NON_BUYER_DOMAINS
+    from app.collectors.web_search import _NON_SITE_DOMAINS
+
+    blocked = set(_NON_SITE_DOMAINS)
+    assert set(NON_BUYER_DOMAINS) <= blocked
 
 
 def test_dictionary_pages_filtered_as_content():

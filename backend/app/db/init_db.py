@@ -18,6 +18,7 @@
 Alembic 用**子进程**调用：避免 alembic 的 logging/signal 副作用污染
 uvicorn lifespan 的 asynccontextmanager（直接 in-process 调用会卡 yield）。
 """
+
 import asyncio
 from pathlib import Path
 
@@ -132,7 +133,7 @@ def _diagnose_alembic_error(output: str) -> str:
             "     SQLite：删 backend/data/app.db 后重启后端\n"
             "   （⚠️ 清库操作；backups/ 有备份先 make restore 恢复）"
         )
-    if "near \"alter\"" in text or "alter" in text and "syntax error" in text:
+    if 'near "alter"' in text or "alter" in text and "syntax error" in text:
         return (
             "❌ SQLite 不支持直接 ALTER 改列类型。\n"
             "   解决（开发库）：make backup 后删 backend/data/app.db，改完 model 重启重建；\n"
@@ -145,16 +146,12 @@ def _diagnose_alembic_error(output: str) -> str:
             "          （Docker 起本项目独立 PG，全自动建用户/库，最省事）\n"
             "   或：在本机 PG 里创建 .env 对应的用户/库（需会用 psql）：\n"
             "        create user \"<POSTGRES_USER>\" with password '<POSTGRES_PASSWORD>';\n"
-            "        create database \"<POSTGRES_DB>\" owner \"<POSTGRES_USER>\";\n"
+            '        create database "<POSTGRES_DB>" owner "<POSTGRES_USER>";\n'
             "   或：项目重新生成后旧 Docker 卷密码不匹配 →\n"
             "        make stop && docker compose down --volumes && make start\n"
             "        （⚠️ 清空该卷数据；backups/ 有备份可恢复）"
         )
-    if (
-        "could not connect" in text
-        or "connection refused" in text
-        or "operationalerror" in text
-    ):
+    if "could not connect" in text or "connection refused" in text or "operationalerror" in text:
         return (
             "❌ 数据库连接失败。请检查：\n"
             "   1. 中间件是否启动？`make start`（会优先复用本机已运行的 PG/Redis）\n"
@@ -190,6 +187,72 @@ DEMO_USERS = [
     ("alice", "李爱丽丝", "alice@example.com", "sales", "Demo@123"),
     ("bob", "王伯伯", "bob@example.com", "sales", "Demo@123"),
 ]
+
+
+async def seed_business_data() -> None:
+    """业务种子（2026-09-01，导出自 dev 库终态池）：其他电脑首次启动导入。
+
+    只初始化一次：leads 表非空直接跳过——已有任何线索的库（跑过采集/
+    导入过种子）绝不触碰；导入走 upsert_lead（与采集器同路径），dedupe_key/
+    评分/ICP 状态在新机器上自动重算。cron 采集任务按 collector 判存在。
+    """
+    from sqlalchemy import func as sa_func
+
+    from app.collectors.base import LeadDraft
+    from app.crud.lead import upsert_lead
+    from app.db.seed_data import SEED_LEAD_COUNT, SEED_PAYLOAD
+    from app.models.collect_task import CollectTask
+    from app.models.lead import Lead
+
+    if not getattr(settings, "AUTO_SEED_BUSINESS", True):
+        logger.info("⏭️  AUTO_SEED_BUSINESS=false，跳过业务种子")
+        return
+
+    async with async_session() as session:
+        existing = (await session.execute(select(sa_func.count()).select_from(Lead))).scalar_one()
+        if existing > 0:
+            logger.info(f"⏭️  业务种子跳过：leads 已有 {existing} 条（只初始化一次）")
+            return
+
+        from datetime import datetime, timezone
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        created = merged = 0
+        for row in SEED_PAYLOAD["leads"]:
+            sources = row.get("sources") or ["seed_import"]
+            payload = {k: v for k, v in row.items() if k != "sources"}
+            draft = LeadDraft(source=sources[0], **payload)
+            lead, is_new = await upsert_lead(session, draft)
+            if lead is None:  # create_if_missing 默认开，防御性兜底
+                continue
+            # 多来源行（历史上 jobui 与种子合并过）直接追加来源记录——
+            # 不再走第二次 upsert（空 draft 会造出重复行）
+            recs = list(lead.sources or [])
+            for extra in sources[1:]:
+                if not any(r.get("source") == extra for r in recs):
+                    recs.append({"source": extra, "first_seen": now_iso, "last_seen": now_iso})
+            if len(recs) != len(lead.sources or []):
+                lead.sources = recs
+            created += int(is_new)
+            merged += int(not is_new)
+        await session.commit()
+        logger.info(f"🌱 业务种子导入：{created} 新建 / {merged} 合并（共 {SEED_LEAD_COUNT} 条）")
+
+        # cron 采集任务：同 collector 已有任务则不重建
+        for t in SEED_PAYLOAD.get("tasks", []):
+            stmt = select(CollectTask).where(CollectTask.collector == t["collector"])
+            if (await session.execute(stmt)).scalar_one_or_none() is not None:
+                continue
+            session.add(
+                CollectTask(
+                    name=t["name"],
+                    collector=t["collector"],
+                    params=t.get("params") or {},
+                    cron_expr=t.get("cron_expr"),
+                )
+            )
+        await session.commit()
+        logger.info("🌱 采集任务种子完成（按 collector 判存在）")
 
 
 async def create_initial_data() -> None:
@@ -238,9 +301,7 @@ async def create_initial_data() -> None:
             )
             session.add(admin)
             await session.commit()
-            logger.info(
-                f"✅ 默认管理员已创建：{settings.INITIAL_ADMIN_USERNAME}"
-            )
+            logger.info(f"✅ 默认管理员已创建：{settings.INITIAL_ADMIN_USERNAME}")
             if settings.APP_ENV != "prod":
                 logger.warning(
                     f"🔑 默认管理员密码：{settings.INITIAL_ADMIN_PASSWORD}"
@@ -271,9 +332,7 @@ async def create_initial_data() -> None:
                 )
                 session.add(user)
             await session.commit()
-            logger.info(
-                "✅ demo 用户已创建：manager / alice / bob（仅 dev 环境；生产跳过）"
-            )
+            logger.info("✅ demo 用户已创建：manager / alice / bob（仅 dev 环境；生产跳过）")
         else:
             logger.info("⏭️  跳过 demo 用户创建（生产环境或 AUTO_SEED_DATA=false）")
 
@@ -343,7 +402,9 @@ async def init_db() -> None:
         elif await _tables_missing_but_versioned():
             # 陷阱场景：alembic_version 存在但业务表没了（如空库直接 upgrade 过 /
             # 手动 drop 过表）。upgrade 分支只会空转，API 全 500 且无提示。
-            logger.warning("⚠️ 检测到 alembic_version 存在但 users 表缺失——降级为 create_all 重建表结构（原数据已丢失，如有备份可 make restore 恢复）")
+            logger.warning(
+                "⚠️ 检测到 alembic_version 存在但 users 表缺失——降级为 create_all 重建表结构（原数据已丢失，如有备份可 make restore 恢复）"
+            )
             try:
                 await create_tables()
                 # 重建后必须重新 stamp：否则版本行指向的迁移与实际表结构错位
@@ -359,4 +420,12 @@ async def init_db() -> None:
         try:
             await create_initial_data()
         except Exception as exc:
-            logger.warning(_diag_once(_diagnose_alembic_error(f"初始数据写入失败 {type(exc).__name__}: {exc}")))
+            logger.warning(
+                _diag_once(_diagnose_alembic_error(f"初始数据写入失败 {type(exc).__name__}: {exc}"))
+            )
+        # 业务种子（FR-10）：leads 表为空时一次性导入线索 + 三类定时任务，
+        # 默认开；测试环境由 conftest 强制关闭
+        try:
+            await seed_business_data()
+        except Exception as exc:
+            logger.warning(f"业务种子导入失败（不阻塞启动）{type(exc).__name__}: {exc}")
