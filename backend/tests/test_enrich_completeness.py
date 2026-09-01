@@ -174,10 +174,11 @@ async def test_clear_mismatched_website_purges_wrong_site_data(db_session):
     await db_session.commit()
     assert lead.email and lead.website
 
-    await _clear_mismatched_website(lead.id, "https://kugou.com", "酷狗音乐", session=db_session)
+    lead_id = lead.id  # expire 前缓存：expire 后访问 lead.id 触发懒加载
+    await _clear_mismatched_website(lead_id, "https://kugou.com", "酷狗音乐", session=db_session)
     await db_session.commit()
     db_session.expire_all()
-    got = await db_session.get(Lead, lead.id)
+    got = await db_session.get(Lead, lead_id)
     await db_session.refresh(got)  # commit 后属性访问会触发懒加载 MissingGreenlet
     assert got.website is None and got.domain is None
     assert got.email is None and got.phone_e164 is None
@@ -185,7 +186,7 @@ async def test_clear_mismatched_website_purges_wrong_site_data(db_session):
     left = (await db_session.execute(
         select(LeadContact).where(LeadContact.lead_id == got.id)
     )).scalars().all()
-    assert left == []
+    assert left == []  # draft 落库建的联系人（source=web_search）也必须连坐删除
     assert got.field_meta["website"]["source"] == "mismatch_clear"
     await _delete_tree(db_session, got.id)
 
@@ -225,3 +226,16 @@ def test_phone_rank_prefers_landline_over_400():
     html = "<p>售后热线：400-800-5919 招商热线：400-800-3756 联系电话：0755-86668868</p>"
     phones = detect_text_phones([html])
     assert "0755-86668868" in phones and "400-800-5919" in phones
+
+
+def test_site_matches_company_short_brand_identity():
+    """归属 v2（呜噜网实测）：标题=短中文品牌（≤6字）且与公司名零重叠 → 错配；
+    长口号标题/英文品牌站不触发（防误杀）。"""
+    from app.collectors.website_enrich import site_matches_company
+
+    assert site_matches_company("<title>呜噜网</title>", "上海冠天国际贸易有限公司")[0] is False
+    assert site_matches_company("<title>汉典</title>", "宸星体育用品公司")[0] is False
+    # 不触发：英文品牌站（零重叠但合法）、长口号标题、名-站一致
+    assert site_matches_company("<title>MU Group: China's first supply</title>", "宁波凯越集团")[0] is True
+    assert site_matches_company("<title>高端全屋五金系统解决方案专家_国际一线</title>", "东泰五金")[0] is True
+    assert site_matches_company("<title>凯迪仕智能锁</title>", "凯迪仕")[0] is True
