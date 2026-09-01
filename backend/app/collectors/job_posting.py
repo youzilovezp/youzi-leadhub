@@ -258,7 +258,10 @@ class JobPostingCollector(Collector):
     async def run(self, ctx: TaskContext) -> None:
         site = str(ctx.params.get("site") or "jobui").strip()
         cfg = SITE_CONFIGS[site]
-        keywords = split_csv(str(ctx.params.get("keywords"))) or ["whatsapp"]
+        # 空关键词兜底用中文岗位词——英文单词在站内搜索被模糊匹配稀释跑偏
+        # （2026-08-31 实测「whatsapp运营」联想到 UI 设计师；2026-09-01 审计
+        # 兜底 ["whatsapp"] 与自述口径矛盾）
+        keywords = split_csv(str(ctx.params.get("keywords"))) or ["跨境电商客服"]
         # 巡检模式（默认）：只给库内已有公司补招聘信号（career_site 同款口径）；
         # 『发现新线索』开关打开后才作为新线索来源建行
         discover = str(ctx.params.get("discover_new") or "false").lower() in ("1", "true", "yes")

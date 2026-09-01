@@ -129,6 +129,28 @@ def test_detect_saas_signals_wa_bsp():
     assert "wa_bsp" not in detect_saas_signals([clean])
 
 
+def test_detect_saas_signals_raw_boundary():
+    """raw 指纹左右边界（2026-09-01 富化层审计实测复现）：裸子串会把
+    hummingbird.com 命中 bird.com、snowdrift.com 命中 drift.com —— wa_bsp
+    一命中就是 +30 意向分，误报直接抬等级污染三问。"""
+    from app.collectors.scenes import detect_saas_signals
+
+    # 误报面：无关域名的子串不算竞品
+    for html in (
+        '<a href="https://hummingbird.com">hummingbird</a>',
+        '<a href="https://blackbird.com">blackbird</a>',
+        '<a href="https://snowdrift.com">snowdrift</a>',
+        "<p>please wait in line</p><p>swift response</p>",
+    ):
+        assert "wa_bsp" not in detect_saas_signals([html]), html
+        assert "brand_stack" not in detect_saas_signals([html]), html
+    # 真指纹面：script/链接里的品牌域仍命中
+    sig = detect_saas_signals(
+        ['<script src="https://cdn.bird.com/widget.js"></script><script src="https://js.drift.com/x.js"></script>']
+    )
+    assert sig.get("wa_bsp") == 1 and sig.get("brand_stack") == 1
+
+
 def test_detect_social_youtube():
     """YouTube 频道链接进社媒。"""
     from app.collectors.website_enrich import detect_social

@@ -200,10 +200,10 @@ SAAS_SIGNALS: list[tuple[str, str, list[str]]] = [
         [
             "intercom",
             "gorgias",
-            "zdassets",       # Zendesk widget CDN
+            "zdassets",  # Zendesk widget CDN
             "zendesk",
             "hubspot",
-            "hs-scripts",     # HubSpot 埋点
+            "hs-scripts",  # HubSpot 埋点
             "salesforce",
             "zoho",
             "freshdesk",
@@ -253,6 +253,21 @@ def _keyword_hit(text: str, keyword: str) -> bool:
     return re.search(rf"\b{re.escape(keyword)}\b", text) is not None
 
 
+# raw HTML 指纹匹配的边界正则缓存：左右都不贴字母数字（域名结构里的 ./-
+# 允许）——裸子串会把 hummingbird.com 命中 bird.com、snowdrift.com 命中
+# drift.com（2026-09-01 富化层审计实测复现），wa_bsp 误报即 +30 意向分
+_RAW_BOUNDARY_RES: dict[str, re.Pattern[str]] = {}
+
+
+def _raw_keyword_in(raw: str, keyword: str) -> bool:
+    """raw HTML 里的品牌指纹命中（带左右边界）。"""
+    pat = _RAW_BOUNDARY_RES.get(keyword)
+    if pat is None:
+        pat = re.compile(rf"(?<![a-z0-9]){re.escape(keyword)}(?![a-z0-9])")
+        _RAW_BOUNDARY_RES[keyword] = pat
+    return pat.search(raw) is not None
+
+
 def page_text(html_list: list[str] | list[str | None] | None, *, keep_case: bool = False) -> str:
     """多页 HTML → 纯文本：剥 script/style → 剥标签 → 反转义 → 压空白。
 
@@ -274,7 +289,11 @@ def detect_scenes(html_list: list[str] | None) -> list[str]:
     text = page_text(html_list)
     if not text:
         return []
-    return [scene for scene, keywords in SCENE_KEYWORDS.items() if any(_keyword_hit(text, kw) for kw in keywords)]
+    return [
+        scene
+        for scene, keywords in SCENE_KEYWORDS.items()
+        if any(_keyword_hit(text, kw) for kw in keywords)
+    ]
 
 
 def detect_saas_signals(html_list: list[str] | None) -> dict[str, int]:
@@ -295,9 +314,10 @@ def detect_saas_signals(html_list: list[str] | None) -> dict[str, int]:
         for kw in keywords:
             if text and _keyword_hit(text, kw):
                 count += 1
-            elif key in ("wa_bsp", "brand_stack") and kw in raw:
-                # raw 子串匹配的取舍：域名形指纹（wati.io/zdassets/drift.com）
-                # 本身独特，直接子串；普通品牌词以 .com 等域名锚定，防裸词误报
+            elif key in ("wa_bsp", "brand_stack") and _raw_keyword_in(raw, kw):
+                # raw 匹配的取舍：域名形指纹（wati.io/zdassets/drift.com）本身
+                # 独特，但**必须带左右边界**——裸子串会把 hummingbird.com 命中
+                # bird.com（实测复现，误报即 +30 意向分）
                 count += 1
         if count:
             hits[key] = count
