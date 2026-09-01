@@ -99,9 +99,7 @@ def score_lead_inputs(
     # 信号（+30），强度里再叠加会双计，扣除后判定「其余类目」是否成规模
     from app.collectors.scenes import SAAS_CATEGORY_POINTS
 
-    saas_strength_ex_bsp = sum(
-        SAAS_CATEGORY_POINTS.get(k, 0) for k in saas_keys if k != "wa_bsp"
-    )
+    saas_strength_ex_bsp = sum(SAAS_CATEGORY_POINTS.get(k, 0) for k in saas_keys if k != "wa_bsp")
 
     matched: dict[str, bool] = {
         "ctwa_ad": ctwa,
@@ -151,6 +149,11 @@ def apply_score(
     评分 / ICP 门 / export_type 同点派生的架构不变。
     """
     old_score = lead.score
+    # whatsapp_job 语义自愈下沉（2026-09-01 审计）：True 只在 wa_ops 证据在场时
+    # 成立——此前自愈只在合并路径（crud/lead），新建/全库重评不治存量脏 True
+    # （+30 虚分永久保留）。所有评分入口都过 apply_score，在此收敛单一口径。
+    if lead.whatsapp_job and "wa_ops" not in (lead.job_signals or {}):
+        lead.whatsapp_job = False
     total, items, grade = score_lead_inputs(
         fb_whatsapp=lead.fb_whatsapp,
         website=lead.website,

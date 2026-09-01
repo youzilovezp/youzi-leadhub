@@ -7,7 +7,10 @@
     - WhatsApp 场景（客服/营销/交易/SaaS）与 SaaS 需求信号（CRM/工单/Chatbot…）
       的关键词识别（collectors/scenes.py）
     - 抓到公开邮箱 → 自动生成「待补全」联系人（crud/contact.py）
-    - 每站点最多 3 个请求（首页 + 2 个联系页）
+    - 请求预算：首页 ≤4 次（双通道+换 scheme+宽松 SSL，反爬站再加指纹/渲染
+      兜底）；内页 ≤3 页与首页同等待遇（联系类失败上指纹层，SPA 壳上渲染层）；
+      首页无联系页时探测惯例路径（≤16 个，命中即止）；全部落空才取 ≤2 个同域
+      首页链接兜底（老式 asp-bin 站）
     - 24h 跳过以成功为准：只在富化成功时写 enriched_at，失败/超时下次重跑
 
 任务范围（文档定的）：params.lead_ids 指定（列表勾选入口）；不指定 = 全库
@@ -49,16 +52,19 @@ _TIMEOUT = httpx.Timeout(15.0, connect=10.0)
 
 # WhatsApp 指纹：直链 + 常见 WordPress/SAAS 聊天插件特征串
 _WHATSAPP_PATTERNS = [
-    re.compile(p, re.IGNORECASE)
-    for p in (
-        r"(?:https?://)?wa\.me/(\+?\d{6,15})",
-        # send 链接的三个子域形态：api（插件标准）/ wp（短链跳转）/ web（人工从
-        # WhatsApp 里复制的分享链接——2026-09-01 实测 mugroup.com 漏检根因：
-        # web 子域没覆盖，导致 hit=True 却捕获不到号码，wa_url/号码/自动联系人全空）
+    re.compile(r"(?:https?://)?wa\.me/(\+?\d{6,15})", re.IGNORECASE),
+    # send 链接的三个子域形态：api（插件标准）/ wp（短链跳转）/ web（人工从
+    # WhatsApp 里复制的分享链接——2026-09-01 实测 mugroup.com 漏检根因：
+    # web 子域没覆盖，导致 hit=True 却捕获不到号码，wa_url/号码/自动联系人全空）
+    re.compile(
         r"(?:https?://)?(?:api|web|wp)\.whatsapp\.com/send[^\s\"'<>]*?phone=(\+?\d{6,15})",
-        r"whatsapp[^a-z0-9]{0,20}(?:send|chat|message)",
-        r"(?:ht-ctc|joinchat|getbutton|chaty|elfsight|click-to-chat|whatsapp-chat)",
-    )
+        re.IGNORECASE,
+    ),
+    re.compile(r"whatsapp[^a-z0-9]{0,20}(?:send|chat|message)", re.IGNORECASE),
+    # 插件 token 恒小写 + 词边界，**大小写敏感**：裸词会打中驼峰标识符——
+    # ecovacs.com 实锤 `captchaType` 含 chaTy / `getButtonType` 含 getbutton /
+    # `joinChat()`，误评 site_whatsapp +25（2026-09-01 探针实证）
+    re.compile(r"\b(?:ht-ctc|joinchat|getbutton|chaty|elfsight|click-to-chat|whatsapp-chat)\b"),
 ]
 # 群组邀请链接（PRD §4.1）：chat.whatsapp.com/xxx = 已在运营 WhatsApp 社群（私域证据）
 _GROUP_LINK_RE = re.compile(r"https?://chat\.whatsapp\.com/[A-Za-z0-9_-]{5,}")
@@ -160,11 +166,21 @@ _CONTACT_PERSON_TEL_RE = re.compile(
     r"(?:\s*(?P<wechat>微信同号|微信号同号))?",
     re.I,
 )
-# 不是人名的词（客服/电话/致电…）——第 5 形态没有「联系人：」锚，靠词表防误判
+# 不是人名的词（客服/电话/致电…）——第 5 形态没有「联系人：」锚，靠词表防误判。
+# 职务词（经理/主管…）不进这里（search 语义会误杀「张经理」），裸职务由
+# _CONTACT_TITLE_WORD_RE 全词匹配兜住（2026-09-01 审计：name=「经理」的假联系人）
 _CONTACT_NAME_JUNK_RE = re.compile(
     r"客服|电话|咨询|联系|我们|热线|致电|服务|销售|商务|市场|技术|支持|微信|同号"
     r"|邮箱|地址|传真|时间|工作|更多|详情|留言|提交|tel|phone|mobile|contact|wa$|^qq",
     re.I,
+)
+_CONTACT_TITLE_WORDS = "经理|主管|总监|部长|负责人|专员|助理|课长|组长|队长"
+_CONTACT_TITLE_WORD_RE = re.compile(rf"^(?:{_CONTACT_TITLE_WORDS})$")
+# 「部门+姓+职务」连写（商务部张经理）修复：贪婪 ctx 吃掉姓、name 落到裸职务
+# 词或被 keyword 撕碎（销售张总监 联系电话→name=联系）——ctx 尾部两种形态都
+# 把「姓+职务」还给人名
+_CTX_TITLE_TAIL_RE = re.compile(
+    rf"^(?P<rest>.*?)(?P<surname>[一-鿿])(?P<title>{_CONTACT_TITLE_WORDS})$"
 )
 
 
@@ -212,8 +228,20 @@ def detect_contact_persons(html_list: list[str]) -> list[dict[str, str]]:
             m.group("wechat"),
         )
         digits = _norm_cn_mobile(phone)
-        # 词表里的客服/电话类词不是人名；ctx 混入 微信/同号 等残留时丢弃
-        if not digits or _CONTACT_NAME_JUNK_RE.search(name):
+        # 「部门+姓+职务」连写修复：name 是裸职务词/被 keyword 撕碎（=junk）时，
+        # 看 ctx 尾——「姓+职务」整体（销售张总监）或只剩姓（商务部张+经理）
+        if ctx and (_CONTACT_NAME_JUNK_RE.search(name) or _CONTACT_TITLE_WORD_RE.fullmatch(name)):
+            mt = _CTX_TITLE_TAIL_RE.match(ctx)
+            if mt:
+                name, ctx = mt["surname"] + mt["title"], mt["rest"].strip()
+            elif _CONTACT_TITLE_WORD_RE.fullmatch(name):
+                name, ctx = ctx[-1] + name, ctx[:-1].strip()
+        # 词表里的客服/电话类词与裸职务词不是人名；ctx 混入 微信/同号 等残留时丢弃
+        if (
+            not digits
+            or _CONTACT_NAME_JUNK_RE.search(name)
+            or _CONTACT_TITLE_WORD_RE.fullmatch(name)
+        ):
             continue
         if any(w in ctx for w in ("微信", "同号", "电话", "联系")):
             ctx = ""
@@ -440,6 +468,23 @@ _INNER_PAGE_WORDS_RE = re.compile(
 _MAX_INNER_PAGES = 3
 
 
+def _page_key(url: str) -> str:
+    """内页去重键：www 剥离 + 尾斜杠归一 + query 保留。
+
+    mugroup.com 实测：首页同时挂 www.mugroup.com/who-we-are/ 与
+    mugroup.com/who-we-are/ 两个写法，字符串去重认不出同页——白烧 3 个
+    内页名额之一（2026-09-01 探针实证）。
+    """
+    try:
+        u = httpx.URL(url)
+    except Exception:  # noqa: BLE001  病态 URL 原样参与比较
+        return url
+    host = (u.host or "").removeprefix("www.")
+    path = (u.path or "").rstrip("/")
+    query = f"?{u.query.decode()}" if u.query else ""
+    return f"{host}{path}{query}"
+
+
 def find_inner_page_urls(homepage_html: str, base_url: str, base_domain: str | None) -> list[str]:
     """首页 HTML → 同域内页 URL 列表（≤_MAX_INNER_PAGES，联系页优先）。
 
@@ -448,9 +493,11 @@ def find_inner_page_urls(homepage_html: str, base_url: str, base_domain: str | N
     （contact/联系/关于/faq）优先于产品类（product/shop/店铺）——
     2026-09-01 TMO 实测：导航栏产品/服务链接在 DOM 里先出现，旧的先到先得
     + 3 页上限把 /contact/ 挤掉，电话全漏（联系方式是富化的第一产出）。
+    www 变体按 _page_key 归一去重（同页两个写法只占一个名额）。
     """
     priority: list[str] = []
     secondary: list[str] = []
+    seen = {_page_key(base_url)}
     for m in _INNER_ANCHOR_RE.finditer(homepage_html or ""):
         href, text = m.group(1), m.group(2)
         contact_hit = _INNER_CONTACT_WORDS_RE.search(href) or _INNER_CONTACT_WORDS_RE.search(text)
@@ -458,12 +505,46 @@ def find_inner_page_urls(homepage_html: str, base_url: str, base_domain: str | N
         if not contact_hit and not page_hit:
             continue
         url = _resolve_url(base_url, href)
-        if not url or url in priority or url in secondary:
+        if not url:
+            continue
+        key = _page_key(url)
+        if key in seen:
             continue
         if extract_domain(url) != base_domain:
             continue
+        seen.add(key)
         (priority if contact_hit else secondary).append(url)
     return (priority + secondary)[:_MAX_INNER_PAGES]
+
+
+def find_wildcard_page_urls(
+    homepage_html: str, base_url: str, base_domain: str | None, limit: int = 2
+) -> list[str]:
+    """联系/产品词都够不着的站点 → 首页同域普通链接兜底（≤limit 个）。
+
+    2026-09-01 laifen.com（汕头莱芬）实测：2000 年代老式站把联系信息放在
+    asp-bin/GB/?page=1 这类无关键词 query 页，内页词表与惯例路径探测全落空
+    ——联系方式恰在目标客群（工厂/制造商）的高发站型上。只取同域、排除
+    静态资源与首页自身，预算受 limit 约束。
+    """
+    out: list[str] = []
+    seen = {_page_key(base_url)}
+    for m in _INNER_ANCHOR_RE.finditer(homepage_html or ""):
+        url = _resolve_url(base_url, m.group(1))
+        if not url:
+            continue
+        if extract_domain(url) != base_domain:
+            continue
+        key = _page_key(url)
+        if key in seen:
+            continue
+        if any(key.split("?")[0].lower().endswith(ext) for ext in _ASSET_EXT):
+            continue
+        seen.add(key)
+        out.append(url)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def _classify_httpx_error(exc: Exception) -> str:
@@ -496,7 +577,11 @@ async def _fetch_detailed(client: httpx.AsyncClient, url: str) -> tuple[str | No
         return None, _classify_httpx_error(exc)
     if resp.status_code != 200:
         return None, f"HTTP {resp.status_code}"
-    return resp.text, None
+    # 按字节 + header/meta charset 解码（GBK 站防线），不信 httpx 的默认 utf-8
+    return (
+        _decode_html(resp.content, _charset_from_content_type(resp.headers.get("content-type"))),
+        None,
+    )
 
 
 # 采集 client 双通道（与 meta_ads / web_search 同策略）：
@@ -505,6 +590,42 @@ async def _fetch_detailed(client: httpx.AsyncClient, url: str) -> tuple[str | No
 # - 兜底通道强制直连 + 宽松 SSL（防代理对目标站软拦截返回 202 的误报，
 #   primal.com.ph 案例；证书过期的小站也能抓）
 _SSL_LOOSE_CLIENT_ARGS = {"verify": False, "trust_env": False}
+
+# ── HTML 字节 → 文本的解码（GBK 站防线，laifen.com 实锤）───────────────────
+# Content-Type 不带 charset 时 httpx 默认 utf-8，而中国工厂/制造商站（核心
+# ICP）大量是 gb2312/gbk —— 整页乱码会让中文锚文本联系页、CJK 判 CN、中文
+# 具名联系人/地址全部失效。浏览器语义：header charset 优先，缺省再看
+# <meta charset> 声明，最后 utf-8 容错。
+_META_CHARSET_RE = re.compile(rb"""<meta[^>]+charset\s*=\s*["']?\s*([a-zA-Z0-9_-]+)""", re.I)
+# gb2312 是 gb18030 的子集，统一按超集解码（生僻字不炸、字数不变）
+_CHARSET_ALIAS = {"gb2312": "gb18030", "gbk": "gb18030"}
+
+
+def _decode_html(content: bytes, header_charset: str | None) -> str:
+    """响应字节 → 文本。header_charset 来自 Content-Type（httpx 的 resp.charset）。"""
+    for cs in (header_charset,):
+        if cs:
+            cs = _CHARSET_ALIAS.get(cs.lower(), cs.lower())
+            try:
+                return content.decode(cs)
+            except (LookupError, UnicodeDecodeError):
+                pass
+    m = _META_CHARSET_RE.search(content[:4096])
+    if m:
+        cs = m.group(1).decode("ascii", errors="ignore").lower()
+        cs = _CHARSET_ALIAS.get(cs, cs)
+        try:
+            return content.decode(cs)
+        except (LookupError, UnicodeDecodeError):
+            pass
+    return content.decode("utf-8", errors="replace")
+
+
+def _charset_from_content_type(content_type: str | None) -> str | None:
+    """Content-Type 头 → charset 参数（无则 None）。"""
+    if not content_type or "charset=" not in content_type.lower():
+        return None
+    return content_type.split("charset=", 1)[1].split(";", 1)[0].strip().strip("'\"") or None
 
 
 def _make_client(**kwargs: Any) -> httpx.AsyncClient:
@@ -634,7 +755,9 @@ def detect_email(
     pages = [html] if isinstance(html, str) else list(html)
     for page in pages:
         for m in re.finditer(r'href=["\']mailto:([^"\'>]+)', page or "", re.I):
-            addr = m.group(1).strip()
+            # mailto 可带 ?subject= 等 query（fullmatch 会把整串当地址丢掉，
+            # 白白失去 mailto 优先语义——先剥 query 再校验）
+            addr = m.group(1).split("?", 1)[0].strip()
             if _is_email(addr):
                 return addr
     if mailto_only:
@@ -699,24 +822,30 @@ class WebsiteEnrichCollector(Collector):
         # 未装 [collect] 可选依赖时静默降级（日志说明一次）。
         browser = None
         render_note_logged = False
+        # 懒启动锁：富化并发（默认 5）下多个站点同时进渲染兜底会各启一个
+        # Chromium，后者覆盖前者且永不关闭（进程泄漏）——双检锁收敛为单实例
+        browser_lock = asyncio.Lock()
 
         async def get_browser():
             nonlocal browser, render_note_logged
             if browser is not None:
                 return browser
-            try:
-                from playwright.async_api import async_playwright
-            except ImportError:
-                if not render_note_logged:
-                    render_note_logged = True
-                    await ctx.log(
-                        "info",
-                        "浏览器渲染兜底不可用（装 playwright 可抓反爬大站）：pip install '.[collect]'",
-                    )
-                return None
-            pw = await async_playwright().start()
-            browser = await pw.chromium.launch(headless=True)
-            return browser
+            async with browser_lock:
+                if browser is not None:  # 等锁期间别人已启动
+                    return browser
+                try:
+                    from playwright.async_api import async_playwright
+                except ImportError:
+                    if not render_note_logged:
+                        render_note_logged = True
+                        await ctx.log(
+                            "info",
+                            "浏览器渲染兜底不可用（装 playwright 可抓反爬大站）：pip install '.[collect]'",
+                        )
+                    return None
+                pw = await async_playwright().start()
+                browser = await pw.chromium.launch(headless=True)
+                return browser
 
         # 两个 client：正常（代理优先）+ 宽松 SSL 直连兜底（证书过期的小站常见）
         async with _make_client() as client, _make_client(**_SSL_LOOSE_CLIENT_ARGS) as loose:
@@ -953,9 +1082,11 @@ def _discovery_cooldown(meta: dict | None, now: datetime | None = None) -> bool:
 
     没有负缓存时：发现失败的线索分数不变，永远占着「分数倒序前 N」的窗口，
     排在后面的线索饿死（2026-08-31 巡检：191 家 backlog 下覆盖率会永久卡住）。
+    mismatch_clear（错配清除）同样进冷却——否则下一轮「公司名 官网」搜索
+    大概率再搜回同一错站，「写入→富化→判错清除」每轮空转烧搜索配额。
     """
     w = (meta or {}).get("website") or {}
-    if w.get("source") not in ("web_discovery_miss", "web_discovery_dup"):
+    if w.get("source") not in ("web_discovery_miss", "web_discovery_dup", "mismatch_clear"):
         return False
     try:
         tried = datetime.fromisoformat(str(w.get("updated_at")))
@@ -970,7 +1101,10 @@ async def _load_discoverable(session: AsyncSession, limit: int) -> list[tuple[in
 
     多取 3 倍候选，内存里滤掉冷却中的（失败/撞域名 7 天内不再消耗搜索配额）；
     SQL 侧不比较 JSON——PG json 类型无 = 操作符。
+    终态（won/invalid）与富化范围同口径排除（FR-1.5「非终态」；NULL 放行）。
     """
+    from sqlalchemy import or_
+
     from app.models.lead import Lead
 
     rows = (
@@ -979,6 +1113,7 @@ async def _load_discoverable(session: AsyncSession, limit: int) -> list[tuple[in
             .where(
                 (Lead.website.is_(None)) | (Lead.website == ""),
                 Lead.icp_status.notin_(("foreign", "non_buyer")),
+                or_(Lead.follow_status.is_(None), Lead.follow_status.notin_(["won", "invalid"])),
             )
             .order_by(Lead.score.desc())
             .limit(limit * 3 + 30)
@@ -1068,8 +1203,13 @@ async def _fetch_impersonated(url: str) -> tuple[str | None, str | None]:
     try:
         async with AsyncSession(impersonate="chrome", timeout=20) as s:
             resp = await s.get(url)
-            if resp.status_code == 200 and len(resp.text) > 500:
-                return resp.text, None
+            if resp.status_code == 200 and len(resp.content) > 500:
+                return (
+                    _decode_html(
+                        resp.content, _charset_from_content_type(resp.headers.get("content-type"))
+                    ),
+                    None,
+                )
             if resp.status_code != 200:
                 return None, f"指纹层 HTTP {resp.status_code}"
             return None, "指纹层内容过短"
@@ -1157,18 +1297,28 @@ async def _clear_mismatched_website(
         lead.email = None
         lead.phone_raw = None
         lead.phone_e164 = None
-        lead.whatsapp_hit = False
-        lead.whatsapp_url = None
-        lead.whatsapp_numbers = []
-        lead.fb_whatsapp = False
+        # WA 字段按来源分流（2026-09-01 审计）：whatsapp_url/hit/numbers 是双源
+        # 字段——官网富化写的清；meta_ads 主页探测写的（field_meta 有来源）是
+        # FB 主页数据、与错站无关，保留（fb_whatsapp/CTWA 证据同理）
+        wa_source = (lead.field_meta or {}).get("whatsapp_url", {}).get("source")
+        if wa_source != "meta_ads":
+            lead.whatsapp_hit = False
+            lead.whatsapp_url = None
+            lead.whatsapp_numbers = []
         lead.wa_business = False
         lead.scenes = []
         lead.saas_signals = {}
         lead.overseas_signals = {}
         lead.social = {}
         # 信号证据链（lead_signals）同样产自错站——一并清，否则详情页证据卡
-        # 仍展示错站的 WA/出海证据（FR-5.1「全部信号全清」）
-        await session.execute(_delete(LeadSignal).where(LeadSignal.lead_id == lead_id))
+        # 仍展示错站的 WA/出海证据（FR-5.1「全部信号全清」）；meta_ads 来源的
+        # 信号（FB 主页探测/在投广告）不是错站数据，保留
+        await session.execute(
+            _delete(LeadSignal).where(
+                LeadSignal.lead_id == lead_id,
+                LeadSignal.source != "meta_ads",
+            )
+        )
         # 身份键回退「无官网」状态：domain: 键失效（否则官网发现再找到真身时
         # 会反向并入这条错配行），tel 已清 → namecity 兜底
         from app.collectors.normalize import make_dedupe_key as _mk_key
@@ -1186,6 +1336,10 @@ async def _clear_mismatched_website(
             ).scalar_one_or_none()
             if conflict is None:
                 lead.dedupe_key = new_key
+            else:
+                # namecity 撞键：退 raw 兜底——保留旧 domain: 键会让错站域名
+                # 再被搜到时反向并入这条已清空的行（2026-09-01 富化层审计）
+                lead.dedupe_key = f"raw:{lead.name.strip().lower()}|mismatch"
         meta = dict(lead.field_meta or {})
         meta["website"] = {
             "source": "mismatch_clear",
@@ -1196,13 +1350,13 @@ async def _clear_mismatched_website(
         lead.field_meta = meta
         # 错站来源的自动联系人全删（不限 source=website_enrich——draft 落库时
         # 建的联系人带的是采集器 source 如 web_search，2026-09-01 调试实锤）；
-        # manual 是人工录入，保留
+        # manual 人工录入与 meta_ads 主页探测的联系人不是错站数据，保留
         rows = (
             (
                 await session.execute(
                     _select(LeadContact).where(
                         LeadContact.lead_id == lead_id,
-                        LeadContact.source != "manual",
+                        LeadContact.source.notin_(("manual", "meta_ads")),
                     )
                 )
             )
@@ -1282,7 +1436,8 @@ async def _enrich_one(
     base_domain = extract_domain(base)
     inner_urls = find_inner_page_urls(homepage, base, base_domain)
     # 常规联系路径探测（2026-09-01 用户需求：每家联系页路径不一样）——首页
-    # 链接里没有联系页时（导航 JS 渲染/路径冷门），直接探惯例路径，抓到即补
+    # 链接里没有联系页时（导航 JS 渲染/路径冷门），直接探惯例路径，抓到即补；
+    # /lxwm 等老式路径是 GBK 工厂站（laifen 实测）的常见形态
     has_contact_page = any(_INNER_CONTACT_WORDS_RE.search(u) for u in inner_urls)
     if not has_contact_page:
         for path in (
@@ -1294,6 +1449,10 @@ async def _enrich_one(
             "/Contact/contact.html",
             "/lianxi",
             "/lianxiwomen",
+            "/lianxi.html",
+            "/lxwm",
+            "/lxwm.asp",
+            "/contact.asp",
             "/about",
             "/about-us",
             "/support",
@@ -1308,22 +1467,66 @@ async def _enrich_one(
                     del inner_urls[_MAX_INNER_PAGES:]
                     await ctx.log("info", f"[lead {lead_id}] 🔍 常规路径探测命中联系页：{path}")
                     break
+    if not inner_urls:
+        # 老式站兜底（2026-09-01 laifen 实测）：联系信息挂在 asp-bin/GB/?page=1
+        # 这类无关键词 query 页，词表与惯例路径全够不着——取首页同域普通链接
+        wild = find_wildcard_page_urls(homepage, base, base_domain)
+        if wild:
+            inner_urls = wild
+            await ctx.log(
+                "info",
+                f"[lead {lead_id}] 🧭 无联系/产品内页，取首页同域链接兜底：{wild}",
+            )
     pages = [homepage]
     page_urls = [base]  # 与 pages 平行：每页 HTML 对应的 URL（证据链用）
     for url in inner_urls:
         # 内页与首页同等待遇（2026-08-31 审计：此前只有主 client 单次机会——
         # 代理软拦截/证书问题的站点首页成功、联系页全挂，而 WA/邮箱恰在联系页）
         html = await _fetch_site(clients, url)
+        if html is None and _INNER_CONTACT_WORDS_RE.search(url):
+            # 联系类内页补第二层（FR-1.5「与首页同等待遇」）：httpx 打不开的
+            # 反爬站（banggood 型 403）联系方式恰在联系页，指纹层毫秒级开销
+            html, _imp_reason = await _fetch_impersonated(url)
         if html:
             pages.append(html)
             page_urls.append(url)
+
+    # 联系页 SPA 壳渲染兜底（2026-09-01 govee 实测形态）：/contact 返回 200
+    # 但是应用壳（Shopify 型），联系方式全在 JS 挂件里——整站联系方式证据为
+    # 零且存在联系类内页时，渲染该页一次（预算：每站 ≤1 次渲染）
+    contact_url = next((u for u in inner_urls if _INNER_CONTACT_WORDS_RE.search(u)), None)
+    if (
+        contact_url
+        and get_browser is not None
+        and not (
+            detect_email(pages, mailto_only=True)
+            or detect_email(pages)
+            or detect_jsonld_contacts(pages).get("email")
+            or detect_tel_phones(pages)
+            or detect_text_phones(pages)
+            or detect_contact_persons(pages)
+            or detect_whatsapp(pages)[0]
+        )
+    ):
+        browser = await get_browser()
+        if browser is not None:
+            rendered = await _render_with_browser(browser, contact_url)
+            if rendered:
+                pages.append(rendered)
+                page_urls.append(contact_url)
+                await ctx.log(
+                    "info", f"[lead {lead_id}] 🌐 联系页为 SPA 壳，渲染兜底：{contact_url}"
+                )
 
     whatsapp_hit, whatsapp_url = detect_whatsapp(pages)
     wa_numbers = detect_whatsapp_numbers(pages)
     # schema.org JSON-LD 声明的联系方式——网站主的机器可读数据，权威度高于正则启发；
     # 邮箱取值次序（FR-1.5）：mailto 显式链接 > JSON-LD 声明 > 正文正则
     jsonld = detect_jsonld_contacts(pages)
-    email = detect_email(pages, mailto_only=True) or jsonld.get("email") or detect_email(pages)
+    jsonld_email = jsonld.get("email")
+    if jsonld_email and not _is_email(jsonld_email):
+        jsonld_email = None  # JSON-LD 声明同样过埋点黑名单（模板误填不采信）
+    email = detect_email(pages, mailto_only=True) or jsonld_email or detect_email(pages)
     social = detect_social(pages)
     scenes = detect_scenes(pages)
     saas_signals = detect_saas_signals(pages)
@@ -1353,11 +1556,17 @@ async def _enrich_one(
                 lead.whatsapp_url = whatsapp_url
             # WhatsApp 检测来源=官网，置信度高（§32）
             touch_field_meta(lead, "whatsapp_url", "website_enrich", confidence=98, now=now)
-        elif before.get("whatsapp_hit"):
+        elif (
+            before.get("whatsapp_hit")
+            and (lead.field_meta or {}).get("whatsapp_url", {}).get("source") == "website_enrich"
+        ):
             # 负证据（2026-08-31 审计）：此前检测到官网 WA 入口、本轮成功抓到
             # 首页但未复现。不翻 whatsapp_hit 布尔列（历史事实保留、评分不动），
             # 只发 whatsapp_gone 事件进时间线——销售能看到"信号可能过期"，
             # 建联前先核验。此前该事件类型只有词表没有写入方，负证据闭环缺失。
+            # 来源门槛（2026-09-01 审计）：whatsapp_hit/url 也会被 meta_ads 主页
+            # 探测写入（FB 主页挂 WA ≠ 官网入口）——只有官网富化写入过的入口
+            # 消失才算「官网入口未复现」，否则 FB-WA 线索每轮都误发 gone 事件。
             from app.crud.lead_events import add_event
 
             add_event(

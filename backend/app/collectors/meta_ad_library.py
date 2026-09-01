@@ -232,12 +232,38 @@ def _extract_category(html: str) -> str | None:
     return None
 
 
+# media 词边界命中但属正当行业短语的放行表（2026-09-01 审计实测：`Social media
+# agency` 被 media 子串整页误杀，而 _FB_CATEGORY_ZH 明确把营销代理当目标行业）
+_CATEGORY_PHRASE_ALLOW = (
+    "social media",
+    "digital media",
+    "media marketing",
+    "media agency",
+    "multimedia",
+    "multi-media",
+    "new media",
+)
+
+
 def _is_company_category(category: str | None) -> bool:
-    """类目是否企业（None 拿不到类目时保守放行——登录墙页面常无类目信息）。"""
+    """类目是否企业（None 拿不到类目时保守放行——登录墙页面常无类目信息）。
+
+    中文关键词子串、ASCII 关键词整词（\\b 词边界）——裸子串会把 `Social media
+    agency` 命中 media、`auto parts` 命中 arts，整页误杀正当买家（2026-09-01
+    审计实测复现）。media 的复合行业短语（social/digital media marketing）放行。
+    """
     if not category:
         return True
     lowered = category.lower()
-    return not any(k in lowered for k in _NON_COMPANY_KEYWORDS)
+    for k in _NON_COMPANY_KEYWORDS:
+        if any("一" <= ch <= "鿿" for ch in k):
+            if k in lowered:
+                return False
+        elif re.search(rf"\b{re.escape(k)}\b", lowered):
+            if k == "media" and any(p in lowered for p in _CATEGORY_PHRASE_ALLOW):
+                continue
+            return False
+    return True
 
 
 def _extract_wa_phone(html: str) -> str | None:
@@ -419,6 +445,7 @@ class MetaAdsCollector(Collector):
                 await ctx.log("info", f"搜索广告：「{kw}」")
                 after: str | None = None
                 kw_ads = 0
+                http_ok = False  # HTTP 层成功（200）就算查询成功——零在投广告是合法结果
                 for _page in range(max_pages):
                     params: dict[str, Any] = {
                         "access_token": settings.META_ADS_ACCESS_TOKEN,
@@ -451,6 +478,7 @@ class MetaAdsCollector(Collector):
                         failed_kws.append(kw)
                         break
                     data = resp.json()
+                    http_ok = True
                     for ad in data.get("data", []):
                         pid = str(ad.get("page_id") or "")
                         if not pid:
@@ -489,12 +517,17 @@ class MetaAdsCollector(Collector):
                     if not after or not data.get("data"):
                         break
                     await asyncio.sleep(_API_DELAY)
-                if kw_ads:
+                if http_ok:
+                    # 查询成功按 HTTP 层算（2026-09-01 审计：冷门词「200 但零广告」
+                    # 与真实失败共用报错——任务假失败、文案误导）
                     query_ok += 1
-                    await ctx.log(
-                        "info",
-                        f"「{kw}」命中 {kw_ads} 条在投广告，涉及 {len(seen_pages)} 个广告主（累计）",
-                    )
+                    if kw_ads:
+                        await ctx.log(
+                            "info",
+                            f"「{kw}」命中 {kw_ads} 条在投广告，涉及 {len(seen_pages)} 个广告主（累计）",
+                        )
+                    else:
+                        await ctx.log("info", f"「{kw}」查询成功，当前无在投广告")
                 ctx.inc_progress(1)
 
             if query_ok == 0:
@@ -563,6 +596,8 @@ class MetaAdsCollector(Collector):
                             await ctx.log(
                                 "info", f"跳过非企业主页：{name}（类目：{category or '未知'}）"
                             )
+                            if probe:
+                                ctx.inc_progress(1)  # 跳过也推进（否则 done<total 永不满格）
                             continue
                         if category:
                             draft.industry = _FB_CATEGORY_ZH.get(
@@ -607,6 +642,11 @@ class MetaAdsCollector(Collector):
                 try:
                     async with async_session() as session:
                         last = rec.get("last_ad_at")
+                        # 文案样本进证据链（FR-1.1「文案样本」承诺，2026-09-01 审计：
+                        # 此前 bodies 只用于 is_cn 判定就丢弃，销售看不到广告素材）
+                        sample = " / ".join(
+                            b.replace("\n", " ")[:60] for b in (rec.get("bodies") or [])[:2]
+                        )
                         await upsert_signal(
                             session,
                             lead_id,
@@ -617,6 +657,7 @@ class MetaAdsCollector(Collector):
                             evidence_raw=(
                                 f"{rec['ad_count']} 条在投（{','.join(sorted(rec.get('countries') or []))}）"
                                 + (f"，最近投放 {last:%Y-%m-%d}" if last else "")
+                                + (f"｜文案样本：{sample}" if sample else "")
                             ),
                             confidence=95,
                         )

@@ -25,7 +25,8 @@ class _CtxStub:
 
 @pytest.mark.asyncio
 async def test_whatsapp_gone_event_emitted_and_flag_kept(client, monkeypatch):
-    """复查未复现 → whatsapp_gone 事件；whatsapp_hit 保持 True（历史事实）。"""
+    """复查未复现 → whatsapp_gone 事件；whatsapp_hit 保持 True（历史事实）。
+    入口须是官网富化写入的（field_meta.whatsapp_url.source=website_enrich）。"""
     from sqlalchemy import select
 
     from app.collectors import website_enrich
@@ -40,6 +41,7 @@ async def test_whatsapp_gone_event_emitted_and_flag_kept(client, monkeypatch):
             domain="gone-test.com",
             whatsapp_hit=True,
             whatsapp_url="https://wa.me/60111222333",
+            field_meta={"whatsapp_url": {"source": "website_enrich", "confidence": 98}},
         )
         s.add(lead)
         await s.commit()
@@ -70,6 +72,53 @@ async def test_whatsapp_gone_event_emitted_and_flag_kept(client, monkeypatch):
         )
     assert len(events) == 1
     assert "未复现" in (events[0].note or "")
+
+
+@pytest.mark.asyncio
+async def test_no_gone_event_when_whatsapp_from_meta_ads(client, monkeypatch):
+    """来源门槛（2026-09-01 审计）：whatsapp_hit/url 也由 meta_ads 主页探测写入
+    （FB 主页挂 WA ≠ 官网入口）——非官网富化写入的入口不发 gone 事件，
+    否则 FB-WA 线索每轮富化都误报「官网入口消失」。"""
+    from sqlalchemy import select
+
+    from app.collectors import website_enrich
+    from app.db.session import async_session
+    from app.models.lead import Lead, LeadEvent
+
+    async with async_session() as s:
+        lead = Lead(
+            name="主页WA测试公司",
+            dedupe_key="domain:fb-wa-test.com",
+            website="https://fb-wa-test.com",
+            domain="fb-wa-test.com",
+            whatsapp_hit=True,
+            whatsapp_url="https://wa.me/60333444555",
+            field_meta={"whatsapp_url": {"source": "meta_ads", "confidence": 90}},
+        )
+        s.add(lead)
+        await s.commit()
+        lead_id = lead.id
+
+    async def fake_fetch_site(clients, url):  # noqa: ARG001
+        return _HOME_WITHOUT_WA, []
+
+    monkeypatch.setattr(website_enrich, "_fetch_site_detailed", fake_fetch_site)
+    ok, _reason = await website_enrich._enrich_one((None, None), _CtxStub(), lead_id, "https://fb-wa-test.com", None)  # noqa: SLF001
+    assert ok is True
+
+    async with async_session() as s:
+        events = (
+            (
+                await s.execute(
+                    select(LeadEvent).where(
+                        LeadEvent.lead_id == lead_id, LeadEvent.event_type == "whatsapp_gone"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert events == []
 
 
 @pytest.mark.asyncio

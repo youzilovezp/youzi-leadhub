@@ -227,8 +227,17 @@ class CareerSiteCollector(Collector):
                         job_signals=signals,
                         job_urls=[career_url],
                     )
-                    new_lead_id, _created = await ctx.emit(draft)
+                    new_lead_id, _created = await ctx.emit(draft, create_if_missing=False)
                     from app.crud.lead_signals import upsert_signal
+
+                    if new_lead_id is None:
+                        # 巡检语义（FR-1.4「不产生新线索」）：身份列未命中 = 线索
+                        # 可能已删/键漂移——只记警告，不建行（2026-09-01 审计 GAP：
+                        # 此前漏传开关，键漂移时会静默建新行稀释库）
+                        await ctx.log("warn", f"[{name}] 招聘信号未找到对应线索，跳过：{career_url}")
+                        ctx.inc_progress(1)
+                        await asyncio.sleep(_GAP)
+                        continue
 
                     async with async_session() as session:
                         for sig_key, meta in signals.items():

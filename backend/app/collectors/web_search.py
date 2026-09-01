@@ -629,13 +629,14 @@ class WebSearchCollector(Collector):
                     for d in drafts:
                         await ctx.emit(d)
                     if items:
-                        # 滤因透明化：产出少时操作者能看到是平台域/内容页/同域重复滤掉的
+                        # 滤因透明化：产出少时操作者能看到是平台域/内容页/同域重复/泛标题滤掉的
                         cn_n = sum(1 for d in drafts if d.is_cn)
                         await ctx.log(
                             "info",
                             f"「{kw}」{len(items)} 条结果 → {len(drafts)} 个企业官网种子"
                             f"（滤 平台/社媒域 {fstats['platform_domain']} · 内容页 {fstats['article_page']}"
-                            f" · 同域重复 {fstats['dup_domain']}；标中国企业 {cn_n}）",
+                            f" · 同域重复 {fstats['dup_domain']}"
+                            f" · 泛标题 {fstats.get('generic_title', 0)}；标中国企业 {cn_n}）",
                         )
                 ctx.inc_progress(1)
                 # 引擎礼貌间隔：必应对频繁新建连接敏感，间隔拉长

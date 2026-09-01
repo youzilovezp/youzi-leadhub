@@ -137,6 +137,26 @@ def test_detect_whatsapp_plugin_fingerprint():
     assert hit and url is None
 
 
+def test_detect_whatsapp_plugin_fingerprint_word_boundary():
+    """插件指纹词必须有词边界：裸 chaty/getbutton/joinchat 会打中任意驼峰
+    标识符的子串——ecovacs.com 实锤 `captchaType` 含 chaTy、`getButtonType`
+    含 getbutton，误评 +25 site_whatsapp（2026-09-01 探针实证）。"""
+    # 误报面：标识符内子串不算挂件
+    for html in (
+        '<script>captchaType="esa"</script>',
+        "var x = getButtonType(1);",
+        "function joinChat(channel) {}",
+    ):
+        assert detect_whatsapp([html]) == (False, None), html
+    # 真挂件面：独立词（class 名 / URL 段 / 连字符组合）仍命中
+    for html in (
+        '<div class="chaty chaty-widget"></div>',
+        '<script src="/wp-content/plugins/chaty/js/chaty-app.js"></script>',
+        '<a class="joinchat-btn"></a>',
+    ):
+        assert detect_whatsapp([html])[0] is True, html
+
+
 def test_detect_email_and_social():
     assert detect_email(HTML) == "sales@acme.com"
     social = detect_social([HTML])
@@ -158,6 +178,26 @@ def test_detect_whatsapp_negative():
 
 
 # ---------- 富化抓取：client 必须无视系统代理（primal.com.ph 症状回归） ----------
+
+
+def test_decode_html_respects_meta_charset():
+    """GBK 站解码（laifen.com 实锤）：Content-Type 无 charset + meta gb2312，
+    httpx 默认 utf-8 会整页乱码——中文锚文本/CJK 判 CN/具名联系人全失效。"""
+    from app.collectors.website_enrich import _decode_html
+
+    body = "<html><head><meta charset='gb2312'><title>汕头实业</title></head><body>联系我们 0755-1234567</body></html>"
+    raw = body.encode("gb2312")
+    # header 无 charset → 认 meta 声明
+    assert "汕头实业" in _decode_html(raw, None)
+    assert "联系我们" in _decode_html(raw, None)
+    # header 有 charset 优先
+    assert "汕头实业" in _decode_html(body.encode("utf-8"), "utf-8")
+    # 双缺省 → utf-8 容错
+    assert "abc" in _decode_html(b"<html>abc</html>", None)
+    # gb2312 内容按 gb18030 超集解（生僻字不炸）
+    assert "汕头" in _decode_html("<p>汕头</p>".encode("gb18030"), "gb2312")
+    # 未知编码名回退 utf-8 不抛
+    assert _decode_html(b"<html>x</html>", "not-a-charset").startswith("<html>")
 
 
 async def test_fetch_falls_back_to_direct_when_proxy_dead(monkeypatch):

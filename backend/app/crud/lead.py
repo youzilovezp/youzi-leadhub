@@ -420,7 +420,11 @@ async def _merge_into(
             existing.whatsapp_url = draft.whatsapp_url
     if draft.whatsapp_job:
         existing.whatsapp_job = True
-    if draft.is_cn or (draft.country or "").upper() == "CN":
+    # CN 证据与新建路径同源（2026-09-01 审计：合并路径漏 +86 口径，is_cn 列取值
+    # 依赖行的创建顺序——同一 draft 新建得 True、合并进旧行得 False）
+    if has_cn_evidence(
+        is_cn=draft.is_cn, country=draft.country, phone_e164=phone_e164 or existing.phone_e164
+    ):
         existing.is_cn = True  # 布尔 OR：任一来源命中即认为是中国出海特征
     if draft.fb_whatsapp:
         existing.fb_whatsapp = True

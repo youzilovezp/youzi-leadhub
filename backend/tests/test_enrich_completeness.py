@@ -111,6 +111,43 @@ def test_inner_pages_prioritize_contact_over_product():
     assert len(inner) <= 3
 
 
+def test_inner_pages_www_variant_dedup():
+    """www 变体归一去重（2026-09-01 mugroup 探针实证）：首页同挂
+    www.x.com/who-we-are/ 与 x.com/who-we-are/ 两个写法——同页不得占两个
+    内页名额（3 页上限会被白烧，挤掉真正的第三页）。"""
+    from app.collectors.website_enrich import find_inner_page_urls
+
+    home = """
+    <nav>
+      <a href="https://www.deduptest.com/who-we-are/">About</a>
+      <a href="https://deduptest.com/who-we-are/">About</a>
+      <a href="/contact/">Contact</a>
+      <a href="/products/">Products</a>
+    </nav>
+    """
+    inner = find_inner_page_urls(home, "https://deduptest.com/", "deduptest.com")
+    keys = {u.split("deduptest.com")[-1].rstrip("/") for u in inner}
+    assert len(keys) == len(inner), f"www 变体重复入选: {inner}"
+    assert len(inner) == 3  # who-we-are(一席) + contact + products
+
+
+def test_wildcard_page_urls_for_archaic_sites():
+    """老式站兜底（2026-09-01 laifen 实测）：联系信息挂在 asp-bin/GB/?page=1
+    这类无关键词 query 页，词表与惯例路径全够不着——取首页同域普通链接。"""
+    from app.collectors.website_enrich import find_wildcard_page_urls
+
+    home = """
+    <a href="asp-bin/GB/gb2312.css">css</a>
+    <a href="asp-bin/GB/?page=1">中文版</a>
+    <a href="asp-bin/EN/?page=1">EN</a>
+    <a href="https://friend-link.cn/">友情链接</a>
+    """
+    urls = find_wildcard_page_urls(home, "http://wildtest.com/", "wildtest.com")
+    assert len(urls) == 2  # 同域 query 页 2 个；css 静态资源与外域友情链接排除
+    assert all("wildtest.com" in u for u in urls)
+    assert all(not u.endswith(".css") for u in urls)
+
+
 def test_detect_jsonld_contacts_schema_org():
     """JSON-LD 声明即权威（2026-09-01）：网站主写的机器可读联系方式，
     命中优先于正则启发。注：TMO/mugroup 实测页面无联系字段——本通道
@@ -224,6 +261,73 @@ async def test_clear_mismatched_website_purges_wrong_site_data(db_session):
     await _delete_tree(db_session, got.id)
 
 
+async def test_clear_mismatch_keeps_meta_ads_evidence(db_session):
+    """错配清除不误杀 meta_ads 证据（2026-09-01 审计）：FB 主页探测的 WA/
+    信号/联系人是 FB 维度数据、与错站无关——清了会丢 CTWA(+40) 并可致 ICP
+    出海证据降级（qualified→cn_domestic），错杀最高价值形态。"""
+    from sqlalchemy import select
+
+    from app.collectors.base import LeadDraft
+    from app.collectors.website_enrich import _clear_mismatched_website
+    from app.crud.contact import auto_create_from_phone
+    from app.crud.lead import upsert_lead
+    from app.db.init_db import init_db
+    from app.models.lead import Lead, LeadContact, LeadSignal
+
+    await init_db()
+
+    lead, _ = await upsert_lead(
+        db_session,
+        LeadDraft(
+            source="meta_ads",
+            name="主页证据保留测试（深圳）有限公司",
+            website="https://zdic.net",
+            is_cn=True,
+            whatsapp_url="https://wa.me/8613911112222",
+        ),
+    )
+    await db_session.flush()
+    # FB 主页探测产物：WA 联系人 + fb_whatsapp 信号（field_meta 来源=meta_ads）
+    await auto_create_from_phone(db_session, lead, "+8613911112222", source="meta_ads")
+    db_session.add(
+        LeadSignal(
+            lead_id=lead.id,
+            signal_type="fb_whatsapp",
+            value="wa.me/8613911112222",
+            source="meta_ads",
+        )
+    )
+    lead.fb_whatsapp = True
+    lead.field_meta = dict(lead.field_meta or {}, whatsapp_url={"source": "meta_ads"})
+    await db_session.commit()
+    lead_id = lead.id
+
+    await _clear_mismatched_website(lead_id, "https://zdic.net", "汉典", session=db_session)
+    await db_session.commit()
+    db_session.expire_all()
+    got = await db_session.get(Lead, lead_id)
+    await db_session.refresh(got)
+    # 错站数据照清
+    assert got.website is None and got.domain is None
+    # FB 维度证据保留
+    assert got.fb_whatsapp is True
+    assert got.whatsapp_hit is True
+    assert got.whatsapp_url == "https://wa.me/8613911112222"
+    contacts = (
+        (await db_session.execute(select(LeadContact).where(LeadContact.lead_id == lead_id)))
+        .scalars()
+        .all()
+    )
+    assert any(c.source == "meta_ads" for c in contacts)
+    sigs = (
+        (await db_session.execute(select(LeadSignal).where(LeadSignal.lead_id == lead_id)))
+        .scalars()
+        .all()
+    )
+    assert any(s.source == "meta_ads" for s in sigs)
+    await _delete_tree(db_session, got.id)
+
+
 async def _delete_tree(db_session, lead_id):
     from sqlalchemy import delete
 
@@ -300,6 +404,30 @@ def test_detect_contact_persons_name_tel_cn_name_and_junk_guard():
     assert by_name.get("李伟", {}).get("phone") == "13812345678"
     # 客服/售后服务是部门职能词不是人名——不产出具名联系人
     assert "客服" not in by_name and "售后服务" not in by_name
+
+
+def test_detect_contact_persons_dept_surname_title_shape():
+    """第 5 形态修复（2026-09-01 富化层审计实测复现）：「部门+姓+职务」连写
+    （商务部张经理 电话：…）——贪婪 ctx 把姓吃进部门、name 落到裸职务词，
+    产出名为「经理」的假联系人。修复后从 ctx 尾取回姓；裸职务+手机（无部门）
+    不产假联系人。"""
+    from app.collectors.website_enrich import detect_contact_persons
+
+    text = """
+    商务部张经理 电话：138-1234-5678
+    销售张总监 联系电话：139-1111-2222
+    海外事业部王主管 手机：137-3333-4444
+    经理 电话：136-5555-6666
+    """
+    persons = detect_contact_persons([f"<html><body>{text}</body></html>"])
+    by_name = {p["name"]: p for p in persons}
+    assert by_name.get("张经理", {}).get("phone") == "13812345678"
+    assert "商务部" in by_name.get("张经理", {}).get("title", "")
+    assert by_name.get("张总监", {}).get("phone") == "13911112222"
+    assert by_name.get("王主管", {}).get("phone") == "13733334444"
+    assert "海外事业部" in by_name.get("王主管", {}).get("title", "")
+    # 无部门的裸职务词不是人名
+    assert "经理" not in by_name
 
 
 def test_site_matches_company_short_brand_identity():
