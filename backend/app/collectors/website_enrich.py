@@ -680,14 +680,9 @@ class WebsiteEnrichCollector(Collector):
             # cn_domestic 永远升不了 qualified。仅全库扫描模式做（手动勾选是精确富化）
             discovered: list[tuple[int, str]] = []
             if not lead_ids:
-                # 全库富化允许调大发现上限（手动按钮传大值一次清完存量；
-                # 自动接力保持默认 30——搜索配额友好）
-                try:
-                    discover_limit = max(
-                        1, min(int(ctx.params.get("discover_limit") or _DISCOVER_LIMIT), 500)
-                    )
-                except (TypeError, ValueError):
-                    discover_limit = _DISCOVER_LIMIT
+                # 每轮上限固定 30（FR-1.5：搜索配额礼貌约束——想多补靠多轮，
+                # 不靠一轮放大）。3s 间隔见 _DISCOVER_GAP。
+                discover_limit = _DISCOVER_LIMIT
                 async with _session_factory()() as session:
                     candidates = await _load_discoverable(session, discover_limit)
                     from sqlalchemy import func
@@ -742,6 +737,12 @@ class WebsiteEnrichCollector(Collector):
                                 else:
                                     lead.website = ws
                                     lead.domain = dom or lead.domain
+                                    # 主键收敛 domain（FR-2.3）：发现链直接改行，
+                                    # 不升键会让行一直挂 namecity/tel 旧键——
+                                    # 后续同公司 draft 反查不中造重复
+                                    from app.crud.lead import converge_dedupe_key
+
+                                    await converge_dedupe_key(session, lead)
                                     touch_field_meta(
                                         lead,
                                         "website",

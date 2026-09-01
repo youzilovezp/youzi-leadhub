@@ -19,11 +19,13 @@
 """
 
 import asyncio
+import os
 import sys
 
 import httpx
 
-BASE = "http://localhost:8123/api/v1"
+# 守护后端默认 :8000（scripts/dev_detached.py backend）；换端口用 E2E_BASE 覆盖
+BASE = os.environ.get("E2E_BASE", "http://localhost:8000/api/v1")
 E2E_DOMAIN = "e2e-closedloop-test.com"
 E2E_NAME = "端到端闭环实测科技（杭州）有限公司"
 
@@ -60,10 +62,10 @@ async def main() -> None:
 
         async with async_session() as session:
             stale = (
-                await session.execute(
-                    sa_select(LeadModel).where(LeadModel.domain == E2E_DOMAIN)
-                )
-            ).scalars().all()
+                (await session.execute(sa_select(LeadModel).where(LeadModel.domain == E2E_DOMAIN)))
+                .scalars()
+                .all()
+            )
             for old in stale:
                 await session.delete(old)
             if stale:
@@ -102,26 +104,44 @@ async def main() -> None:
             # 证据链（与 meta_ads.run 的 emit 后写入一致）
             profile_uri = "https://facebook.com/e2e-closedloop"
             await upsert_signal(
-                session, lead.id, "meta_ad", "6 条在投（AE,GB,US）",
-                source="meta_ads", evidence_url=profile_uri,
-                evidence_raw="E2E ad creative sample", confidence=95,
+                session,
+                lead.id,
+                "meta_ad",
+                "6 条在投（AE,GB,US）",
+                source="meta_ads",
+                evidence_url=profile_uri,
+                evidence_raw="E2E ad creative sample",
+                confidence=95,
             )
             await upsert_signal(
-                session, lead.id, "fb_whatsapp", wa_numbers[0],
-                source="meta_ads", evidence_url=profile_uri,
-                evidence_raw="https://wa.me/8613911112222", confidence=90,
+                session,
+                lead.id,
+                "fb_whatsapp",
+                wa_numbers[0],
+                source="meta_ads",
+                evidence_url=profile_uri,
+                evidence_raw="https://wa.me/8613911112222",
+                confidence=90,
             )
             for n in wa_numbers:
                 await upsert_signal(
-                    session, lead.id, "whatsapp_number", n,
-                    source="meta_ads", evidence_url=profile_uri,
-                    evidence_raw=f"https://wa.me/{n}", confidence=90,
+                    session,
+                    lead.id,
+                    "whatsapp_number",
+                    n,
+                    source="meta_ads",
+                    evidence_url=profile_uri,
+                    evidence_raw=f"https://wa.me/{n}",
+                    confidence=90,
                 )
             await session.commit()
         lead_id = lead.id
         assert created
-        print(f"[2] 采集落库：lead {lead_id}，icp={lead.icp_status} score={lead.score} grade={lead.grade} "
-              f"export_type={lead.export_type} last_ad_at={bool(lead.last_ad_at)}", file=ok)
+        print(
+            f"[2] 采集落库：lead {lead_id}，icp={lead.icp_status} score={lead.score} grade={lead.grade} "
+            f"export_type={lead.export_type} last_ad_at={bool(lead.last_ad_at)}",
+            file=ok,
+        )
         assert lead.icp_status == "qualified" and lead.score >= 60
 
         # 3) 今日商机批次
@@ -130,26 +150,35 @@ async def main() -> None:
         rows = [x for x in batch["new_leads"] if x["id"] == lead_id]
         assert rows, f"e2e lead 不在今日新增高分商机切片：{batch['new_leads']}"
         row = rows[0]
-        print(f"[3] 今日商机：new_leads 命中，推荐产品={row['recommended_products']}，"
-              f"联系人数={row['contacts_count']}，job_signals={list(row.get('job_signals') or {})}，"
-              f"ad_count={row.get('ad_count')}", file=ok)
+        print(
+            f"[3] 今日商机：new_leads 命中，推荐产品={row['recommended_products']}，"
+            f"联系人数={row['contacts_count']}，job_signals={list(row.get('job_signals') or {})}，"
+            f"ad_count={row.get('ad_count')}",
+            file=ok,
+        )
         assert row["recommended_products"], "「应该卖什么」为空"
         assert "ad_count" in row, "LeadOut 缺 ad_count"
 
         # 4) 详情三问
         r = await c.get(f"/collect/leads/{lead_id}", headers=h)
         d = r.json()["data"]
-        print(f"[4] 详情三问：为什么={len(d['score_breakdown'].get('items', []))} 条加分项 / "
-              f"{len(d['signals'])} 条证据链；卖什么={len(d['recommendations'])} 条推荐+"
-              f"{len(d['need_types'])} 类需求；找谁={len(d['contacts'])} 联系人；"
-              f"AI 建议={'有' if d.get('sales_suggestion') else '无'}", file=ok)
+        print(
+            f"[4] 详情三问：为什么={len(d['score_breakdown'].get('items', []))} 条加分项 / "
+            f"{len(d['signals'])} 条证据链；卖什么={len(d['recommendations'])} 条推荐+"
+            f"{len(d['need_types'])} 类需求；找谁={len(d['contacts'])} 联系人；"
+            f"AI 建议={'有' if d.get('sales_suggestion') else '无'}",
+            file=ok,
+        )
         assert d["score_breakdown"]["items"] and d["signals"] and d["recommendations"]
 
         # 5) 领取
         r = await c.post(f"/collect/leads/{lead_id}/claim", headers=h)
         assert r.status_code == 200, r.text
         claimed = r.json()["data"]
-        print(f"[5] 领取：owner={claimed['owner_name']} follow_status={claimed['follow_status']}", file=ok)
+        print(
+            f"[5] 领取：owner={claimed['owner_name']} follow_status={claimed['follow_status']}",
+            file=ok,
+        )
         assert claimed["follow_status"] == "pending"
 
         # 6) 跟进 → 成交回传
@@ -166,14 +195,20 @@ async def main() -> None:
         )
         assert r.status_code == 200, r.text
         won = r.json()["data"]
-        print(f"[6] 跟进→成交：follow_status={won['follow_status']} last_followed_at={bool(won['last_followed_at'])}", file=ok)
+        print(
+            f"[6] 跟进→成交：follow_status={won['follow_status']} last_followed_at={bool(won['last_followed_at'])}",
+            file=ok,
+        )
         assert won["follow_status"] == "won"
 
         # 7) 统计回传
         r = await c.get("/collect/stats", headers=h)
         s = r.json()["data"]
-        print(f"[7] 统计：month_won={s['month_won_count']} icp={s['icp_counts']} "
-              f"pipeline_health={s.get('pipeline_health')}", file=ok)
+        print(
+            f"[7] 统计：month_won={s['month_won_count']} icp={s['icp_counts']} "
+            f"pipeline_health={s.get('pipeline_health')}",
+            file=ok,
+        )
         assert s["month_won_count"] >= 1 and "pipeline_health" in s
 
         # 8) 清理

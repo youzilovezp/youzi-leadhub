@@ -502,24 +502,39 @@ async def _merge_into(
     _touch_source(existing, draft.source, now)
 
     # 合并后键升级：优先 domain（新数据可能补上了官网），冲突则保留旧键
-    upgraded = make_dedupe_key(
-        website=existing.website,
-        phone_raw=existing.phone_raw,
-        phone_e164=existing.phone_e164,
-        name=existing.name,
-        city=existing.city,
-    )
-    if upgraded and upgraded != existing.dedupe_key:
-        conflict = (
-            await db.execute(
-                select(Lead.id).where(Lead.dedupe_key == upgraded, Lead.id != existing.id)
-            )
-        ).scalar_one_or_none()
-        if conflict is None:
-            existing.dedupe_key = upgraded
+    await converge_dedupe_key(db, existing)
 
     # 统一重评钩子：意向分重算 + grade 写回 + 快照 diff 发射动态事件
     await rescore_and_log(db, existing, before=before)
+
+
+async def converge_dedupe_key(db: AsyncSession, lead: Lead) -> None:
+    """按当前归一化口径重算身份键，收敛主键优先级 domain > tel > namecity。
+
+    三个使用场景（FR-2.3「合并后主键收敛 domain」的全路径覆盖）：
+    - 合并路径（新数据补上官网/电话）
+    - 官网发现写入 domain（发现链直接改行，历史上不升键 → 凯越/凯迪仕等
+      3 行有 domain 仍挂 namecity 键）
+    - 归一化口径升级后的存量重键（scripts/rekey_leads.py）
+
+    撞键（别的行已持有新键）保留旧键——避免制造幽灵同源；调用方负责 commit。
+    """
+    new_namecity = _namecity_key(lead.name, lead.city)
+    if new_namecity:
+        lead.namecity_key = new_namecity
+    new_key = make_dedupe_key(
+        website=lead.website,
+        phone_raw=lead.phone_raw,
+        phone_e164=lead.phone_e164,
+        name=lead.name,
+        city=lead.city,
+    )
+    if new_key and new_key != lead.dedupe_key:
+        conflict = (
+            await db.execute(select(Lead.id).where(Lead.dedupe_key == new_key, Lead.id != lead.id))
+        ).scalar_one_or_none()
+        if conflict is None:
+            lead.dedupe_key = new_key
 
 
 def _touch_source(lead: Lead, source: str, now: datetime) -> None:
