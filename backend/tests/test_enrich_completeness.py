@@ -447,3 +447,29 @@ def test_site_matches_company_short_brand_identity():
         is True
     )
     assert site_matches_company("<title>凯迪仕智能锁</title>", "凯迪仕")[0] is True
+
+
+async def test_probe_export_en_pages_finds_wa(monkeypatch):
+    """外销站英文页探测（2026-09-01 靶心补强）：国内站无 WA → en. 子域联系页命中。
+
+    只探零错配风险形态（en.子域/同域 /en/），页面须含联系方式才收。
+    """
+    from app.collectors import website_enrich as we
+
+    en_page = '<html><a href="https://wa.me/8613800138000">WhatsApp</a></html>'
+
+    async def fake_fetch_site(clients, url):
+        return en_page if url == "https://en.demo-factory.cn/" else None
+
+    monkeypatch.setattr(we, "_fetch_site", fake_fetch_site)
+    got = await we._probe_export_en_pages((), "https://www.demo-factory.cn/", "demo-factory.cn")
+    assert len(got) == 1 and got[0][1] == "https://en.demo-factory.cn/"
+    assert we.detect_whatsapp([got[0][0]])[0] is True
+
+    # 页面无任何联系方式 → 不收（不浪费检测预算）
+
+    async def fake_fetch_empty(clients, url):
+        return "<html><h1>Home</h1>nav only</html>"
+
+    monkeypatch.setattr(we, "_fetch_site", fake_fetch_empty)
+    assert await we._probe_export_en_pages((), "https://www.x.cn/", "x.cn") == []

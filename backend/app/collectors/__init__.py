@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from app.collectors.b2b_supplier import B2BSupplierCollector
 from app.collectors.base import Collector, LeadDraft, TaskContext
 from app.collectors.career_site import CareerSiteCollector
 from app.collectors.job_posting import JobPostingCollector
@@ -16,6 +17,7 @@ _REGISTRY: dict[str, Collector] = {
         WebSearchCollector(),
         JobPostingCollector(),
         CareerSiteCollector(),
+        B2BSupplierCollector(),
         WebsiteEnrichCollector(),
     )
 }

@@ -434,9 +434,16 @@ class MetaAdsCollector(Collector):
         ] = []  # 部分失败点名（2026-08-31 审计：限流/抖动时半截覆盖不得静默假成功）
         headers = {"User-Agent": _UA}
 
-        # 双通道：代理优先（国内网络 Meta 域直连被墙，实测直连 000），直连兜底（海外部署）
+        # 双通道：显式代理（CRAWLER_PROXY_URL，国内访问 Meta 域被墙）优先，
+        # 直连兜底（海外部署）。不再捡环境变量代理（2026-09-01 用户裁决：
+        # 爬虫不被本机 VPN 干扰——共享出口 IP 被 Meta/DDG 限流，行为不可复现）
         async with (
-            httpx.AsyncClient(headers=headers, timeout=_TIMEOUT) as via_proxy,
+            httpx.AsyncClient(
+                headers=headers,
+                timeout=_TIMEOUT,
+                trust_env=False,
+                proxy=settings.CRAWLER_PROXY_URL or None,
+            ) as via_proxy,
             httpx.AsyncClient(headers=headers, timeout=_TIMEOUT, trust_env=False) as direct,
         ):
             clients = (via_proxy, direct)

@@ -13,7 +13,7 @@ import time
 from datetime import datetime, timezone
 
 from loguru import logger
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 
 from app.collectors import get_collector
 from app.collectors.base import LeadDraft, TaskContext
@@ -35,17 +35,23 @@ class TaskRunner:
     # 进评分——这个先后依赖以前要用户自己知道并手动跑两步。改为系统承担：
     # 发现类任务成功完成 → 自动排入隐式富化复核任务（官网发现 + 分级重爬）。
 
-    _CHAIN_ENRICH_AFTER = frozenset({"web_search", "job_posting", "meta_ads"})
+    # b2b_supplier 同为发现类（2026-09-01）：B2B 目录线索的联系方式全靠
+    # 自动接力富化从官网补全——不接力等于只领名单不建联
+    _CHAIN_ENRICH_AFTER = frozenset({"web_search", "job_posting", "meta_ads", "b2b_supplier"})
 
     async def _maybe_chain_enrich(
         self, log_fn, task_id: int, collector: str, created_by: int | None
     ) -> None:
         """发现类任务完成后自动接力 website_enrich（失败不影响主任务）。
 
-        去重只看「有没有全库富化（params 为空）还在 pending/queued」——排队中的
+        去重只看「有没有全库富化（params 为空）真的即将运行」——排队中的
         那次扫描发生在本批线索入库之后，必然覆盖。刚跑完的不算数：它扫不到本次
         新增的线索（2026-08-31 修复：旧的 60 分钟时间窗口会整批漏富化）；多余的
         接力也只是分级增量的廉价空扫。勾选型（lead_ids）排队不算，它不扫全库。
+
+        cron 任务歇息在 pending（等下一次定时触发）≠ 即将运行——SCHEDULER_ENABLED=false
+        时永远不触发，把它算进「排队中」会让自动接力被永久挡掉（2026-09-01 用户
+        实报 #16 定时富化挡掉全部接力）。cron 只有真正被触发（queued）才算数。
         """
         if not settings.AUTO_CHAIN_ENRICH or collector not in self._CHAIN_ENRICH_AFTER:
             return
@@ -59,6 +65,10 @@ class TaskRunner:
                             select(CollectTask.id, CollectTask.params).where(
                                 CollectTask.collector == "website_enrich",
                                 CollectTask.status.in_(["pending", "queued"]),
+                                or_(
+                                    CollectTask.cron_expr.is_(None),
+                                    CollectTask.status == "queued",
+                                ),
                             )
                         )
                     )
@@ -70,7 +80,7 @@ class TaskRunner:
                 if full_scan is not None:
                     await log_fn(
                         "info",
-                        f"↪️ 已跳过自动富化接力（全库富化任务 #{full_scan} 排队中，会覆盖本次新增线索）",
+                        f"↪️ 已跳过自动富化接力（全库富化任务 #{full_scan} 即将运行，会覆盖本次新增线索）",
                     )
                     return
                 chained = CollectTask(

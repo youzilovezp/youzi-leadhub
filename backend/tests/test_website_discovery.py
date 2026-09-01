@@ -9,12 +9,14 @@ from app.crud.lead import upsert_lead
 
 
 async def test_discover_website_filters_and_normalizes(monkeypatch):
-    """搜索结果 → 官网：文章页被过滤、URL 归一为站点根。
+    """搜索结果 → 官网：文章页被过滤、URL 归一为站点根、候选站写前验证通过。
 
-    2026-08-31 并行改造后 _discover_website 走 search_with_fallback
-    （DDG→必应自动回退），mock 点从 _search 移到该入口。
+    2026-09-01 写前验证（用户红线「联系信息必须爬准」）：候选站首页标题/
+    域名必须含公司名特征词才写入——英文公司名的混语搜索第一结果全是
+    无关站（实测 nps.gov / aargauhotels.ch 污染）。
     """
     from app.collectors import web_search
+    from app.collectors import website_enrich as we
 
     async def fake_search(clients, kw, limit, log=None):
         # 第一个：企业站内页（应取，且归一为根）；第二个：内容平台文章（应滤）
@@ -23,8 +25,12 @@ async def test_discover_website_filters_and_normalizes(monkeypatch):
             {"name": "WhatsApp 客服工具选购完整指南", "url": "https://blog.example.com/blog/whatsapp-guide"},
         ], None, "duckduckgo"
 
+    async def fake_fetch(clients, url):
+        return "<html><head><title>发现链科技（东莞）有限公司 - Home</title></head></html>"
+
     monkeypatch.setattr(web_search, "search_with_fallback", fake_search)
-    no_clients = (None, None)  # fake_search 不用 client，仅为签名占位
+    monkeypatch.setattr(we, "_fetch_site", fake_fetch)
+    no_clients = (None, None)  # 打桩后不用 client，仅为签名占位
     ws = await _discover_website(no_clients, "发现链科技（东莞）有限公司")  # type: ignore[arg-type]
     assert ws == "https://discoverx-tech.com"
 
@@ -33,6 +39,143 @@ async def test_discover_website_filters_and_normalizes(monkeypatch):
 
     monkeypatch.setattr(web_search, "search_with_fallback", empty_search)
     assert await _discover_website(no_clients, "任何公司") is None  # type: ignore[arg-type]
+
+
+async def test_discover_website_verifies_before_write(monkeypatch):
+    """写前验证：候选站与公司名零特征重叠 → 否决（不写入错站）。"""
+    from app.collectors import web_search
+    from app.collectors import website_enrich as we
+
+    queries: list[str] = []
+
+    async def fake_search(clients, kw, limit, log=None):
+        queries.append(kw)
+        return [
+            {"name": "National Park Service (U.S.)", "url": "https://www.nps.gov/"},
+            {"name": "Xuchang Yuanxiu Hair - Human Hair Manufacturer", "url": "https://www.discoverx-yuanxiu.com/"},
+        ], None, "duckduckgo"
+
+    pages = {
+        "https://nps.gov": "<title>National Park Service (U.S. National Park Service)</title>",
+        "https://discoverx-yuanxiu.com": "<title>Yuanxiu Hair - Human Hair Bundles Factory</title>",
+    }
+
+    async def fake_fetch(clients, url):
+        return pages.get(url)
+
+    monkeypatch.setattr(web_search, "search_with_fallback", fake_search)
+    monkeypatch.setattr(we, "_fetch_site", fake_fetch)
+    monkeypatch.setattr(we, "_DISCOVER_GAP", 0.0)
+    no_clients = (None, None)
+
+    ws = await _discover_website(no_clients, "Xuchang Yuanxiu Crafts Co., Ltd")  # type: ignore[arg-type]
+    # 英文名用引号精确查询；nps.gov 被否决，第二个候选（yuanxiu 特征词命中）通过
+    assert queries[0] == '"Xuchang Yuanxiu Crafts Co., Ltd"'
+    assert ws == "https://discoverx-yuanxiu.com"
+
+
+async def test_discover_website_rejects_all_unrelated(monkeypatch):
+    """所有候选都不含公司名特征词 → None（进 7 天负缓存，不写错站）。"""
+    from app.collectors import web_search
+    from app.collectors import website_enrich as we
+
+    async def fake_search(clients, kw, limit, log=None):
+        return [{"name": "Aargau Hotels - Switzerland", "url": "https://www.discoverx-hotels.ch/"}], None, "duckduckgo"
+
+    async def fake_fetch(clients, url):
+        return "<title>Aargau Hotels - Official Site</title>"
+
+    vetoed: list[str] = []
+
+    async def fake_log(level, message):
+        if "否决" in message:
+            vetoed.append(message)
+
+    monkeypatch.setattr(web_search, "search_with_fallback", fake_search)
+    monkeypatch.setattr(we, "_fetch_site", fake_fetch)
+    monkeypatch.setattr(we, "_DISCOVER_GAP", 0.0)
+    assert await _discover_website((None, None), "Beauty (GD) Manufacturing Co., Ltd", log=fake_log) is None  # type: ignore[arg-type]
+    assert vetoed, "应留下否决日志"
+
+
+async def test_discover_website_brand_slug_guess(monkeypatch):
+    """品牌域直猜（B2B 线索主路径）：店铺子域 = 品牌名 → {slug}.com 验证命中，
+    不再依赖搜索引擎（英文公司名的引擎返回质量不可靠）。"""
+    from app.collectors import website_enrich as we
+
+    searched: list[str] = []
+
+    async def fail_search(clients, kw, limit, log=None):
+        searched.append(kw)
+        return [], "引擎不可达", None
+
+    pages = {
+        "https://yuanxiuhair.com": "<title>Yuanxiu Hair - Xuchang Human Hair Factory</title>",
+    }
+
+    async def fake_fetch(clients, url):
+        return pages.get(url)
+
+    monkeypatch.setattr(we, "_fetch_site", fake_fetch)
+    monkeypatch.setattr(we, "_DISCOVER_GAP", 0.0)
+    import app.collectors.web_search as ws_mod
+
+    monkeypatch.setattr(ws_mod, "search_with_fallback", fail_search)
+
+    ws = await _discover_website(
+        (None, None),  # type: ignore[arg-type]
+        "Xuchang Yuanxiu Crafts Co., Ltd",
+        brand_slugs=["yuanxiuhair"],
+    )
+    assert ws == "https://yuanxiuhair.com"
+    assert not searched, "品牌域命中后不应再走搜索"
+
+
+async def test_discover_website_brand_slug_guess_falls_to_search(monkeypatch):
+    """品牌域猜不中（域名未注册/被他人持有）→ 回退搜索路径，不误写。"""
+    from app.collectors import website_enrich as we
+    import app.collectors.web_search as ws_mod
+
+    async def fake_search(clients, kw, limit, log=None):
+        return [
+            {"name": "Topledvision LED Strip", "url": "https://www.topledvision.com/"},
+        ], None, "duckduckgo"
+
+    pages = {
+        "https://topledvision.com": "<title>Topledvision Lighting Manufacturer</title>",
+    }
+
+    async def fake_fetch(clients, url):
+        return pages.get(url)
+
+    monkeypatch.setattr(we, "_fetch_site", fake_fetch)
+    monkeypatch.setattr(we, "_DISCOVER_GAP", 0.0)
+    monkeypatch.setattr(ws_mod, "search_with_fallback", fake_search)
+
+    ws = await _discover_website(
+        (None, None),  # type: ignore[arg-type]
+        "Shenzhen Topledvision Lighting Co., Ltd",
+        brand_slugs=["topledvision-holdings"],
+    )
+    assert ws == "https://topledvision.com"
+
+
+def test_site_title_mentions_token_rules():
+    from app.collectors.website_enrich import _site_title_mentions
+
+    # 强特征词（≥5 字符剔通用词）命中
+    assert _site_title_mentions("Xuchang Yuanxiu Crafts Co., Ltd", title="Yuanxiu Hair Manufacturer", url="https://yuanxiuhair.com")
+    assert _site_title_mentions("Shenzhen Topledvision Lighting Co., Ltd", title="Home", url="https://topledvision.com")
+    # 弱词双命中兜底（无 ≥5 特征词时，两个 ≥3 词同时出现）
+    assert _site_title_mentions("Shenzhen ATA Technology Co., Ltd", title="Shenzhen ATA Lighting", url="https://ata-led.com")
+    # 行业词/通用词不算身份特征：hair/beauty/ltd 单独出现 → 否决
+    assert not _site_title_mentions("Juancheng Youzi Hair Products Co., Ltd", title="Milemoa Hair - Best Hair", url="https://milemoa.com")
+    assert not _site_title_mentions("Beauty (GD) Manufacturing Co., Ltd", title="Aargau Hotels Official", url="https://aargauhotels.ch")
+    # 中文名：相邻汉字对命中（与 site_matches_company 同口径）
+    assert _site_title_mentions("宁波凯越国际贸易有限公司", title="凯越国际 - 跨境电商", url="https://example.com")
+    assert not _site_title_mentions("宁波凯越国际贸易有限公司", title="完全无关的站点标题", url="https://other.com")
+    # 城市词是弱词：单独一个城市词不算（需两个弱词）
+    assert not _site_title_mentions("Shenzhen ATA Technology Co., Ltd", title="Shenzhen News Daily", url="https://news.com")
 
 
 async def test_load_discoverable_scope(db_session):

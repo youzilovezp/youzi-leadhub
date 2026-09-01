@@ -172,6 +172,16 @@ class Settings(BaseSettings):
     BING_SEARCH_KEY: str = ""  # Bing Web Search（Azure）key
     COLLECT_MAX_CONCURRENT: int = 2  # 同时运行的采集任务数（满则排队）
     COLLECT_TASK_TIMEOUT: int = 3600  # 单任务超时（秒）
+    # 采集代理策略（2026-09-01 用户裁决：爬虫不得被本机 VPN/代理环境变量干扰）。
+    # CRAWLER_IGNORE_ENV_PROXY=true：进程启动即剥离 http_proxy/https_proxy/
+    # all_proxy 环境变量——httpx(trust_env) 与 curl_cffi(libcurl) 都会隐式捡起
+    # 这些变量，本机 VPN 一开一关采集行为就变（共享出口 IP 被限流/国内站走
+    # 国外出口被拦/代理半开全线失败），全部改为确定性直连。
+    # CRAWLER_PROXY_URL：显式代理（如 socks5://127.0.0.1:7890），**只**用于
+    # 境外被墙端点（DDG 搜索 / Meta 广告库 API / FB 主页探测）；国内可达资源
+    # （必应中国/招聘站/中国企业官网富化）无论如何都直连。
+    CRAWLER_IGNORE_ENV_PROXY: bool = True
+    CRAWLER_PROXY_URL: str = ""
     # 采集流水线自动接力（2026-08-31 交互改造）：发现类采集器（web_search/
     # job_posting/meta_ads）任务完成 → 自动排入一个隐式 website_enrich 全库扫描
     # （官网发现 + 信号复核）。依赖关系由系统承担，用户不需要知道「先采集后富化」的顺序。
@@ -231,3 +241,19 @@ def get_settings() -> Settings:
 
 
 settings = get_settings()
+
+# 剥离本机代理环境变量（见 CRAWLER_IGNORE_ENV_PROXY 注释）：必须在任何
+# httpx/curl_cffi 客户端构造前执行——本模块是 app 的最早 import 之一。
+# 显式 CRAWLER_PROXY_URL 不受影响（按参数传入，与环境变量无关）。
+if settings.CRAWLER_IGNORE_ENV_PROXY:
+    import os as _os
+
+    for _k in (
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+    ):
+        _os.environ.pop(_k, None)
