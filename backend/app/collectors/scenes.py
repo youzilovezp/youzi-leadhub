@@ -238,6 +238,13 @@ _MAX_TEXT = 400_000
 
 _SCRIPT_STYLE_RE = re.compile(r"<(script|style)\b[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)
 _TAG_RE = re.compile(r"<[^>]+>")
+# 块级标签先替换为换行，再剥标签——避免把跨块的文本拼成一行造成贪婪匹配
+# （如 about 页的 h2 标题 + p 人名同行会被吞：「Leadership John Smith」误把
+# 'Leadership' 当姓名一部分——team_member 抽取的实测坑）。
+_BLOCK_TAG_RE = re.compile(
+    r"<\s*/?\s*(?:p|div|h[1-6]|li|tr|td|th|section|article|header|footer|br|hr|aside|nav|main)\b[^>]*>",
+    re.I,
+)
 _WS_RE = re.compile(r"\s+")
 
 
@@ -277,10 +284,15 @@ def page_text(html_list: list[str] | list[str | None] | None, *, keep_case: bool
     if not html_list:
         return ""
     raw = "\n".join(p for p in html_list if p)
+    # 块级标签先换行——避免跨块文本被合并（team_member 抽取的实测坑）。
+    # 顺序很关键：先换行（块边界）→ 剥其余标签 → 压空白。否则 _WS_RE 会把
+    # 我们注入的换行也压成单空格，跨块文本又被拼回一行。
+    raw = _BLOCK_TAG_RE.sub("\n", raw)
     text = _SCRIPT_STYLE_RE.sub(" ", raw)
     text = _TAG_RE.sub(" ", text)
     text = html_lib.unescape(text)
-    text = _WS_RE.sub(" ", text)
+    # 只压连续空白，但保留换行（块的边界）
+    text = re.sub(r"[^\S\n]+", " ", text)
     return text[:_MAX_TEXT] if keep_case else text.lower()[:_MAX_TEXT]
 
 

@@ -322,6 +322,9 @@ class LeadDetailOut(LeadOut):
     # 最近一次富化失败信息 {reason, website, updated_at}（成功后自愈清除；
     # 存在 = 线索数据可能过期，销售建联前可先看原因）
     enrich_fail: dict[str, Any] | None = None
+    # AI 判定理由（方向 B 2026-09-07）：
+    #   {summary, drivers[], blockers[], next_action, generated_by, generated_at, cache_key}
+    qualify_reason: dict[str, Any] | None = None
 
 
 # ---------- 分配（PRD §24） ----------

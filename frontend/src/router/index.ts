@@ -75,6 +75,30 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '质量抽检' },
       },
       {
+        path: 'agent/sequences',
+        name: 'AgentSequences',
+        component: () => import('@/views/agent/Sequences.vue'),
+        meta: { title: '外联序列' },
+      },
+      {
+        path: 'agent/drafts',
+        name: 'AgentDrafts',
+        component: () => import('@/views/agent/Drafts.vue'),
+        meta: { title: '草稿箱' },
+      },
+      {
+        path: 'agent/replies',
+        name: 'AgentReplies',
+        component: () => import('@/views/agent/Replies.vue'),
+        meta: { title: '回复收件箱' },
+      },
+      {
+        path: 'agent/deals',
+        name: 'AgentDeals',
+        component: () => import('@/views/agent/Deals.vue'),
+        meta: { title: '商机预测' },
+      },
+      {
         path: 'collect/lead/:id',
         name: 'CollectLeadDetail',
         component: () => import('@/views/collect/lead/detail.vue'),

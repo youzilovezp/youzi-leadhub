@@ -139,6 +139,7 @@ async def _fill_lead_list_fields(db: SessionDep, items: list[Lead], outs: list[L
                 saas_signals=i.saas_signals,
                 industry=i.industry,
                 sources=i.sources,
+                icp_status=i.icp_status,
             )
         ]
 
@@ -442,6 +443,7 @@ async def export_leads(
                         saas_signals=lead.saas_signals,
                         industry=lead.industry,
                         sources=lead.sources,
+                icp_status=lead.icp_status,
                     )
                 )
             elif key == "owner_name":
@@ -778,6 +780,7 @@ async def get_lead_detail(db: SessionDep, user: CurrentUser, lead_id: int):
         saas_signals=lead.saas_signals,
         industry=lead.industry,
         sources=lead.sources,
+        icp_status=lead.icp_status,
     )
     suggestion = sales_suggestion(
         grade=lead.grade,
@@ -832,6 +835,20 @@ async def get_lead_detail(db: SessionDep, user: CurrentUser, lead_id: int):
     out.last_ad_at = lead.last_ad_at
     out.cn_evidence = cn_evidence_of_lead(lead)
     out.enrich_fail = (lead.field_meta or {}).get("enrich_fail")
+    # 方向 B（2026-09-07）：AI 判定理由。字段为空时按 cache_key 现算（apply_score
+    # 会清空缓存导致字段为 None —— 详情页访问时按需懒重算，不靠富化/评分 hook 100% 命中）
+    if lead.qualify_reason is None:
+        from app.collectors.qualify_reason import compute_and_save_qualify_reason
+
+        signal_urls: dict[str, str] = {}
+        for sig in signal_rows:
+            if sig.evidence_url:
+                signal_urls.setdefault(sig.signal_type, sig.evidence_url)
+        await compute_and_save_qualify_reason(
+            db, lead, contacts, signal_rows, signal_urls
+        )
+        await db.flush()
+    out.qualify_reason = dict(lead.qualify_reason or {})
 
     def _stale_days(last_seen: datetime | None) -> int | None:
         """距最近复现天数（SQLite naive datetime 按 UTC 补齐）。"""

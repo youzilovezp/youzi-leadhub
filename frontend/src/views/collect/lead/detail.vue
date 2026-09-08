@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, h, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { NButton, NTag } from 'naive-ui'
+import { NButton, NIcon, NTag } from 'naive-ui'
 import type { DataTableColumns, FormInst, FormRules } from 'naive-ui'
 import * as collectApi from '@/api/collect'
 import * as salesApi from '@/api/sales'
@@ -17,6 +17,7 @@ import {
   followStatusTagType,
   gradeTagType,
 } from '@/api/collect'
+import { FlashOutline } from '@vicons/ionicons5'
 import { useUserStore } from '@/stores/user'
 import { formatTime, parseUtc } from '@/utils/format'
 import { confirm, message } from '@/utils/feedback'
@@ -727,6 +728,75 @@ onMounted(fetchDetail)
               </div>
             </n-card>
 
+            <!-- AI 判定理由（方向 B 2026-09-07）：自然语言总结 + 证据驱动 + 行动建议 -->
+            <n-card
+              v-if="detail.qualify_reason"
+              size="small"
+              title="AI 判定理由"
+              class="reason-card"
+            >
+              <template #header-extra>
+                <n-tag
+                  :type="detail.qualify_reason.generated_by === 'llm' ? 'success' : 'default'"
+                  size="small"
+                >
+                  {{ detail.qualify_reason.generated_by === 'llm' ? 'LLM' : '模板' }}
+                </n-tag>
+              </template>
+              <!-- summary：一句话总结 -->
+              <div class="reason-summary">
+                {{ detail.qualify_reason.summary }}
+              </div>
+              <!-- drivers：按分值排序的命中证据（点击 evidence_url 跳转） -->
+              <div
+                v-if="detail.qualify_reason.drivers?.length"
+                class="reason-drivers"
+              >
+                <div class="reason-section-title">驱动证据（{{ detail.qualify_reason.drivers.length }}）</div>
+                <div
+                  v-for="(d, i) in detail.qualify_reason.drivers"
+                  :key="i"
+                  class="reason-driver-row"
+                >
+                  <span class="reason-driver-label">
+                    {{ d.label }}
+                  </span>
+                  <n-tag size="small" :bordered="false">+{{ d.points }}</n-tag>
+                  <a
+                    v-if="d.evidence_url"
+                    :href="d.evidence_url"
+                    target="_blank"
+                    rel="noopener"
+                    class="reason-evidence-link"
+                  >
+                    证据 ↗
+                  </a>
+                </div>
+              </div>
+              <!-- blockers：扣分/缺失（仅在非空时展示，避免噪音） -->
+              <div
+                v-if="detail.qualify_reason.blockers?.length"
+                class="reason-blockers"
+              >
+                <div class="reason-section-title">缺口</div>
+                <div
+                  v-for="(b, i) in detail.qualify_reason.blockers"
+                  :key="i"
+                  class="reason-blocker-row"
+                >
+                  {{ b.reason }}<span
+                    v-if="b.missing?.length"
+                    class="reason-blocker-missing"
+                  >（{{ b.missing.join('、') }}）</span>
+                </div>
+              </div>
+              <!-- next_action：销售看完直接照做 -->
+              <div class="reason-next-action">
+                <n-icon size="14"><FlashOutline /></n-icon>
+                <span>建议：{{ detail.qualify_reason.next_action }}</span>
+              </div>
+            </n-card>
+
             <!-- 信号证据链（§4.1：系统为什么判定此客户有需求） -->
             <n-card
               v-if="detail.signals?.length"
@@ -1329,6 +1399,59 @@ onMounted(fetchDetail)
 }
 .signal-row:last-child {
   border-bottom: none;
+}
+
+/* AI 判定理由（方向 B 2026-09-07） */
+.reason-summary {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--yz-text-primary, #333);
+  line-height: 1.6;
+  margin-bottom: 12px;
+}
+.reason-section-title {
+  font-size: 12px;
+  color: var(--yz-text-secondary, #888);
+  margin: 8px 0 4px;
+}
+.reason-driver-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 13px;
+}
+.reason-driver-label {
+  flex: 1;
+  min-width: 0;
+}
+.reason-evidence-link {
+  font-size: 12px;
+  color: var(--yz-primary, #2080f0);
+  text-decoration: none;
+}
+.reason-evidence-link:hover {
+  text-decoration: underline;
+}
+.reason-blocker-row {
+  font-size: 13px;
+  color: var(--yz-warning, #f0a020);
+  padding: 2px 0;
+}
+.reason-blocker-missing {
+  color: var(--yz-text-secondary, #999);
+  margin-left: 4px;
+}
+.reason-next-action {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 12px;
+  padding: 8px 12px;
+  background: var(--yz-bg-soft, #f6f8fa);
+  border-radius: 4px;
+  font-size: 13px;
+  color: var(--yz-text-primary, #333);
 }
 .signal-type {
   min-width: 96px;

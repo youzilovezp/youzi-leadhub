@@ -137,6 +137,7 @@ def build_three_questions(
         saas_signals=dict(getattr(lead, "saas_signals", None) or {}),
         industry=getattr(lead, "industry", None),
         sources=list(getattr(lead, "sources", None) or []),
+        icp_status=getattr(lead, "icp_status", None),
     )
     need_types = detect_need_types(
         whatsapp_hit=bool(getattr(lead, "whatsapp_hit", False)),

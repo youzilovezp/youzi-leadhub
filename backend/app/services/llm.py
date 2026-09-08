@@ -111,6 +111,7 @@ async def ai_analysis(lead: Any, contacts: list[Any]) -> dict[str, Any]:
         saas_signals=lead.saas_signals,
         industry=lead.industry,
         sources=lead.sources,
+        icp_status=lead.icp_status,
     )
     uses_wa = bool(
         lead.whatsapp_hit or lead.whatsapp_url or (getattr(lead, "whatsapp_numbers", None) or [])
@@ -155,6 +156,7 @@ def _script_fallback(lead: Any) -> str:
         saas_signals=lead.saas_signals,
         industry=lead.industry,
         sources=lead.sources,
+        icp_status=lead.icp_status,
     )
     top = recs[0]["name"] if recs else "WhatsApp 商业化解决方案"
     uses_wa = bool(
