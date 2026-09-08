@@ -188,4 +188,12 @@ def apply_score(
         job_signals=getattr(lead, "job_signals", None),
         sources=lead.sources,
     )
+    # qualify_reason 失效标记（方向 B 2026-09-07）：评分/ICP/出海类型任一变化
+    # 都会让原 cache_key 过期——但为避免 apply_score 引入 await，hook 在
+    # scoring 层只清空缓存；由调用方（_enrich_one / crud.contact / endpoint
+    # 详情）显式触发 compute_and_save_qualify_reason 重算。
+    existing = getattr(lead, "qualify_reason", None)
+    if isinstance(existing, dict) and existing.get("cache_key"):
+        # 在新 cache_key 算出来前不可比对——直接清空，迫使重算（命中率不变）
+        lead.qualify_reason = None
     return old_score, total, grade

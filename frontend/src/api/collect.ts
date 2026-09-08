@@ -295,16 +295,37 @@ export interface Recommendation {
 export interface SignalEvidence {
   id: number
   signal_type: string
-  signal_type_label: string
+  signal_type_label?: string
   value: string
-  evidence_url: string | null
-  evidence_raw: string | null
+  evidence_url?: string | null
+  evidence_raw?: string | null
   confidence: number
   source: string
-  first_seen: string | null
-  last_seen: string | null
-  /** 距最近一次复现天数（null=无法判定）；≥90 视为信号可能过期 */
+  first_seen?: string | null
+  last_seen?: string | null
+  /** 负证据口径：距最近一次复现多少天；null=无 last_seen 无法判定 */
   stale_days: number | null
+}
+
+/** AI 判定理由（方向 B 2026-09-07）：聚合 score+signals+contacts → 自然语言 + 证据 */
+export interface QualifyReasonDriver {
+  key: string
+  label: string
+  points: number
+  evidence_url?: string | null
+}
+export interface QualifyReasonBlocker {
+  reason: string
+  missing?: string[]
+}
+export interface QualifyReason {
+  summary: string
+  drivers: QualifyReasonDriver[]
+  blockers: QualifyReasonBlocker[]
+  next_action: string
+  generated_by: 'template' | 'llm'
+  generated_at: string
+  cache_key: string
 }
 
 /** 销售三问（PRD 核心价值：为什么需要你 / 应该卖什么 / 应该找谁；后端 intent.build_three_questions 组装） */
@@ -349,6 +370,8 @@ export interface LeadDetail extends Lead {
   signals: SignalEvidence[]
   /** 加分制明细（§五 MVP 口径）：{total, items}——items 只含命中项 [{key,label,points}] */
   score_breakdown: { total: number; items: Array<{ key: string; label: string; points: number }> }
+  /** AI 判定理由（方向 B 2026-09-07）：自然语言 + 证据 + 行动建议 */
+  qualify_reason: QualifyReason | null
   /** 三问（为什么需要你/应该卖什么/应该找谁/齐备度） */
   three_questions: ThreeQuestions
   /** WhatsApp Business 账号（号码级验证命中） */

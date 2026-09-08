@@ -19,6 +19,7 @@ from sqlalchemy import (
     func,
     text,
 )
+from pydantic import field_validator
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base_class import Base, TimestampMixin
@@ -123,13 +124,31 @@ class Lead(Base, TimestampMixin):
     # ---------- 字段级数据质量（PRD §32）：{字段: {source, updated_at, confidence}} ----------
     field_meta: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
-    # ---------- ICP 资格（二重门 + 买家门：中国企业 × 出海业务 × 非媒体/社区，见 collectors/icp.py） ----------
+# ---------- ICP 资格（二重门 + 买家门：中国企业 × 出海业务 × 非媒体/社区，见 collectors/icp.py） ----------
     # qualified=CN+出海（销售池） / cn_domestic=CN 未出海（培育） /
     # foreign=有评估结论的非 CN / non_buyer=媒体社区等非买家（优先判定，均不进默认销售池）/
     # unknown=证据不足（待验证）
     icp_status: Mapped[str] = mapped_column(
         String(16), default="unknown", server_default="unknown", index=True
     )
+
+    # ---------- AI 判定理由（方向 B：可解释性，2026-09-07）----------
+    # 聚合 score_breakdown + signals + three_questions + contacts 的自然语言解释：
+    #   {
+    #     "summary": str,               # 一句话总结（为什么是这个等级）
+    #     "drivers": [                  # 命中证据（按权重降序）
+    #       {"key": "ctwa_ad", "label": "...", "points": 40, "evidence_url": "..."},
+    #     ],
+    #     "blockers": [                 # 扣分/无证据项（解释 C 级为什么是 C）
+    #       {"reason": "无官网联系信息", "missing": ["email", "phone", "whatsapp"]},
+    #     ],
+    #     "next_action": str,            # 建议下一步行动（销售看完直接做）
+    #     "generated_by": "template"|"llm",  # 来源（前端明示）
+    #     "generated_at": iso,           # 最近一次生成时间
+    #     "cache_key": str,              # 输入指纹（score+signals+icp+contacts）
+    #   }
+    # 模板生成永远可用（无 IO）；LLM 增强可选（失败降级模板，cache_key 命中复用）。
+    qualify_reason: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
     def __repr__(self) -> str:
         return f"<Lead id={self.id} name={self.name!r} score={self.score} grade={self.grade}>"

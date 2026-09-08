@@ -135,6 +135,21 @@ async def create_contact(
         created_by=created_by,
     )
     await rescore_and_log(db, lead, created_by=created_by)
+    # 方向 B：联系人变更（数量 / tier1 判定影响 summary 文案与 blockers）→ 重算
+    # apply_score 已清空缓存避免脏读；这里只算一次 reason，写库。
+    try:
+        from app.collectors.qualify_reason import compute_and_save_qualify_reason
+        from app.crud.lead_signals import list_signals
+
+        signals = await list_signals(db, lead.id)
+        contacts = await list_contacts(db, lead.id)
+        signal_urls: dict[str, str] = {}
+        for sig in signals:
+            if sig.evidence_url:
+                signal_urls.setdefault(sig.signal_type, sig.evidence_url)
+        await compute_and_save_qualify_reason(db, lead, contacts, signals, signal_urls)
+    except Exception:  # noqa: BLE001  reason 计算失败不影响主流程
+        pass
     return contact
 
 

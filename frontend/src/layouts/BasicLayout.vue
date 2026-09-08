@@ -22,6 +22,11 @@ import {
   PulseOutline,
   NotificationsOutline,
   ShieldCheckmarkOutline,
+  PaperPlaneOutline,
+  MailOutline,
+  ChatbubblesOutline,
+  TrendingUpOutline,
+  SettingsSharp,
 } from '@vicons/ionicons5'
 import { useUserStore } from '@/stores/user'
 import { useAppStore, THEME_PRESETS } from '@/stores/app'
@@ -57,6 +62,17 @@ const menus: MenuOption[] = [
       { label: '数据源管理', key: '/sales', icon: renderIcon(PulseOutline) },
       { label: '高价值预警', key: '/sales/alerts', icon: renderIcon(NotificationsOutline) },
       { label: '质量抽检', key: '/quality', icon: renderIcon(ShieldCheckmarkOutline) },
+    ],
+  },
+  {
+    label: '销售运营助理',
+    key: 'agent',
+    icon: renderIcon(PaperPlaneOutline),
+    children: [
+      { label: '外联序列', key: '/agent/sequences', icon: renderIcon(SettingsSharp) },
+      { label: '草稿箱', key: '/agent/drafts', icon: renderIcon(MailOutline) },
+      { label: '回复收件箱', key: '/agent/replies', icon: renderIcon(ChatbubblesOutline) },
+      { label: '商机预测', key: '/agent/deals', icon: renderIcon(TrendingUpOutline) },
     ],
   },
   {

@@ -192,6 +192,202 @@ def _norm_cn_mobile(phone: str) -> str | None:
     return digits if re.fullmatch(r"1[3-9]\d{9}", digits) else None
 
 
+# 团队成员（2026-09-08：tier1 联系人缺口修复）：about / team / leadership 子页
+# 的「姓名 + 职位」 —— 不强求手机号。已有 detect_contact_persons 强制绑手机号，
+# 抓不到纯「王明 总经理」类页面（无电话语境），销售早报 tier1 永远空。本函数补上
+# 纯姓名+职位的抽取。
+#
+# 形态覆盖：
+#   - About 页：「王明 创始人 / John Smith, CEO」—— 同行格式
+#   - Team 卡片：「姓名 + 职位」上下/同行结构
+#
+# title 列表从长到短排（联合创始人 → 创始人）—— Python re 的 alternation 是「最先匹配」
+# 不是「最长匹配」，短 title 会先吃；但 _scan_members 用占位符策略：先扫长 title
+# 再扫短的，长 title 匹配过的位置会被占位掉，避免短 title 抢占。
+_TITLES_ZH_LONG = (
+    ("联合创始人", "联合创始"),
+    ("首席执行(?:官)?", "首席执行"),
+    ("客户成功(?:总监|经理)?", "客户成功总监"),
+    ("客户成功(?:总监|经理)?", "客户成功经理"),
+)
+_TITLES_ZH = (
+    "创始人",
+    "CEO",
+    "总裁",
+    "总经理",
+    "董事",
+    "副总(?:裁|经理)",
+    "VP",
+    "总监",
+    # tier3 + 行业专有职务（排前面，避免被「经理」短词抢占——市场/运营/
+    # 产品/技术 等行业前缀的「+经理」整体是 tier2/3 岗位）
+    "市场(?:经理|总监)?|运营(?:经理|总监)?|产品(?:经理|总监)?|技术(?:经理|总监)?|销售(?:经理|总监)?|客户(?:经理|总监)?|商务(?:经理|总监)?|渠道(?:经理|总监)?|品牌(?:经理|总监)?|海外(?:经理|总监)?|营销(?:经理|总监)?",
+    "经理",
+    "主管",
+    "部长",
+    "负责人",
+    "工程师",
+    "设计师",
+    "专员",
+    "助理",
+    "组长",
+    "课长",
+    "队长",
+)
+_TITLES_EN = (
+    "Co-Founder",
+    "Co-founder",
+    "Founder",
+    "CEO",
+    "CTO",
+    "CMO",
+    "CFO",
+    "COO",
+    "President",
+    "VP",
+    "Vice President",
+    "General Manager",
+    "Director of [A-Za-z ]+?",
+    "Head of [A-Za-z ]+?",
+    "Director",
+    "Manager",
+)
+
+
+def _scan_members(text: str, name_re: re.Pattern, title_alt: str) -> list[tuple[str, str]]:
+    """单次扫描：name + 任意一个 title_alt 里的候选。
+
+    title_alt 是 (| 分割的) 候选 title 列表。我们从长到短调用，短 title 不
+    会抢占长 title 之前已匹配的位置——因为占位符策略在调用方做（多次扫描之间）。
+
+    name 与 title 之间：紧跟一个分隔符（空格 / 中文标点）。拒绝 name 贪婪
+    吞掉 title 之前的词（「赵芳 市场经理」时 name=赵芳 + 分隔符+title=市场经理；
+    不能让 name 吃「市场」把「经理」当成无 title 的尾词）。紧贴写法
+    （「赵芳市场经理」无空格）由外层 detect_team_members 多遍扫描覆盖。
+    """
+    pat = re.compile(
+        rf"(?:^|[\n\r\u3000\t ,，；;、|])"
+        rf"(?P<name>{name_re.pattern})"
+        # name 与 title 之间：1-3 个分隔符（空格 / 逗号 任一组合）——
+        # 接受「, 」、「,」「 」等多种写法，非贪婪避免跨段
+        rf"[ ,\u002c，]{{1,3}}?"
+        rf"(?P<title>{title_alt})"
+        rf"(?=$|[\n\r\u3000\t ,，；;|])",
+        re.M if "一-鿿" in name_re.pattern else 0,
+    )
+    return [(m.group("name").strip(), m.group("title").strip()) for m in pat.finditer(text)]
+
+
+# 避免误识别：常见 role/keyword 词不是人名（与 detect_contact_persons 名单类似但更严格）
+_TEAM_NAME_JUNK_RE = re.compile(
+    r"客服|电话|咨询|联系|我们|热线|致电|服务|销售|商务|市场|技术|支持|微信|同号"
+    r"|邮箱|地址|传真|时间|工作|更多|详情|留言|提交|关注|订阅|加入|了解|"
+    r"首页|关于|产品|新闻|案例|方案|资源|价格|下载|登录|注册|搜索|菜单|"
+    r"tel|phone|mobile|contact|email|about|home|menu",
+    re.I,
+)
+# 姓名范围：中文 2-4 字（含 · ）或 拉丁（首字母大写，至少 3 字符）
+_TEAM_NAME_ZH = r"[一-鿿·]{2,4}"
+# 英文名严格模式：首词首字母大写 + 后续词也首字母大写（First Last / First Middle Last）。
+# 不允许内部空格/任意字符跨多词——之前 [a-zA-Z .\-] 含空格导致跨行匹配整段文本。
+_TEAM_NAME_EN = r"[A-Z][a-z]+(?:[ \-'][A-Z][a-z]+)*"
+
+
+def detect_team_members(html_list: list[str]) -> list[dict[str, str]]:
+    """从 about/team 子页抽取「姓名 + 职位」—— 不强求手机号。
+
+    与 detect_contact_persons 互补：那个抓「手机号语境」里的姓名，这个抓
+    「纯团队介绍」的姓名+职位。两路合一，销售早报里 tier1 联系人出现率提升。
+
+    实现要点（Python re 的 alternation 是「最先匹配」不是「最长匹配」——
+    「创始人」会先于「联合创始人」被吃）：先按长 title → 短 title 多遍扫描，
+    每遍把已用 title 词替换为占位符，避免短词抢占。
+    """
+    # keep_case=True：英文名字首字母大写是判「是名字」的关键信号（「john smith」
+    # 看着像文案不像人名，「John Smith」才是）。中文场景不受大小写影响。
+    text = page_text(html_list, keep_case=True)
+    out: list[dict[str, str]] = []
+
+    name_zh = re.compile(_TEAM_NAME_ZH)
+    name_en = re.compile(_TEAM_NAME_EN)
+
+    def _add(name: str, title: str) -> None:
+        name = name.strip()
+        title = title.strip()
+        if not name or len(name) < 2:
+            return
+        if _TEAM_NAME_JUNK_RE.search(name):
+            return
+        if not any(e["name"] == name and e["title"] == title for e in out):
+            out.append({"name": name, "title": title})
+
+    # 策略：长 title 优先（占位 + 再扫短 title）
+    # 1. 中文长 title 单独跑一遍（如「联合创始人」「首席执行」）
+    text_work = text
+    for long_alt, _ in _TITLES_ZH_LONG:
+        for name, title in _scan_members(text_work, name_zh, long_alt):
+            _add(name, title)
+        # 占位掉已匹配的长 title 词，避免后续「创始人」短 title 抢占
+        text_work = re.sub(long_alt, " ", text_work)
+    # 2. 短 title 全部跑一遍
+    for title_alt in _TITLES_ZH:
+        for name, title in _scan_members(text_work, name_zh, title_alt):
+            _add(name, title)
+    # 3. 英文 —— 长 title（General Manager / Director of / Head of / Vice President）
+    # 优先短 title 抢占问题与中文同：占位后再扫短 title
+    _TITLES_EN_LONG = (
+        "General Manager",
+        "Director of [A-Za-z ]+?",
+        "Head of [A-Za-z ]+?",
+        "Vice President",
+    )
+    _TITLES_EN_SHORT = (
+        "Co-Founder",
+        "Co-founder",
+        "Founder",
+        "CEO",
+        "CTO",
+        "CMO",
+        "CFO",
+        "COO",
+        "President",
+        "VP",
+        "Director",
+        "Manager",
+    )
+    text_work_en = text
+    for long_alt in _TITLES_EN_LONG:
+        for name, title in _scan_members(text_work_en, name_en, long_alt):
+            _add(name, title)
+        text_work_en = re.sub(long_alt, " ", text_work_en)
+    for title_alt in _TITLES_EN_SHORT:
+        for name, title in _scan_members(text_work_en, name_en, title_alt):
+            _add(name, title)
+
+    return out[:10]
+
+
+def detect_contact_persons(html_list: list[str]) -> list[dict[str, str]]:
+
+    def _add(name: str, title: str) -> None:
+        name = name.strip()
+        title = title.strip()
+        if not name or len(name) < 2:
+            return
+        if _TEAM_NAME_JUNK_RE.search(name):
+            return
+        # 唯一性：同 name+title 不重复
+        if not any(e["name"] == name and e["title"] == title for e in out):
+            out.append({"name": name, "title": title})
+
+    for m in _TEAM_MEMBER_RE.finditer(text):
+        _add(m.group("name"), m.group("title"))
+    for m in _TEAM_MEMBER_EN_RE.finditer(text):
+        _add(m.group("name"), m.group("title"))
+    # 全局去重（同 person 同时被中文/英文正则命中时 title 可能不同，保留首条）
+    return out[:10]
+
+
 def detect_contact_persons(html_list: list[str]) -> list[dict[str, str]]:
     """页面上的具名联系人 → [{name, title, phone}]（title=部门/角色/地区，可空）。
 
@@ -2226,6 +2422,62 @@ async def _enrich_one(
             if added:
                 touch_field_meta(lead, "contacts_persons", "website_enrich", confidence=88, now=now)
                 await ctx.log("info", f"[lead {lead_id}] 👤 具名联系人 +{added}（含部门/手机号）")
+        # 团队成员（2026-09-08 tier1 缺口修复）：about / team 子页的「姓名+职位」——
+        # 不带手机号的纯介绍页（凯越/MU Group/制造业官网常见）。与上一段互补：
+        # 上段抓「手机号语境」的姓名，本段抓「纯团队介绍」的姓名+职位。
+        team_members = detect_team_members(pages)
+        if team_members:
+            from sqlalchemy import select as _sa_select2
+
+            existing_names = {
+                c.name
+                for c in (
+                    await session.execute(
+                        _sa_select2(LeadContact).where(
+                            LeadContact.lead_id == lead.id,
+                            LeadContact.name.is_not(None),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            }
+            team_added = 0
+            for member in team_members:
+                name = member["name"]
+                if name in existing_names or team_added >= 6:
+                    continue
+                title = member.get("title", "")
+                seniority = (
+                    "tier1"
+                    if re.search(
+                        r"负责人|总监|总经理|创始人|联合创始人|CEO|CTO|CMO|CFO|COO|总裁|董事|副总|VP",
+                        title,
+                    )
+                    else "tier2"
+                    if re.search(r"经理|主管|部长|Head of|Director", title)
+                    else "tier3"
+                )
+                session.add(
+                    LeadContact(
+                        lead_id=lead.id,
+                        name=name,
+                        job_title=title or None,
+                        seniority=seniority,
+                        source="website_enrich",
+                        confidence=82,  # 略低于手机号语境（无电话强校验）
+                    )
+                )
+                existing_names.add(name)
+                team_added += 1
+            if team_added:
+                touch_field_meta(
+                    lead, "contacts_team", "website_enrich", confidence=82, now=now
+                )
+                await ctx.log(
+                    "info",
+                    f"[lead {lead_id}] 👔 团队成员 +{team_added}（about/team 子页，姓名+职位）",
+                )
         lead.enriched_at = now
         # 成功自愈：清除历史失败标记（field_meta.enrich_fail 只反映最近一次富化）
         meta = dict(lead.field_meta or {})
@@ -2233,6 +2485,27 @@ async def _enrich_one(
             lead.field_meta = meta
         # 统一重评钩子：意向分重算（读 ORM 行属性，fb_whatsapp 不再漏传）+ 事件发射
         await rescore_and_log(session, lead, before=before)
+        # 方向 B：富化完成 → 重算 qualify_reason（apply_score 已清空缓存保证失效）
+        try:
+            from app.collectors.qualify_reason import compute_and_save_qualify_reason
+
+            from app.crud.lead_signals import list_signals
+
+            signals = await list_signals(session, lead.id)
+            from app.crud.contact import list_contacts
+
+            contacts = await list_contacts(session, lead.id)
+            signal_urls: dict[str, str] = {}
+            for sig in signals:
+                if sig.evidence_url:
+                    signal_urls.setdefault(sig.signal_type, sig.evidence_url)
+            await compute_and_save_qualify_reason(
+                session, lead, contacts, signals, signal_urls
+            )
+        except Exception as exc:  # noqa: BLE001  reason 计算失败不应炸主流程
+            await ctx.log(
+                "warn", f"[lead {lead_id}] qualify_reason 重算失败：{type(exc).__name__}: {exc}"
+            )
         await session.commit()
     if whatsapp_hit:
         await ctx.log("info", f"[lead {lead_id}] ✅ 检测到 WhatsApp：{website}")

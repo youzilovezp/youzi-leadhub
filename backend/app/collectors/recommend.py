@@ -126,11 +126,16 @@ def recommend_products(
     industry: str | None = None,
     sources: list[dict[str, Any]] | None = None,
     whatsapp_numbers: list[str] | None = None,
+    icp_status: str | None = None,
 ) -> list[dict[str, Any]]:
     """返回 [{key, name, reason, priority(1=最强)}]，按 priority 升序，可为空。
 
     双业务线（2026-08-31）：WA 消息线 + 出海 SaaS 线 + 广告代理线，
     同一客户可同时命中多线（§十四.6 线索双需求归属）。
+
+    产品定位校准（2026-09-07）：我们是 WhatsApp 中国 BSP，卖账号 / 客服
+    SaaS / 营销消息 / 精细化运营——任何「在用 WhatsApp + 还没用竞品 BSP」的中国
+    出海企业都是我们的客户。规则零（兜底）保证这类 lead 至少有 BSP 三件套可推。
     """
     scene_set = set(scenes or [])
     saas = set(saas_signals or {})
@@ -138,6 +143,8 @@ def recommend_products(
     wa = _uses_whatsapp(whatsapp_hit, whatsapp_url, whatsapp_numbers)
     ad_running = any(r.get("source") == "meta_ads" for r in (sources or []))
     recs: list[dict[str, Any]] = []
+    # 在用竞品 BSP（已检测到 wa_bsp）= 替换商机，不推自家 BSP 三件套（重复）
+    using_our_bsp = "wa_bsp" in saas
 
     # 规则一：在用 WA +（客服场景 或 在招 WA 客服岗）→ 客服 SaaS
     if wa and ("customer_service" in scene_set or whatsapp_job):
@@ -208,6 +215,41 @@ def recommend_products(
                 "priority": 2,
             }
         )
+
+    # 规则零（BSP 兜底，2026-09-07 产品定位校准）：
+    # 「中国出海 + 在用 WA + 还没用竞品 BSP」= 我们最精准的潜在客户——
+    # 前面所有规则都依赖 scenes/saas_signals（富化产出），未富化的 lead 什么也推不出。
+    # 此规则保证：BSP 视角下，任何 ICP=qualified + 用 WA + 没 wa_bsp 的 lead 至少有
+    # 账号 / 客服 SaaS / 营销消息 三件套可推。
+    if wa and not using_our_bsp and icp_status in ("qualified", "cn_domestic"):
+        keys = {r["key"] for r in recs}
+        if "wa_api" not in keys:
+            recs.append(
+                {
+                    "key": "wa_api",
+                    "name": PRODUCTS["wa_api"],
+                    "reason": "在用 WhatsApp 但尚未对接 BSP 接入 API——账号/模板/发送能力升级缺口明确",
+                    "priority": 1,
+                }
+            )
+        if "wa_cs" not in keys:
+            recs.append(
+                {
+                    "key": "wa_cs",
+                    "name": PRODUCTS["wa_cs"],
+                    "reason": "客服场景未识别但已用 WhatsApp 承接客户，多坐席协作 + 客户分配是自然延伸需求",
+                    "priority": 2,
+                }
+            )
+        if "marketing_message" not in keys:
+            recs.append(
+                {
+                    "key": "marketing_message",
+                    "name": PRODUCTS["marketing_message"],
+                    "reason": "出海企业批量触达需求（订单通知 / 营销活动），模板消息 + 群发是基础工具",
+                    "priority": 3,
+                }
+            )
 
     return sorted(recs, key=lambda r: r["priority"])
 
