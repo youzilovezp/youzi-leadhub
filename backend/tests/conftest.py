@@ -13,6 +13,7 @@
 """
 
 import os
+import asyncio
 import tempfile
 from collections.abc import AsyncGenerator
 from pathlib import Path
@@ -32,6 +33,10 @@ os.environ["SQLITE_PATH"] = str(_TEST_DB)
 os.environ["REDIS_HOST"] = ""
 # 业务种子（中国企业线索）会污染共享测试库的计数断言——测试强制关闭
 os.environ["AUTO_SEED_BUSINESS"] = "false"
+# 后台任务系统（2026-09-11 跨测试阻塞根因）：测试默认关掉
+# lifespan 启 task_runner 后台协程会卡 await async_session() 在死 event loop 上
+os.environ["WORKERS"] = "0"
+os.environ["SCHEDULER_ENABLED"] = "false"
 # git clone 的项目没有 .env（被 gitignore）——测试也能跑：给一个兜底密钥
 os.environ.setdefault("SECRET_KEY", "test-only-secret-key-0123456789abcdef0123456789abcdef")
 
@@ -67,6 +72,8 @@ async def client() -> AsyncGenerator[AsyncClient, None]:
     2. 每次 fixture 入口 dispose 旧引擎 + reset redis（防跨 loop 复用）
     3. 触发 init_db 一次（在 ASGI app lifespan 里）
     4. 限流器换成内存存储（避免 reset 时误清 blacklist 用的 redis 库）
+    5. WORKERS=0 + SCHEDULER_ENABLED=false 在 conftest 顶部 os.environ 设置——
+       lifespan 不会启 task_runner / scheduler 后台协程（2026-09-11 修复跨测试阻塞）。
     """
     from app.core import ratelimit as _rl_mod
     from app.db.session import engine
@@ -102,9 +109,27 @@ async def _cleanup_after_test() -> AsyncGenerator[None, None]:
 
     测试库是全会话共享的单个 SQLite 文件（数据跨测试留存），登录限流与
     token 黑名单若不清理会污染后续测试（锁定期 60s 内 admin 无法登录）。
+
+    2026-09-11 修复 scheduler 跨测试阻塞：lifespan 启了 task_runner + scheduler
+    后台协程，但 fixtures 没人为下次测试关——残留 worker 在死 event loop 上
+    卡住 `await async_session()`，下一测试一拿锁就死等。
     """
     yield
     try:
+        # 1. 停后台协程（最重要：阻止残留 worker 跨测试死锁）
+        from app.services.scheduler import stop as scheduler_stop
+        from app.services.task_runner import task_runner
+
+        try:
+            await asyncio.wait_for(scheduler_stop(), timeout=2.0)
+        except (asyncio.TimeoutError, Exception):
+            pass
+        try:
+            await asyncio.wait_for(task_runner.stop(), timeout=2.0)
+        except (asyncio.TimeoutError, Exception):
+            pass
+
+        # 2. 清登录限流/token 黑名单
         from sqlalchemy import delete
 
         from app.db.session import async_session, engine
@@ -114,6 +139,8 @@ async def _cleanup_after_test() -> AsyncGenerator[None, None]:
             await s.execute(delete(LoginThrottle))
             await s.execute(delete(TokenBlacklist))
             await s.commit()
+
+        # 3. dispose 引擎 + 关 redis
         await engine.dispose()
         try:
             from app.db.redis_client import redis_client

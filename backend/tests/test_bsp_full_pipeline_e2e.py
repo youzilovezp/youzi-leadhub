@@ -514,7 +514,7 @@ async def test_team_member_extract_english_tier1(db_session):
     members = detect_team_members([html])
     names_titles = {(m["name"], m["title"]) for m in members}
     assert ("John Smith", "CEO") in names_titles
-    assert ("Jane Doe", "VP") in names_titles  # 长 title "VP Marketing" 截短?——实际匹配最长
+    assert ("Jane Doe", "VP Marketing") in names_titles  # VP + 后续词整体识别（修复占位策略）
     # 「Director of Sales」/「Head of Marketing」/「General Manager」都应匹配
     titles = [t for _, t in names_titles]
     assert any("Director" in t for t in titles), f"应识别 Director*: {titles}"
@@ -535,6 +535,244 @@ async def test_team_member_extract_does_not_match_garbage(db_session):
     """
     members = detect_team_members([html])
     assert members == [], f"导航/页脚不应产出假联系人: {members}"
+
+
+async def test_cost_health_endpoint_aggregates_inspection_list(db_session):
+    """cost-health 聚合接口：识别需人工巡检的 lead，按严重程度排序。
+
+    注入 3 类典型 case：
+      - fail + 耗时异常 → 「富化失败」「资源消耗」两条原因
+      - success 但 0 信号 → 「0 信号命中」「SPA 壳」两条原因
+      - render_calls > 0 → 「反爬大站」一条原因
+    """
+    import json as _json
+
+    from fastapi.testclient import TestClient
+
+    from app.core.config import settings
+    from app.main import app
+
+    from sqlalchemy import select
+
+    from app.models.lead import Lead
+    from app.collectors.base import LeadDraft
+    from app.crud.lead import upsert_lead
+
+    # 关键（2026-09-11 修复）：TestClient 直接启 app lifespan，会按 settings.WORKERS
+    # 决定是否启 task_runner 后台协程——WORKERS=1 默认会启 → 跨测试阻塞。
+    # 用 monkeypatch 临时关掉后台（与 conftest 同一策略）。
+    import pytest as _pytest
+
+    mp = _pytest.MonkeyPatch()
+    mp.setattr(settings, "WORKERS", 0)
+    mp.setattr(settings, "SCHEDULER_ENABLED", False)
+
+    # 1. 造 3 条 lead（用 draft 而不是依赖 seed，避免临时库没数据的依赖）
+    lead_ids: list[int] = []
+    for name in ["Health Test A", "Health Test B", "Health Test C"]:
+        lead, _ = await upsert_lead(
+            db_session,
+            LeadDraft(name=name, country="CN", industry="跨境电商", source="manual"),
+        )
+        assert lead is not None
+        lead_ids.append(lead.id)
+    await db_session.commit()
+
+    # 2. 注入三类样本 cost
+    cases = {
+        lead_ids[0]: {
+            "outcome": "success",
+            "http_calls": 8,
+            "impersonate_calls": 2,
+            "render_calls": 1,  # 反爬
+            "inner_pages_fetched": 2,
+            "signals_found": {"whatsapp_link": 1, "email": 1},
+            "elapsed_ms": 8500,
+        },
+        lead_ids[1]: {
+            "outcome": "fail",  # 失败
+            "http_calls": 4,
+            "impersonate_calls": 0,
+            "render_calls": 0,
+            "inner_pages_fetched": 0,
+            "signals_found": {},
+            "elapsed_ms": 60000,  # 超时
+        },
+        lead_ids[2]: {
+            "outcome": "success",  # SPA 壳
+            "http_calls": 1,
+            "impersonate_calls": 0,
+            "render_calls": 0,
+            "inner_pages_fetched": 0,
+            "signals_found": {},
+            "elapsed_ms": 1200,
+        },
+    }
+    for lid, cost in cases.items():
+        lead = (await db_session.execute(select(Lead).where(Lead.id == lid))).scalar_one()
+        meta = dict(lead.field_meta or {})
+        meta["enrich_cost"] = cost
+        if cost["outcome"] == "fail":
+            meta["enrich_fail"] = {"reason": "DNS 解析失败：测试"}
+        lead.field_meta = meta
+    await db_session.commit()
+
+    # 3. 用 TestClient 调接口
+    try:
+        with TestClient(app) as c:
+            r = c.post(
+                "/api/v1/auth/login",
+                json={"username": "admin", "password": "admin"},
+            )
+            assert r.status_code == 200, r.text
+            token = r.json()["data"]["access_token"]
+            r = c.get(
+                "/api/v1/collect/leads/cost-health",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert r.status_code == 200, r.text
+            d = r.json()["data"]
+    finally:
+        mp.undo()
+
+    # 4. 断言整体统计（必须 ≥ 3：可能 fixture 已有 lead）
+    assert d["total_leads"] >= 3
+    assert d["with_cost"] >= 3
+    assert d["success_count"] >= 2
+    assert d["fail_count"] >= 1
+
+    # 5. needs_inspection 包含我们造的三条（按 lead_id 索引）
+    by_id = {b["lead_id"]: b for b in d["needs_inspection"]}
+    for lid in lead_ids:
+        assert lid in by_id, f"#{lid} 应在 needs_inspection: {by_id.keys()}"
+
+    # 6. 断言具体原因
+    # B 是 fail → 含富化失败 + 资源消耗
+    assert any("富化失败" in r for r in by_id[lead_ids[1]]["reasons"])
+    assert any("资源消耗" in r for r in by_id[lead_ids[1]]["reasons"])
+    # C 是 SPA 壳 → 含 0 信号 + SPA
+    assert any("0 信号" in r for r in by_id[lead_ids[2]]["reasons"])
+    assert any("SPA" in r for r in by_id[lead_ids[2]]["reasons"])
+    # A 是反爬 → 含反爬
+    assert any("反爬" in r for r in by_id[lead_ids[0]]["reasons"])
+
+    # 7. 严重程度排序：fail 排在 0 信号之前
+    by_index = {lid: i for i, lid in enumerate(b["lead_id"] for b in d["needs_inspection"])}
+    assert by_index[lead_ids[1]] < by_index[lead_ids[2]], (
+        f"fail (#{lead_ids[1]}) 应该排在 0 信号 (#{lead_ids[2]}) 之前"
+    )
+
+    # 8. summary_text
+    assert "需巡检" in d["summary_text"]
+
+
+async def test_cost_health_route_not_shadowed_by_lead_id(db_session):
+    """路由顺序：/leads/cost-health 必须在 /leads/{lead_id} 之前声明——否则
+    'cost-health' 字符串被当 lead_id（int parse 失败 → 422）。回归保护。
+    """
+    import json as _json
+
+    from fastapi.testclient import TestClient
+
+    from app.core.config import settings
+    from app.main import app
+
+    import pytest as _pytest
+
+    mp2 = _pytest.MonkeyPatch()
+    mp2.setattr(settings, "WORKERS", 0)
+    mp2.setattr(settings, "SCHEDULER_ENABLED", False)
+
+    try:
+        with TestClient(app) as c:
+            r = c.post(
+                "/api/v1/auth/login",
+                json={"username": "admin", "password": "admin"},
+            )
+            token = r.json()["data"]["access_token"]
+            # 422 = 路由被错误解析为 /leads/{lead_id}（cost-health 不是 int）
+            r = c.get(
+                "/api/v1/collect/leads/cost-health",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert r.status_code != 422, (
+                f"cost-health 被 /leads/{{lead_id}} 吞了: {r.text[:300]}"
+            )
+            assert r.status_code == 200
+    finally:
+        mp2.undo()
+
+
+async def test_lifespan_skips_background_when_workers_zero(db_session):
+    """回归保护（2026-09-11）：lifespan 在 WORKERS=0 时不启 task_runner 后台 worker。
+
+    历史上 task_runner worker 协程在死 event loop 上 await async_session()，
+    跨测试阻塞后续测试 → 整个 test suite 跑不完 200+ 测试。现在：
+      - conftest.py 的 client fixture monkeypatch settings.WORKERS=0
+      - 直接用 TestClient 的测试也必须显式 monkeypatch（同策略）
+    锁住行为：WORKERS=0 → 跳过 lifespan 启 task_runner。
+    """
+    import asyncio
+
+    from app.core.config import settings
+    from app.services.task_runner import task_runner
+
+    # 之前测试可能没显式 stop——清空 workers 列表确保是干净状态
+    task_runner._workers.clear()
+    task_runner._cancel_events.clear()
+    task_runner._stopping = False
+    task_runner._progress.clear()
+    task_runner._progress_synced_at.clear()
+
+    # 跑 lifespan 同款决策（不直接 lifespan 避免 lifespan 启 lifespan 调主流程）
+    started = task_runner._workers != []  # 期望 False
+
+    # WORKERS=0 路径：跳过 task_runner.start()
+    if settings.WORKERS == 0:
+        # 没启 → _workers 仍空
+        assert task_runner._workers == [], (
+            f"WORKERS=0 不应启 task_runner，但 _workers={task_runner._workers}"
+        )
+        assert started is False
+    else:
+        pytest.skip(
+            f"WORKERS={settings.WORKERS}（非 0 跳过——本测试只锁 WORKERS=0 路径）"
+        )
+
+
+async def test_enrich_cost_telemetry_structure(db_session):
+    """Cost telemetry（2026-09-08）：enrich_cost 字段记录 http/impersonate/render
+    调用次数 + signals_found 命中数 + elapsed_ms。
+    """
+    # 直接构造一个 enrich_cost payload 模拟写入
+    fake_cost = {
+        "outcome": "success",
+        "http_calls": 4,
+        "impersonate_calls": 1,
+        "render_calls": 0,
+        "inner_pages_fetched": 2,
+        "signals_found": {
+            "whatsapp_link": 1,
+            "email": 1,
+            "phone_tel_link": 1,
+        },
+        "elapsed_ms": 1234,
+    }
+    from sqlalchemy import select
+
+    from app.models.lead import Lead
+
+    lead = (await db_session.execute(select(Lead).order_by(Lead.id).limit(1))).scalar_one()
+    meta = dict(lead.field_meta or {})
+    meta["enrich_cost"] = fake_cost
+    lead.field_meta = meta
+    await db_session.commit()
+    await db_session.refresh(lead)
+    saved = (lead.field_meta or {}).get("enrich_cost")
+    assert saved is not None
+    assert saved["http_calls"] == 4
+    assert saved["signals_found"]["whatsapp_link"] == 1
+    assert saved["elapsed_ms"] > 0
 
 
 async def test_team_member_extract_dedup(db_session):

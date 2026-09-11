@@ -265,12 +265,15 @@ def _scan_members(text: str, name_re: re.Pattern, title_alt: str) -> list[tuple[
     不能让 name 吃「市场」把「经理」当成无 title 的尾词）。紧贴写法
     （「赵芳市场经理」无空格）由外层 detect_team_members 多遍扫描覆盖。
     """
+    # f-string 在 Python 3.14 对 {{}} 与 \{ 的处理不一致；用普通字符串拼接更稳
+    _sep_class = "[ ," + chr(0x2c) + "，\n\r]"
     pat = re.compile(
         rf"(?:^|[\n\r\u3000\t ,，；;、|])"
         rf"(?P<name>{name_re.pattern})"
-        # name 与 title 之间：1-3 个分隔符（空格 / 逗号 任一组合）——
-        # 接受「, 」、「,」「 」等多种写法，非贪婪避免跨段
-        rf"[ ,\u002c，]{{1,3}}?"
+        # name 与 title 之间：1-3 个分隔符（空格 / 逗号 / 换行 任一组合）——
+        # 含换行是为兼容 page_text 在块级标签间插入的换行（真实 about 页
+        # <h3>name</h3><p>title</p> 这种结构）。
+        + _sep_class + "{1,3}?"
         rf"(?P<title>{title_alt})"
         rf"(?=$|[\n\r\u3000\t ,，；;|])",
         re.M if "一-鿿" in name_re.pattern else 0,
@@ -340,6 +343,7 @@ def detect_team_members(html_list: list[str]) -> list[dict[str, str]]:
         "Director of [A-Za-z ]+?",
         "Head of [A-Za-z ]+?",
         "Vice President",
+        "VP [A-Za-z ]+?",  # 「VP Marketing」「VP Sales」等 VP + 后续词——占位防短 VP 抢
     )
     _TITLES_EN_SHORT = (
         "Co-Founder",
@@ -1957,12 +1961,31 @@ async def _enrich_one(
     无头浏览器渲染兜底（反爬 403 的大站），仍失败留待下一轮自动重试。
     失败原因分层收集（DNS/超时/TLS/HTTP 状态码/指纹层/渲染层），写入
     field_meta.enrich_fail 供详情页展示（用户需求：每条线索的失败原因描述）。
+
+    Cost telemetry（2026-09-08）：每次富化累加调用计数 + 信号命中数，写入
+    field_meta.enrich_cost。运维口径——知道哪家站动用了浏览器渲染、哪家站
+    信号全空，调权重 / 排采集优先级的依据。
     """
+    import time as _time
+
     base = website if website.startswith(("http://", "https://")) else f"https://{website}"
+    _t0 = _time.monotonic()
+    # cost telemetry：函数内累加，结束时序列化到 field_meta.enrich_cost
+    _cost: dict[str, Any] = {
+        "outcome": "fail",  # 默认失败，成功时改写为 success
+        "http_calls": 0,           # 直接 httpx 抓取（首页 + 内页 + 探常规路径）
+        "impersonate_calls": 0,    # curl_cffi 指纹伪装调用次数
+        "render_calls": 0,         # playwright 浏览器渲染次数
+        "inner_pages_fetched": 0,  # 成功抓到内容的内页数
+        "signals_found": {},       # 每类 detect_* 命中计数（动态追加 key）
+        "elapsed_ms": 0,
+    }
     homepage, fail_reasons = await _fetch_site_detailed(clients, base)
+    _cost["http_calls"] += 1  # _fetch_site_detailed 内部至少 1 次 httpx
     if homepage is None:
         # 第二层：Chrome 指纹伪装（大多数反爬站到此为止，不用开浏览器）
         homepage, imp_reason = await _fetch_impersonated(base)
+        _cost["impersonate_calls"] += 1
         if homepage is not None:
             await ctx.log("info", f"[lead {lead_id}] 🥷 Chrome 指纹伪装通过：{website}")
         elif imp_reason:
@@ -1974,6 +1997,7 @@ async def _enrich_one(
         if browser is not None:
             render_attempted = True
             homepage = await _render_with_browser(browser, base)
+            _cost["render_calls"] += 1
             if homepage is not None:
                 await ctx.log("info", f"[lead {lead_id}] 🌐 浏览器渲染兜底成功：{website}")
     if homepage is None:
@@ -1982,6 +2006,20 @@ async def _enrich_one(
         reason = "；".join(dict.fromkeys(r for r in fail_reasons if r)) or "未知原因"
         await ctx.log("warn", f"[lead {lead_id}] 首页抓取失败：{website} —— {reason}")
         await _record_enrich_fail(lead_id, website, reason)
+        # Cost telemetry：失败也写（outcome + 已花的成本便于排查）
+        _cost["elapsed_ms"] = int((_time.monotonic() - _t0) * 1000)
+        try:
+            from app.models.lead import Lead as _LeadT
+
+            async with _session_factory()() as _sc:
+                _row = await _sc.get(_LeadT, lead_id)
+                if _row is not None:
+                    _meta = dict(_row.field_meta or {})
+                    _meta["enrich_cost"] = _cost
+                    _row.field_meta = _meta
+                    await _sc.commit()
+        except Exception:  # noqa: BLE001  telemetry 失败不影响主流程
+            pass
         return False, reason
 
     # 官网归属校验（2026-09-01）：标题=知名平台且与公司名零重叠 → 张冠李戴
@@ -2054,13 +2092,16 @@ async def _enrich_one(
         # 内页与首页同等待遇（2026-08-31 审计：此前只有主 client 单次机会——
         # 代理软拦截/证书问题的站点首页成功、联系页全挂，而 WA/邮箱恰在联系页）
         html = await _fetch_site(clients, url)
+        _cost["http_calls"] += 1
         if html is None and _INNER_CONTACT_WORDS_RE.search(url):
             # 联系类内页补第二层（FR-1.5「与首页同等待遇」）：httpx 打不开的
             # 反爬站（banggood 型 403）联系方式恰在联系页，指纹层毫秒级开销
             html, _imp_reason = await _fetch_impersonated(url)
+            _cost["impersonate_calls"] += 1
         if html:
             pages.append(html)
             page_urls.append(url)
+            _cost["inner_pages_fetched"] += 1
 
     # 联系页 SPA 壳渲染兜底（2026-09-01 govee 实测形态）：/contact 返回 200
     # 但是应用壳（Shopify 型），联系方式全在 JS 挂件里——整站联系方式证据为
@@ -2122,6 +2163,32 @@ async def _enrich_one(
     # WhatsApp Business 使用（§4.1）+ 群组链接（§4.1 私域证据）
     wa_business = detect_wa_business(pages)
     wa_groups = detect_whatsapp_groups(pages)
+
+    # Cost telemetry：每类 detect_* 命中计数（cost 字段写入 field_meta.enrich_cost）
+    def _count(name: str, value) -> None:
+        """value 非空即记 1，否则记 0；列表/字典按长度。"""
+        if isinstance(value, (list, tuple, dict, set)):
+            n = len(value)
+        else:
+            n = 1 if value else 0
+        if n > 0:
+            _cost["signals_found"][name] = n
+
+    _count("whatsapp_link", whatsapp_hit or whatsapp_url)
+    _count("whatsapp_number", wa_numbers)
+    _count("whatsapp_group", wa_groups)
+    _count("wa_business", wa_business)
+    _count("email", email)
+    _count("phone_tel_link", detect_tel_phones(pages))
+    _count("phone_text", detect_text_phones(pages))
+    _count("jsonld", jsonld)
+    _count("social", social)
+    _count("scenes", scenes)
+    _count("saas_signals", saas_signals)
+    _count("overseas", overseas)
+    _count("icp_license", detect_icp_license(pages))
+    _count("contact_persons", detect_contact_persons(pages))
+    _count("team_members", detect_team_members(pages))
 
     async with _session_factory()() as session:
         from app.crud.contact import auto_create_from_email
@@ -2483,6 +2550,11 @@ async def _enrich_one(
         meta = dict(lead.field_meta or {})
         if meta.pop("enrich_fail", None) is not None:
             lead.field_meta = meta
+        # Cost telemetry 写库：每次富化的网络调用数 + 信号命中数（运维口径）
+        _cost["outcome"] = "success"
+        _cost["elapsed_ms"] = int((_time.monotonic() - _t0) * 1000)
+        meta["enrich_cost"] = _cost
+        lead.field_meta = meta
         # 统一重评钩子：意向分重算（读 ORM 行属性，fb_whatsapp 不再漏传）+ 事件发射
         await rescore_and_log(session, lead, before=before)
         # 方向 B：富化完成 → 重算 qualify_reason（apply_score 已清空缓存保证失效）

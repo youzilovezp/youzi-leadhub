@@ -56,6 +56,8 @@ from app.schemas.collect import (
     ContactCreate,
     ContactOut,
     ContactUpdate,
+    CostHealthBucket,
+    CostHealthOut,
     FollowUpCreate,
     FollowUpOut,
     LeadCheckWhatsAppRequest,
@@ -731,6 +733,141 @@ async def daily_batch_endpoint(db: SessionDep, user: CurrentUser):
     )
 
 
+# ---------- 采集成本健康度（2026-09-10 telemetry）----------
+# 聚合全库 lead.field_meta.enrich_cost，给运维/技术销售指出「需要人工巡检」的线索：
+#   - 富化失败的（outcome=fail）
+#   - 用到浏览器渲染的（render_calls > 0 → 反爬大站）
+#   - 信号命中为零的（signals_found 空 → 域名失效或爬虫失效）
+#   - 内页全失败的（inner_pages_fetched == 0 且 outcome=success）
+# 仅 admin 权限（每日手动调用，非高频）。
+#
+# 注意：必须声明在 GET /leads/{lead_id} 之前——否则 "cost-health" 被当 lead_id
+# （同 /leads/export / /leads/daily-batch 的老问题）。
+@router.get(
+    "/leads/cost-health",
+    response_model=ResponseModel[CostHealthOut],
+    summary="采集健康度聚合（admin：识别需人工巡检的线索）",
+)
+async def collect_cost_health(db: SessionDep, _user: SuperUser):
+    """聚合全库 lead.field_meta.enrich_cost，返回：
+        1. 整体统计（avg http/impersonate/render/elapsed，信号命中分布）
+        2. needs_inspection：需人工巡检的 lead 列表（不超过 200）
+        3. summary_text：一句话给非技术干系人
+
+    SQLite/PG 兼容：JSON 字段聚合直接在 Python 内存里做（O(n) 扫描，
+    全库 ~1000 lead < 50ms）。生产规模上到 10k+ 时改 PG jsonb 路径聚合。
+    """
+    from sqlalchemy import func
+
+    rows = (
+        await db.execute(
+            select(Lead.id, Lead.name, Lead.grade, Lead.icp_status, Lead.field_meta)
+        )
+    ).all()
+
+    total = len(rows)
+    buckets: list[CostHealthBucket] = []
+    sig_dist: dict[str, int] = {}
+    success_cnt = fail_cnt = with_cost = 0
+    sum_http = sum_imp = sum_render = sum_inner = sum_elapsed = 0
+
+    for lead_id, name, grade, icp, field_meta in rows:
+        meta = field_meta or {}
+        cost = meta.get("enrich_cost") if isinstance(meta, dict) else None
+        if not isinstance(cost, dict):
+            # 无 cost 记录 → 不进 needs_inspection（首次富化前的 lead 不报警）
+            continue
+        with_cost += 1
+        outcome = str(cost.get("outcome", "unknown"))
+        if outcome == "success":
+            success_cnt += 1
+        elif outcome == "fail":
+            fail_cnt += 1
+        http_calls = int(cost.get("http_calls", 0) or 0)
+        impersonate_calls = int(cost.get("impersonate_calls", 0) or 0)
+        render_calls = int(cost.get("render_calls", 0) or 0)
+        inner_pages = int(cost.get("inner_pages_fetched", 0) or 0)
+        elapsed_ms = int(cost.get("elapsed_ms", 0) or 0)
+        signals_found = cost.get("signals_found") or {}
+        signals_total = sum(int(v or 0) for v in signals_found.values())
+        sum_http += http_calls
+        sum_imp += impersonate_calls
+        sum_render += render_calls
+        sum_inner += inner_pages
+        sum_elapsed += elapsed_ms
+        # 累积每个 signal key 的命中 lead 数（用于「这个采集器覆盖了多少线索」分布）
+        for k, v in signals_found.items():
+            if v:
+                sig_dist[k] = sig_dist.get(k, 0) + 1
+
+        # 巡检理由：触发任一 → 进 needs_inspection
+        reasons: list[str] = []
+        if outcome == "fail":
+            fail_obj = meta.get("enrich_fail")
+            fail_msg = fail_obj.get("reason", "未知") if isinstance(fail_obj, dict) else "未知"
+            reasons.append(f"富化失败：{fail_msg}")
+        if render_calls > 0:
+            reasons.append(f"触发了浏览器渲染 {render_calls} 次（反爬大站）")
+        if outcome == "success" and signals_total == 0:
+            reasons.append("成功但 0 信号命中（域名失效或富化漏抓）")
+        if outcome == "success" and inner_pages == 0 and signals_total <= 2:
+            reasons.append(f"仅首页成功，内页 0 个、信号 {signals_total}（疑似 SPA 壳）")
+        if elapsed_ms > 30000:
+            reasons.append(f"耗时 {elapsed_ms}ms 超 30s（资源消耗异常）")
+
+        if reasons:
+            buckets.append(
+                CostHealthBucket(
+                    lead_id=lead_id,
+                    name=name,
+                    grade=grade,
+                    icp_status=icp,
+                    outcome=outcome,
+                    http_calls=http_calls,
+                    impersonate_calls=impersonate_calls,
+                    render_calls=render_calls,
+                    inner_pages_fetched=inner_pages,
+                    signals_total=signals_total,
+                    elapsed_ms=elapsed_ms,
+                    reasons=reasons[:3],  # 截前 3 条避免过长
+                )
+            )
+
+    # 巡检列表按「严重程度」排序：失败 > 0 信号 > 渲染 > 耗时
+    buckets.sort(
+        key=lambda b: (
+            -(2 if b.outcome == "fail" else 0)
+            - (2 if b.signals_total == 0 else 0)
+            - (1 if b.render_calls > 0 else 0),
+            -b.elapsed_ms,
+        )
+    )
+    buckets = buckets[:200]
+
+    n = with_cost or 1
+    summary = (
+        f"共 {total} 条线索，其中 {with_cost} 条有 cost 记录。"
+        f"成功 {success_cnt} / 失败 {fail_cnt}；"
+        f"需巡检 {len(buckets)} 条。"
+    )
+    return ResponseModel(
+        data=CostHealthOut(
+            total_leads=total,
+            with_cost=with_cost,
+            success_count=success_cnt,
+            fail_count=fail_cnt,
+            avg_http_calls=round(sum_http / n, 2),
+            avg_impersonate_calls=round(sum_imp / n, 2),
+            avg_render_calls=round(sum_render / n, 2),
+            avg_inner_pages=round(sum_inner / n, 2),
+            avg_elapsed_ms=round(sum_elapsed / n, 1),
+            signals_dist=dict(sorted(sig_dist.items(), key=lambda kv: -kv[1])),
+            needs_inspection=buckets,
+            summary_text=summary,
+        )
+    )
+
+
 @router.get(
     "/leads/{lead_id}",
     response_model=ResponseModel[LeadDetailOut],
@@ -835,6 +972,7 @@ async def get_lead_detail(db: SessionDep, user: CurrentUser, lead_id: int):
     out.last_ad_at = lead.last_ad_at
     out.cn_evidence = cn_evidence_of_lead(lead)
     out.enrich_fail = (lead.field_meta or {}).get("enrich_fail")
+    out.enrich_cost = (lead.field_meta or {}).get("enrich_cost")
     # 方向 B（2026-09-07）：AI 判定理由。字段为空时按 cache_key 现算（apply_score
     # 会清空缓存导致字段为 None —— 详情页访问时按需懒重算，不靠富化/评分 hook 100% 命中）
     if lead.qualify_reason is None:
@@ -1611,3 +1749,4 @@ async def collect_stats(db: SessionDep, _user: CurrentUser):
             },
         }
     )
+

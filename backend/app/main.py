@@ -9,6 +9,7 @@ Leadhub - FastAPI 应用入口。
     /healthz  - 进程级（K8s liveness）
     /readyz   - 含 DB ping（K8s readiness）
 """
+import asyncio
 from contextlib import asynccontextmanager
 
 import sqlalchemy as sa
@@ -52,7 +53,11 @@ async def lifespan(app: FastAPI):
     from app.services import scheduler as collect_scheduler
     from app.services.task_runner import task_runner
 
-    if settings.WORKERS > 1:
+    if settings.WORKERS == 0:
+        # 0 = 显式关闭后台（测试 / 一次性脚本专用）。scheduler 同理
+        # （scheduler.start 内部已读 SCHEDULER_ENABLED → 测试默认 false 自然不启）
+        logger.info("⏭️  WORKERS=0，跳过后台任务执行器与定时调度（lifespan 跳过启动）")
+    elif settings.WORKERS > 1:
         logger.warning(
             f"⚠️ WORKERS={settings.WORKERS} > 1：任务执行器与定时调度已禁用"
             "（DB 队列单进程设计）。采集任务将保持 queued 状态。"
@@ -64,8 +69,17 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    await collect_scheduler.stop()
-    await task_runner.stop()
+    # 关闭后台：先 stop 让 worker 退出循环，再 dispose 引擎
+    try:
+        await asyncio.wait_for(collect_scheduler.stop(), timeout=2.0)
+    except (asyncio.TimeoutError, Exception):
+        pass
+    try:
+        await asyncio.wait_for(task_runner.stop(), timeout=2.0)
+    except (asyncio.TimeoutError, Exception):
+        # worker 卡在 await async_session() 不响应 cancel（SQLite 锁或死 loop）
+        # 强制清空引用，让下一测试新 event loop 创建新 worker
+        task_runner._workers.clear()
 
 
 def _check_prod_secrets() -> None:
