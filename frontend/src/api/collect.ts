@@ -708,6 +708,39 @@ export function getStats() {
   return request.get<CollectStats, CollectStats>('/collect/stats')
 }
 
+/** 采集健康度聚合（admin）：识别需人工巡检的 lead */
+export interface CostHealthBucket {
+  lead_id: number
+  name: string
+  grade: string
+  icp_status: string
+  outcome: string
+  http_calls: number
+  impersonate_calls: number
+  render_calls: number
+  inner_pages_fetched: number
+  signals_total: number
+  elapsed_ms: number
+  reasons: string[]
+}
+export interface CostHealth {
+  total_leads: number
+  with_cost: number
+  success_count: number
+  fail_count: number
+  avg_http_calls: number
+  avg_impersonate_calls: number
+  avg_render_calls: number
+  avg_inner_pages: number
+  avg_elapsed_ms: number
+  signals_dist: Record<string, number>
+  needs_inspection: CostHealthBucket[]
+  summary_text: string
+}
+export function getCostHealth() {
+  return request.get<unknown, CostHealth>('/collect/leads/cost-health')
+}
+
 /** 近 N 日新增线索趋势（dashboard 图，真实数据） */
 export function getLeadTrend(days = 7) {
   return request.get<

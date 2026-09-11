@@ -322,6 +322,11 @@ class LeadDetailOut(LeadOut):
     # 最近一次富化失败信息 {reason, website, updated_at}（成功后自愈清除；
     # 存在 = 线索数据可能过期，销售建联前可先看原因）
     enrich_fail: dict[str, Any] | None = None
+    # 富化成本（2026-09-08 telemetry）：
+    #   {outcome, http_calls, impersonate_calls, render_calls,
+    #    inner_pages_fetched, signals_found: {key: count}, elapsed_ms}
+    # 写库到 lead.field_meta.enrich_cost，运维口径
+    enrich_cost: dict[str, Any] | None = None
     # AI 判定理由（方向 B 2026-09-07）：
     #   {summary, drivers[], blockers[], next_action, generated_by, generated_at, cache_key}
     qualify_reason: dict[str, Any] | None = None
@@ -334,6 +339,46 @@ class AssignPayload(BaseModel):
     """手动分配/转移跟进人。"""
 
     owner_id: int = Field(ge=1)
+
+
+# ---------- 采集健康度聚合（2026-09-10 telemetry）----------
+
+
+class CostHealthBucket(BaseModel):
+    """单 lead 的成本/命中摘要（巡检列表用）。"""
+
+    lead_id: int
+    name: str
+    grade: str
+    icp_status: str
+    outcome: str = "unknown"  # success / fail / unknown（无 cost 记录）
+    http_calls: int = 0
+    impersonate_calls: int = 0
+    render_calls: int = 0
+    inner_pages_fetched: int = 0
+    signals_total: int = 0  # signals_found 各 key 之和
+    elapsed_ms: int = 0
+    # 巡检理由：为什么需要人工看
+    reasons: list[str] = []
+
+
+class CostHealthOut(BaseModel):
+    """采集健康度聚合视图。"""
+
+    total_leads: int
+    with_cost: int  # 已有 enrich_cost 记录的 lead 数
+    success_count: int  # outcome=success
+    fail_count: int  # outcome=fail
+    avg_http_calls: float
+    avg_impersonate_calls: float
+    avg_render_calls: float
+    avg_inner_pages: float
+    avg_elapsed_ms: float
+    # 信号命中率分布
+    signals_dist: dict[str, int]  # 每个信号 key 的命中 lead 数
+    # 待人工巡检的 lead 列表（不超过 200）
+    needs_inspection: list[CostHealthBucket]
+    summary_text: str  # 一句话给非技术干系人看
 
 
 class AutoAssignPayload(BaseModel):
