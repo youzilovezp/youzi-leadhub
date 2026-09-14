@@ -226,9 +226,10 @@ class B2BSupplierCollector(Collector):
             "label": "品类关键词",
             "required": False,
             "type": "tags",
-            # 站点是英文站：英文品类词的搜索结果显著更全（实测 wig vs 假发），
-            # 中文词也可用但结果少；默认词覆盖跨境热门品类
-            "placeholder": "英文品类词结果更全（wig、LED strip、pet products、outdoor furniture），中文也可用（假发、宠物用品）；越具体越准",
+            # 单一来源 made-in-china.com（2026-09-12 强化）：英文品类词的搜索结果显著更全
+            # （实测 wig vs 假发），中文词也可用但结果少；默认词覆盖跨境热门品类
+            "placeholder": "made-in-china.com 单一来源。英文品类词结果更全（wig、LED strip、"
+            "pet products、outdoor furniture），中文也可用（假发、宠物用品）；越具体越准",
             "default": DEFAULT_KEYWORDS,
         },
         {

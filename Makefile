@@ -15,10 +15,12 @@ REDIS_PORT := $(shell sed -n 's/^REDIS_PORT=//p' $(ENV_FILE) 2>/dev/null | head 
 PG_PORT := $(if $(PG_PORT),$(PG_PORT),5432)
 REDIS_PORT := $(if $(REDIS_PORT),$(REDIS_PORT),6379)
 # 服务端口从 .env 读（改 .env 的 PORT / FRONTEND_PORT 即生效，支持多项目并存）
+# 默认 60005/31000——8000/3000 容易被其他项目抢；make dev/start 端口被占时
+# 自动用 scripts/pick_free_port.py 找下一个空闲端口（探测 50 个候选）
 BACKEND_PORT := $(shell sed -n 's/^PORT=//p' $(ENV_FILE) 2>/dev/null | head -1 | awk '{print $$1}')
-BACKEND_PORT := $(if $(BACKEND_PORT),$(BACKEND_PORT),8000)
+BACKEND_PORT := $(if $(BACKEND_PORT),$(BACKEND_PORT),60005)
 FRONTEND_PORT := $(shell sed -n 's/^FRONTEND_PORT=//p' $(ENV_FILE) 2>/dev/null | head -1 | awk '{print $$1}')
-FRONTEND_PORT := $(if $(FRONTEND_PORT),$(FRONTEND_PORT),3000)
+FRONTEND_PORT := $(if $(FRONTEND_PORT),$(FRONTEND_PORT),31000)
 
 # 端口探测（python3 socket，跨平台无依赖）：exit 0 = 有人监听（可复用）
 port_listening = python3 -c "import socket,sys; s=socket.socket(); s.settimeout(0.5); sys.exit(0 if s.connect_ex(('127.0.0.1', $(1))) == 0 else 1)"

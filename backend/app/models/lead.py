@@ -63,6 +63,11 @@ class Lead(Base, TimestampMixin):
     enriched_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True)
     )  # 上次成功富化时间
+    # 招聘页巡检冷却（2026-09-11）：career_site 跑过后 7 天内不再重抓同一 lead
+    # （岗位下架不会删信号——历史证据保留；新岗位自动并入）
+    career_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
 
     # ---------- 去重与评分 ----------
     # 主身份键，优先级：domain > phone_e164 > md5(归一化名称+城市)

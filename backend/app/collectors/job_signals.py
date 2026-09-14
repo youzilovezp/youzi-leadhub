@@ -25,8 +25,36 @@ _CS_RE = re.compile(
     re.I,
 )
 _OPS_RE = re.compile(r"operations?\b|specialist|agent|admin(?:istrator)?|运营", re.I)
-_SOCIAL_RE = re.compile(r"facebook|instagram|tiktok|social\s*media|社媒|新媒体", re.I)
-_MKT_OPS_RE = re.compile(r"marketing|growth|ecommerce|e-commerce|advert|投放|营销", re.I)
+_SOCIAL_RE = re.compile(
+    # 2026-09-11 扩：补 TikTok / YouTube 等具体平台 + KOL/内容运营岗位。
+    # 误判风险低（这些词很明确指向海外社媒/内容业务）
+    r"facebook|instagram|tiktok|youtube|social\s*media|社媒|新媒体|"
+    r"kol|influencer|内容运营|账号运营|短视频|达人|博主",
+    re.I,
+)
+_MKT_OPS_RE = re.compile(
+    # 2026-09-11 扩：补「广告投放」岗位（Meta Ads / Google Ads / in-feed ads / 推广）。
+    # 误判风险低：这些词几乎只出现在广告投放岗
+    r"marketing|growth|ecommerce|e-commerce|advert(?:ising|iser|isement)?|"
+    r"投放|推广|ads?\b|ad\s*operation|ad\s*planner|营销",
+    re.I,
+)
+# 2026-09-11 扩：独立站运营（独立站 / Shopify / DTC）。需配合 _SAAS_DENY
+# 排除 BSP 视角下的**不是客户**（Shopline/Shoptup 这类建站 SaaS 自己也在招
+# 独立站运营岗 — 他们的 BSP 客户是其他商家，不是我们）。
+_DTC_RE = re.compile(
+    r"独立站|shopify|dtc|自建站|owned\s*site|direct[-\s]to[-\s]consumer",
+    re.I,
+)
+# 排除：已知 BSP 客户视角下的**非目标企业**（建站/营销 SaaS 自己有招
+# 独立站运营/海外社媒岗，但他们的客户是商家——不卖给他们 BSP）
+_SAAS_DENY_RE = re.compile(
+    r"shopline|shoptop|shopla(?:zy|zz)|shopify|bigcommerce|wix|"
+    r"squarespace|wocommerce|magento\s+inc|prestashop|"
+    r"hubspot|salesforce|mailchimp|klaviyo|"
+    r"店匠|有赞|微盟|商派|凡科",
+    re.I,
+)
 _OVERSEAS_RE = re.compile(
     r"overseas|international|global|english[-\s]speaking|bilingual|cross[-\s]?border"
     r"|abroad|海外|国际|英文|英语|跨境|外贸|海运|货代|驻外",
@@ -42,7 +70,10 @@ def classify_job_title(title: str | None) -> dict[str, dict[str, int | str]]:
     判定规则（保守优先——宁可漏判不误判，误判直接抬分污染评分）：
     - wa_ops：标题含 WhatsApp 语义且是运营/客服性质岗位
     - overseas_cs：海外/英文/跨境 语义 × 客服语义
-    - social_ops：社媒平台/社媒运营 语义 × (运营或营销) 语义
+    - social_ops：社媒平台/社媒/内容/KOL 语义 × (运营或营销) 语义
+    - ads_ops：广告/投放/推广 + (运营/营销) 语义（2026-09-11 扩）
+    - dtc_ops：独立站/Shopify/DTC + (运营/营销) 语义，**排除已知建站 SaaS**
+      自家岗位（Shopline/Shoptop——他们的 BSP 客户是其他商家，2026-09-11 扩）
     - crm_ops：CRM/Customer Success 语义（岗位本身就是运营 CRM）
     - overseas_sales：海外/国际 语义 × 销售 语义
     """
@@ -51,15 +82,29 @@ def classify_job_title(title: str | None) -> dict[str, dict[str, int | str]]:
     out: dict[str, dict[str, int | str]] = {}
     t = title  # 已编译正则均 IGNORECASE
 
-    if _WA_RE.search(t) and (_CS_RE.search(t) or _OPS_RE.search(t) or _MKT_OPS_RE.search(t)):
+    # SAAS 排除：建站/营销 SaaS 自己的岗位（不是 BSP 客户）——直接跳所有规则
+    saas_self = bool(_SAAS_DENY_RE.search(t))
+
+    if (
+        not saas_self
+        and _WA_RE.search(t)
+        and (_CS_RE.search(t) or _OPS_RE.search(t) or _MKT_OPS_RE.search(t))
+    ):
         out["wa_ops"] = {"label": "WhatsApp 运营/客服", "points": 30}
-    if _OVERSEAS_RE.search(t) and _CS_RE.search(t):
+    if not saas_self and _OVERSEAS_RE.search(t) and _CS_RE.search(t):
         out["overseas_cs"] = {"label": "海外/英文客服", "points": 20}
-    if _SOCIAL_RE.search(t) and (_OPS_RE.search(t) or _MKT_OPS_RE.search(t)):
-        out["social_ops"] = {"label": "海外社媒运营", "points": 15}
-    if _CRM_RE.search(t):
+    if not saas_self and _SOCIAL_RE.search(t) and (_OPS_RE.search(t) or _MKT_OPS_RE.search(t)):
+        out["social_ops"] = {"label": "海外社媒/内容运营", "points": 15}
+    if not saas_self and _MKT_OPS_RE.search(t) and ("ad" in t.lower() or "投" in t or "推广" in t):
+        # 2026-09-11 扩：广告投放岗位。需同时含 marketing 类词（防误判"市场专员"
+        # 等普通营销岗）+ 至少一个广告类词
+        out["ads_ops"] = {"label": "海外广告投放", "points": 12}
+    if not saas_self and _DTC_RE.search(t) and (_OPS_RE.search(t) or _MKT_OPS_RE.search(t)):
+        # 2026-09-11 扩：独立站运营岗。需配合 _SAAS_DENY 排除 SaaS 自家
+        out["dtc_ops"] = {"label": "独立站运营（DTC）", "points": 15}
+    if not saas_self and _CRM_RE.search(t):
         out["crm_ops"] = {"label": "CRM/Customer Success 运营", "points": 12}
-    if _OVERSEAS_RE.search(t) and _SALES_RE.search(t):
+    if not saas_self and _OVERSEAS_RE.search(t) and _SALES_RE.search(t):
         out["overseas_sales"] = {"label": "海外销售", "points": 10}
     return out
 
