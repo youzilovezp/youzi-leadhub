@@ -233,19 +233,25 @@ class JobPostingCollector(Collector):
             "label": "搜索关键词",
             "required": False,
             "type": "tags",
-            "placeholder": "巡检用岗位词（跨境电商客服,英语客服,海外社媒运营）；开『发现新线索』请改用品类词（假发,LED灯带,宠物用品,渔具）——岗位词发现进来的全是货代物流",
-            # 注意：站内搜索不吃英文词——「whatsapp运营」会联想跑偏到
-            # UI 设计师类岗位；单词「海外客服」也可能被稀释成模糊「客服」匹配
-            # （2026-08-31 实测单词条 20 岗零信号，多词组合有效）。用中文词组合。
-            # 默认词 = 岗位词（对应默认巡检模式）；发现模式请用品类词（见 logic_note）
-            "default": "跨境电商客服,英语客服,海外社媒运营,私域运营,外贸业务员",
+            "placeholder": "巡检用岗位词或品类词（jobui/猎聘/前程 可同时搜岗位词 + 站名）。开『发现新线索』请用"
+            "品类词（假发/LED灯带/宠物用品），岗位词发现进来的全是货代物流公司（不符合 BSP 客户）",
+            # 2026-09-13 默认 keywords 改品类词（与 meta_ads 一致）：
+            # - 巡检模式（discover_new=false）：库内 7 条 lead 招聘页大概率不含 BSP 视角词
+            #   （招聘页用「业务经理/产品经理」不用「跨境客服」）→ 用品类词先匹配「假发/LED」
+            #   业务相关 lead，再合并成信号分
+            # - 发现模式：必填品类词（dispatch 由 validate_params 强校验）
+            # - 单条 dummy 兜底 ["跨境电商客服"] 保持向后兼容（万一全空）
+            "default": "假发,LED灯带,宠物用品,户外家具,渔具,跨境电商",
         },
         {
             "key": "discover_new",
             "label": "发现新线索（默认关）",
             "required": False,
             "type": "switch",
-            "placeholder": "默认只给库内已有公司补招聘信号；打开后作为新线索来源——此时关键词务必改用品类词（假发/LED灯带/宠物用品），岗位词发现进来的全是货代物流公司",
+            # 2026-09-12 强化：默认关 = 安全；开 = 改词 + 高噪声风险
+            "placeholder": "默认只给库内已有公司补招聘信号（安全）。打开后作为新线索来源——此时关键词务必"
+            "改用品类词（假发/LED灯带/宠物用品），岗位词发现进来的全是货代物流公司"
+            "（不符合 BSP 客户画像，会污染销售池）",
             "default": "false",
         },
         # 翻页数不在表单暴露：固定默认 2 页（run() 里兜底），需要调参属于运维场景
@@ -260,6 +266,15 @@ class JobPostingCollector(Collector):
                 code=40001,
                 message=f"不支持的站点：{site}（当前支持：{'/'.join(SITE_CONFIGS)}）",
             )
+        # 2026-09-13：开『发现新线索』必须填品类词——空关键词拉进来全是货代物流公司
+        # （不符合 BSP 客户画像，会污染销售池）。这是发现模式必填，巡检模式不卡
+        if str(params.get("discover_new") or "false").lower() in ("1", "true", "yes"):
+            kws = [k.strip() for k in split_csv(str(params.get("keywords") or "")) if k.strip()]
+            if not kws:
+                raise BusinessError(
+                    code=40001,
+                    message="『发现新线索』模式必须填写品类关键词（不能用岗位词，否则只挖到货代物流公司）",
+                )
 
     async def run(self, ctx: TaskContext) -> None:
         site = str(ctx.params.get("site") or "jobui").strip()

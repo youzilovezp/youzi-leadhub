@@ -1062,12 +1062,36 @@ class WebsiteEnrichCollector(Collector):
             "placeholder": "留空 = 全库待富化线索；输入 ID 回车",
             "default": "",
         },
+        {
+            "key": "cooldown_days",
+            "label": "冷却天数（同一线索两次富化的最小间隔）",
+            "required": False,
+            "type": "number",
+            # 7 天足够新岗位沉淀到首页（自动富化是 24h；手动巡检一周一次即可）；
+            # 调小（1-2）= 紧急重跑；调大（30）= 月度巡检
+            "placeholder": "默认 7（S/A/B/C 按等级自动差异化重查）",
+            "default": "7",
+        },
+        {
+            "key": "grades",
+            "label": "富化等级（按分数重查频率已分级）",
+            "required": False,
+            "type": "multiselect",
+            "options": [
+                {"value": "S", "label": "S 级（每日重查）"},
+                {"value": "A", "label": "A 级（3 天重查）"},
+                {"value": "B", "label": "B 级（7 天重查）"},
+                {"value": "C", "label": "C 级（30 天重查）"},
+            ],
+            "default": "S,A,B,C",
+            "placeholder": "默认全等级；选 B/C 只跑低潜（快）、S/A 每天覆盖（深）",
+        },
     ]
 
     async def run(self, ctx: TaskContext) -> None:
         lead_ids = _parse_lead_ids(ctx.params.get("lead_ids"))
         async with _session_factory()() as session:
-            leads = await _load_scope(session, lead_ids)
+            leads = await _load_scope(session, lead_ids, dict(ctx.params))
 
         # 结果统计（结束日志说清成功/失败与各自原因——失败不再淹没在「完成」里）
         ok_sites: list[str] = []
@@ -1568,7 +1592,9 @@ async def _load_discoverable(session: AsyncSession, limit: int) -> list[tuple[in
     return out
 
 
-async def _load_scope(session: AsyncSession, lead_ids: list[Any]) -> list[tuple[int, str]]:
+async def _load_scope(
+    session: AsyncSession, lead_ids: list[Any], params: dict[str, Any]
+) -> list[tuple[int, str]]:
     """返回 [(lead_id, website)]。lead_ids 指定 → 只取有网站的；否则全库 eligible。"""
     from app.models.lead import Lead
 
@@ -1580,6 +1606,7 @@ async def _load_scope(session: AsyncSession, lead_ids: list[Any]) -> list[tuple[
         )
     else:
         # 分级增量重爬（补充需求 §九）：高价值线索检查更勤——S 每天 / A 3 天 / B 7 天 / C 30 天；
+        # cooldown_days（2026-09-12 暴露）：用户可手动覆盖默认冷却天数。
         # ENRICH_INTERVAL_HOURS 作为 C 级（兜底档）的可配置上限。
         # foreign/non_buyer 行不在服务范围（ICP 门已排除销售池），不消耗抓取配额
         from sqlalchemy import or_
@@ -1590,7 +1617,24 @@ async def _load_scope(session: AsyncSession, lead_ids: list[Any]) -> list[tuple[
                 (Lead.enriched_at.is_(None)) | (Lead.enriched_at < cutoff)
             )
 
-        c_days = max(1, settings.ENRICH_INTERVAL_HOURS // 24)
+        # 2026-09-12：cooldown_days 暴露给前端——默认 7 天 = 「上线后周级重爬」。
+        # 调小（1-2）= 紧急重跑；调大（30+）= 月级巡检。原先 C 级 = ENRICH_INTERVAL_HOURS//24
+        # 含义不直观（24 小时 vs 24 倍的小时数），改成统一的「天数」单位。
+        try:
+            cooldown_days = max(0, int(params.get("cooldown_days") or 7))
+        except (TypeError, ValueError):
+            cooldown_days = 7
+        c_days = max(1, cooldown_days)
+        s_days = max(1, cooldown_days // 7 or 1)
+        a_days = max(1, cooldown_days // 3 or 1)
+        b_days = max(1, cooldown_days)
+        # grades 暴露——空 = 不限制（默认全等级；选 B/C 只跑低潜，S/A 跳过）
+        grades_filter = params.get("grades") or "S,A,B,C"
+        if isinstance(grades_filter, str):
+            grades_filter = [g.strip() for g in grades_filter.split(",") if g.strip()]
+        grades_filter = tuple(grades_filter)
+        if not grades_filter:
+            grades_filter = ("S", "A", "B", "C")
         # 终态不再富化（2026-08-31 审计）：won=已是客户（该进客户成功流程），
         # invalid=已判无效——两态继续重爬只浪费抓取配额。NULL（从未跟进）必须
         # 用 or_ 显式放行：SQL 里 NULL NOT IN (...) 为假值，会把共享池全部滤掉
@@ -1598,7 +1642,13 @@ async def _load_scope(session: AsyncSession, lead_ids: list[Any]) -> list[tuple[
             Lead.website.is_not(None),
             Lead.website != "",
             Lead.icp_status.notin_(("foreign", "non_buyer")),
-            or_(_stale("S", 1), _stale("A", 3), _stale("B", 7), _stale("C", c_days)),
+            Lead.grade.in_(grades_filter),
+            or_(
+                _stale("S", s_days),
+                _stale("A", a_days),
+                _stale("B", b_days),
+                _stale("C", c_days),
+            ),
             or_(Lead.follow_status.is_(None), Lead.follow_status.notin_(["won", "invalid"])),
         )
     rows = (await session.execute(stmt)).all()

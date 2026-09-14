@@ -30,7 +30,7 @@ async function pickFreePort(start: number): Promise<number> {
 export default defineConfig(async ({ mode }) => {
   // 只加载 VITE_* 前缀的环境变量（不读 CI 密钥等）
   const env = loadEnv(mode, process.cwd(), 'VITE_')
-  const port = await pickFreePort(Number(process.env.PORT) || 3000)
+  const port = await pickFreePort(Number(process.env.PORT) || 31000)
   return {
     plugins: [
       tailwindcss(),

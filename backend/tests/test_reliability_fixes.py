@@ -139,7 +139,8 @@ async def test_load_scope_excludes_terminal_status(client):
         await s.commit()
 
     async with async_session() as s:
-        rows = await _load_scope(s, [])
+        # 2026-09-12 _load_scope 新增 params 参数——测试传空 dict 走默认行为
+        rows = await _load_scope(s, [], {})
     names = {r[0] for r in rows}  # 返回 (id, website)，用 id 断言不出错——改为查名字
     ids = rows
     # 再核对：终态两条不应出现

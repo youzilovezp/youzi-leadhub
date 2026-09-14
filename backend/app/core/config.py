@@ -161,6 +161,10 @@ class Settings(BaseSettings):
     # 获取：https://www.facebook.com/ads/archive/api 创建应用申请 token（免费），
     # 需要的权限很窄（ads_archive 只读公开广告数据）。
     META_ADS_ACCESS_TOKEN: str = ""
+    # meta_ads 主页探测开关（True = 抓每个广告主主页提取 WhatsApp/邮箱/官网；慢但信息全）
+    # 默认 False——Ads Library ad 创意已含 page_name / page_profile_uri，单纯
+    # 跑采集器足够；主页探测留给 website_enrich 自动接力，避免采集层过载
+    META_ADS_PROBE_PAGES: bool = False
     # web_search 采集器（§6.2 P1 搜索数据源）。默认引擎 duckduckgo 零 key 零费用
     # （DDG 不可达时自动降级 bing_cn）；bing_cn = 必应中国版直连（国内网络免代理）；
     # 可选：searxng（自托管开源元搜索，SEARXNG_URL 指向实例的 JSON API）、

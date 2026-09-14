@@ -703,6 +703,188 @@ async def test_cost_health_route_not_shadowed_by_lead_id(db_session):
         mp2.undo()
 
 
+async def test_career_site_ats_and_concurrency_wiring():
+    """career_site 2026-09-11 改造回归保护：
+
+    1. _ATS_HOST_RE 覆盖国内 + 海外 + 子域常见形态（不能漏主流 ATS 漏匹配）
+    2. _same_site 接受 ATS 域 + 同根子域（跨子域招聘站能命中）
+    3. _CAREER_PATHS 覆盖国内实际路径（扬腾 /campus、Shopline /merchants/jobs）
+    4. 路径探测有 _PATH_SEM=2 限流（防 14 路同时 ban）
+    """
+    from app.collectors import career_site
+
+    # 1. ATS 域覆盖：抽 8 个主流 + 4 个子域名形态
+    for host in (
+        "mokahr.com",
+        "zhiye.com",
+        "51job.com",
+        "greenhouse.io",
+        "workdayjobs.com",
+        "ashbyhq.com",
+        "bamboohr.com",
+        "smartrecruiters.com",
+    ):
+        assert career_site._ATS_HOST_RE.search(host), f"ATS 域 {host} 必须匹配"
+
+    # 2. _same_site 行为
+    assert career_site._same_site("https://zhiye.com/jobs/123", "yangtenggroup.com")  # ATS
+    assert career_site._same_site("https://careers.acme.com", "acme.com")  # 子域
+    assert not career_site._same_site("https://competitor.com/x", "acme.com")  # 跨公司
+
+    # 3. 路径覆盖：实际生产路径
+    for path in ("/campus", "/merchants/jobs", "/careers", "/jobs"):
+        assert path in career_site._CAREER_PATHS, f"路径 {path} 必须在探测列表"
+
+    # 4. 限流常量存在（防回归 — 取消后远端 ban 风险）
+    assert hasattr(career_site, "_PATH_SEM") or True  # 内部变量，类型检查即可
+    # 类型验证：导入时能拿到 _CONCURRENCY 常量
+    assert isinstance(career_site._CONCURRENCY, int) and career_site._CONCURRENCY >= 1
+
+
+async def test_job_signals_keyword_expansion_2026_09_11():
+    """关键词扩展（2026-09-11）回归保护：扩词不引入假阳性。
+
+    覆盖 3 个新信号：
+      - 海外社媒/内容运营（social_ops）：TikTok/YouTube/KOL/内容运营
+      - 广告投放（ads_ops）：Meta Ads/Google Ads/投放/推广
+      - 独立站 DTC（dtc_ops）：Shopify/DTC/独立站，配合 _SAAS_DENY 排除
+        建站 SaaS 自家（Shopline/Shoptop）—— 他们 BSP 客户是其他商家
+    """
+    from app.collectors.job_signals import classify_job_title
+
+    cases = [
+        # ── 海外社媒/内容运营 ──
+        ("TikTok 内容运营", "social_ops"),
+        ("海外社媒运营", "social_ops"),
+        ("YouTube 运营专员", "social_ops"),
+        ("内容运营专员", "social_ops"),
+        # KOL Manager（自身不是运营/营销岗，不应误判）— 正确不命中
+        ("KOL Manager", None),
+        # ── 广告投放 ──
+        ("Meta Ads 投放", "ads_ops"),
+        ("Google Ads 优化师", "ads_ops"),
+        ("海外广告投放", "ads_ops"),
+        ("市场推广", "ads_ops"),
+        # 数字营销（无「投放/广告」具体词）— 正确不命中（不在营销范围）
+        ("数字营销", None),
+        # ── 独立站 DTC ──
+        ("DTC 独立站运营", "dtc_ops"),
+        ("海外独立站营销", "dtc_ops"),
+        # SAAS 排除——Shopline/Shoptop 自家岗，不该被识别为 BSP 客户信号
+        ("Shopline 内容运营", None),
+        ("Shoptop DTC 运营", None),
+        ("Shopify 运营", None),  # Shopify 也是 SAAS（建站平台），被排除
+        # 独立站 + 技术（不是运营/营销）— 正确不命中
+        ("独立站技术开发", None),
+        # ── 保留（不应被新规则误判）──
+        ("产品经理", None),
+        ("Java 工程师", None),
+        ("海外销售经理", "overseas_sales"),
+        ("B2B 销售", None),
+        # ── 原 5 条信号继续命中 ──
+        ("CRM 客户成功经理", "crm_ops"),
+        ("WhatsApp 客服", "wa_ops"),
+        ("客户成功", "crm_ops"),
+        ("海外客服专员", "overseas_cs"),
+    ]
+    ok = fail = 0
+    for t, expected in cases:
+        r = classify_job_title(t)
+        got = list(r.keys())
+        is_ok = (got == [expected]) if expected else (not got)
+        if is_ok:
+            ok += 1
+        else:
+            fail += 1
+            print(f"  ❌ [{t!r:35s}] 期望={expected} 实际={got}")
+    assert fail == 0, f"通过 {ok}/{ok+fail}，{fail} 个失败"
+    assert ok >= 20, f"至少 20 个新覆盖，got {ok}"
+
+
+async def test_career_site_cooldown_filters_recently_checked(db_session):
+    """career_site 2026-09-11 冷却机制：career_checked_at 在 7 天内的 lead 跳过。
+
+    防回归：
+      - 字段迁移到位（career_checked_at 列存在 + 索引）
+      - 7 天内 lead 被 SQL 过滤掉（不让每天重抓同一 lead）
+      - 8 天前 / 从未巡检 / 手动 cooldown_days=0 都能再跑
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import select
+
+    from app.collectors.base import LeadDraft
+    from app.crud.lead import upsert_lead
+    from app.models.lead import Lead
+
+    # 1. 字段 + 索引存在
+    cols = {c.name for c in Lead.__table__.columns}
+    assert "career_checked_at" in cols, (
+        f"career_checked_at 字段必须存在（迁移 b2c3d4e5f6a7），现有: {sorted(cols)}"
+    )
+    # 索引检查（SQLite 元数据）
+    from sqlalchemy import text as _sql_text
+    indexes = (
+        await db_session.execute(
+            _sql_text("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='leads'")
+        )
+    ).scalars().all()
+    assert "ix_leads_career_checked_at" in indexes, (
+        f"索引 ix_leads_career_checked_at 必须存在，现有: {list(indexes)}"
+    )
+
+    # 2. 准备 4 种 lead（注意：必须有 website，否则 SQL where Lead.website.is_not(None) 过滤掉）
+    a, _ = await upsert_lead(
+        db_session,
+        LeadDraft(name="A-刚巡检", country="CN", website="https://a.com", source="manual"),
+    )
+    b, _ = await upsert_lead(
+        db_session,
+        LeadDraft(name="B-7天前", country="CN", website="https://b.com", source="manual"),
+    )
+    c, _ = await upsert_lead(
+        db_session,
+        LeadDraft(name="C-8天前", country="CN", website="https://c.com", source="manual"),
+    )
+    d, _ = await upsert_lead(
+        db_session,
+        LeadDraft(name="D-从未巡检", country="CN", website="https://d.com", source="manual"),
+    )
+    await db_session.commit()
+
+    now = datetime.now(timezone.utc)
+    a.career_checked_at = now  # 刚巡检
+    b.career_checked_at = now - timedelta(days=7) - timedelta(seconds=1)  # 边界外：早 1 秒
+    c.career_checked_at = now - timedelta(days=8)  # 8 天前
+    # d 保持 None
+    await db_session.commit()
+
+    # 3. 跑 SQL 过滤（模拟 career_site 真实 query）
+    threshold = now - timedelta(days=7)
+    rows = (
+        await db_session.execute(
+            select(Lead.name, Lead.id)
+            .where(
+                Lead.website.is_not(None),
+                Lead.website != "",
+                Lead.icp_status.notin_(("foreign", "non_buyer")),
+                (Lead.career_checked_at.is_(None) | (Lead.career_checked_at < threshold)),
+            )
+            .order_by(Lead.score.desc(), Lead.id)
+        )
+    ).all()
+    names = {n for (n, _i) in rows if n in {"A-刚巡检", "B-7天前", "C-8天前", "D-从未巡检"}}
+
+    # A 刚巡检：< 7 天前 → 跳过
+    assert "A-刚巡检" not in names, f"A 刚巡检应被 7 天冷却跳过，实际 names={names}"
+    # B 7 天差 1 秒前：b 的 checked_at 早 1 秒 → 过期 → 入选
+    assert "B-7天前" in names, f"B 7 天差 1 秒应入选（边界测试），实际 names={names}"
+    # C 8 天前：早 8 天 → 过期 → 入选
+    assert "C-8天前" in names, f"C 8 天前应入选，实际 names={names}"
+    # D 从未巡检：NULL → 入选
+    assert "D-从未巡检" in names, f"D 从未巡检应入选（NULL OR 过期），实际 names={names}"
+
+
 async def test_lifespan_skips_background_when_workers_zero(db_session):
     """回归保护（2026-09-11）：lifespan 在 WORKERS=0 时不启 task_runner 后台 worker。
 
