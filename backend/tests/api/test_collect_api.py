@@ -94,7 +94,7 @@ async def test_follow_up_flow(client, admin_credentials):
     lead = r.json()["data"]
 
     # 首次跟进：缺省跟进人 = 当前用户；状态 + 时间落库
-    r = await client.post(f"/api/v1/collect/leads/{lead['id']}/follow-up", headers=h,
+    r = await client.post(f"/api/v1/collect/leads/{lead['id']}/follow-ups", headers=h,
                           json={"status": "opportunity", "note": "已加 WhatsApp，聊得不错，进入商机"})
     updated = r.json()["data"]
     assert updated["follow_status"] == "opportunity"
@@ -122,7 +122,7 @@ async def test_follow_up_flow(client, admin_credentials):
     assert fresh["id"] in ids and lead["id"] not in ids
 
     # 该回访：下次跟进时间设到过去 → due_follow 命中
-    r = await client.post(f"/api/v1/collect/leads/{lead['id']}/follow-up", headers=h,
+    r = await client.post(f"/api/v1/collect/leads/{lead['id']}/follow-ups", headers=h,
                           json={"status": "contacted", "next_follow_at": "2020-01-01T00:00:00Z"})
     assert r.json()["code"] == 0
     r = await client.get("/api/v1/collect/leads", headers=h, params={"due_follow": True})
@@ -131,13 +131,13 @@ async def test_follow_up_flow(client, admin_credentials):
     assert stats["pending_leads"] >= 1 and stats["due_follow_leads"] >= 1
 
     # 非法状态 422；不存在的线索 404；指派不存在跟进人报业务错
-    r = await client.post(f"/api/v1/collect/leads/{lead['id']}/follow-up", headers=h,
+    r = await client.post(f"/api/v1/collect/leads/{lead['id']}/follow-ups", headers=h,
                           json={"status": "whatever"})
     assert r.status_code == 422
-    r = await client.post("/api/v1/collect/leads/999999/follow-up", headers=h,
+    r = await client.post("/api/v1/collect/leads/999999/follow-ups", headers=h,
                           json={"status": "contacted"})
     assert r.status_code == 404
-    r = await client.post(f"/api/v1/collect/leads/{lead['id']}/follow-up", headers=h,
+    r = await client.post(f"/api/v1/collect/leads/{lead['id']}/follow-ups", headers=h,
                           json={"status": "contacted", "owner_id": 999999})
     assert r.status_code == 400
 
@@ -159,7 +159,7 @@ async def test_sales_permissions(client, admin_credentials):
     assert (await client.get("/api/v1/collect/leads", headers=sales)).status_code == 200
     assert (await client.get("/api/v1/collect/stats", headers=sales)).status_code == 200
     assert (await client.get("/api/v1/collect/tasks", headers=sales)).status_code == 200
-    r = await client.post(f"/api/v1/collect/leads/{lead['id']}/follow-up", headers=sales,
+    r = await client.post(f"/api/v1/collect/leads/{lead['id']}/follow-ups", headers=sales,
                           json={"status": "contacted", "note": "销售第一次联系"})
     assert r.json()["data"]["owner_name"] == "销售一号"
 

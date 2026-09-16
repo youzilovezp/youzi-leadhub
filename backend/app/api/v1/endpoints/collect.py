@@ -245,7 +245,7 @@ async def list_leads(
 
 
 @router.post("/leads", response_model=ResponseModel[LeadOut], summary="手工录入线索")
-async def create_lead(db: SessionDep, _user: CurrentUser, payload: LeadCreate):
+async def create_lead(db: SessionDep, user: CurrentUser, payload: LeadCreate):
     from app.collectors.base import LeadDraft
 
     draft = LeadDraft(
@@ -263,7 +263,28 @@ async def create_lead(db: SessionDep, _user: CurrentUser, payload: LeadCreate):
     await db.commit()
     # 合并路径 UPDATE 后 updated_at（server onupdate）处于 expired 状态，
     # 直接 model_validate 会触发懒加载 IO → MissingGreenlet 422。显式刷新。
+    if lead is None:
+        # upsert_lead 在 create_if_missing=True 且 dedupe 冲突时仍可能返回 (lead, False)；
+        # 防御性兜底：拿不到 lead 不入队富化（理论不应发生）
+        raise BusinessError(code=40001, message="线索创建失败，请重试")
     await db.refresh(lead)
+    # ponytail: 录入后立即排入隐式 website_enrich（fire-and-forget，不阻塞返回）——
+    # 让销售看到「三问」字段从空白到补全；有官网 → 抓联系页补电话/邮箱/WhatsApp；
+    # 无官网 → 走 _discover_website 搜索。30 秒级别后台跑，不打扰录入流程
+    try:
+        enrich_task = await task_crud.create(
+            db,
+            TaskCreate(
+                collector="website_enrich",
+                name=f"手动录入 #lead_id={lead.id} 自动富化",
+                params={"lead_ids": [lead.id]},
+            ).model_dump()
+            | {"is_implicit": True, "created_by": user.id},
+        )
+        await db.commit()
+        await task_runner.enqueue(enrich_task.id)
+    except Exception:  # noqa: BLE001  富化入队失败不影响录入结果
+        pass
     return ResponseModel(data=LeadOut.model_validate(lead))
 
 
@@ -1357,7 +1378,7 @@ async def follow_options(db: SessionDep, _user: CurrentUser):
 
 
 @router.post(
-    "/leads/{lead_id}/follow-up",
+    "/leads/{lead_id}/follow-ups",
     response_model=ResponseModel[LeadOut],
     summary="记录跟进：更新线索跟进人/状态/时间并写一条历史",
 )
@@ -1739,11 +1760,9 @@ async def collect_stats(db: SessionDep, _user: CurrentUser):
             "icp_counts": icp_counts,
             "month_new_leads": month_new,
             "month_won_count": month_won,
-            # 管道健康度（2026-08-31 巡检）：今日商机空转的根因可视化——
-            # meta_ads 是唯一 S/A 制造机（CTWA/投放证据），token 未配置或
-            # 调度未开启时销售每天收到的是空批次。前端今日商机页空态据此提示。
+            # 管道健康度（2026-09-13 简化）：今日商机空转的根因可视化——
+            # 主要是调度未开启时销售每天收到的是空批次。前端今日商机页空态据此提示。
             "pipeline_health": {
-                "meta_ads_ready": bool(settings.META_ADS_ACCESS_TOKEN),
                 "scheduler_enabled": bool(settings.SCHEDULER_ENABLED),
                 "qualified_leads": icp_counts["qualified"],
             },

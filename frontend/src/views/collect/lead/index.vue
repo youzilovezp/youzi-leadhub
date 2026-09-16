@@ -88,10 +88,9 @@ const icpFilterOptions = [
 ]
 
 /** 来源词表与后端 sources 写入方对齐（collectors emit / 导入入口）；
- *  2026-08-31 修正：移除已下线的 osm_overpass/google_maps，补 web_search/career_site/seed_import */
+ *  2026-08-31 修正：移除已下线的 osm_overpass/google_maps，补 web_search/career_site/seed_import
+ *  2026-09-13：移除 meta_ads + web_search（暂不工作 + 无 token，git revert 可恢复） */
 const sourceOptions = [
-  { label: 'Meta 广告库', value: 'meta_ads' },
-  { label: '搜索引擎发现', value: 'web_search' },
   { label: '中国招聘网站', value: 'job_posting' },
   { label: '企业招聘官网', value: 'career_site' },
   { label: 'CSV 种子导入', value: 'seed_import' },
@@ -104,10 +103,8 @@ function sourceLabel(token: string): string {
   return sourceOptions.find((s) => s.value === token)?.label ?? token
 }
 
-/** 来源标签配色：不同来源一眼可辨 */
+/** 来源标签配色：不同来源一眼可辨（2026-09-13 移除 meta_ads + web_search） */
 const SOURCE_TAG_TYPES: Record<string, 'success' | 'warning' | 'info' | 'default' | 'error'> = {
-  meta_ads: 'error',
-  web_search: 'success',
   job_posting: 'info',
   career_site: 'info',
   seed_import: 'warning',

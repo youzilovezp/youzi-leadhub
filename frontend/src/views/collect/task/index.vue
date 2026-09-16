@@ -80,13 +80,14 @@ function currentCollector(): CollectorInfo | undefined {
   return collectors.value.find((c) => c.name === form.collector)
 }
 
-/** 采集器分组（2026-09-01 口径）：
- *  - 数据源（可手动创建/定时）：b2b_supplier / web_search / job_posting / meta_ads / career_site
+/** 采集器分组（2026-09-13 口径）：
+ *  - 数据源（可手动创建/定时）：b2b_supplier / job_posting / career_site
  *  - 内部步骤（不进创建列表）：website_enrich——由三入口自动执行：
  *    ① 发现任务完成 → 自动接力；② 每日 cron「网站富化·全库」（任务列表可手动执行）；
- *    ③ 线索列表勾选 → 「富化选中」 */
-const SOURCE_COLLECTORS = ['b2b_supplier', 'web_search', 'job_posting', 'meta_ads', 'career_site']
-const DISCOVERY_COLLECTORS = ['b2b_supplier', 'web_search', 'job_posting', 'meta_ads']
+ *    ③ 线索列表勾选 → 「富化选中」
+ *  - 已移除：web_search（无 token，搜索引擎 API 待用户配置）+ meta_ads（Ads Library API 审核中） */
+const SOURCE_COLLECTORS = ['b2b_supplier', 'job_posting', 'career_site']
+const DISCOVERY_COLLECTORS = ['b2b_supplier', 'job_posting']
 const isDiscovery = computed(() => DISCOVERY_COLLECTORS.includes(form.collector))
 /** 创建对话框的采集器选项：数据源（发现类 + 招聘页巡检），不含 website_enrich */
 const creatableCollectors = computed(() =>

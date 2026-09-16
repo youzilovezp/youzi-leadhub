@@ -152,10 +152,12 @@ class CareerSiteCollector(Collector):
         "= 有海外客户，在招「WhatsApp 运营」= 在用 WhatsApp 做私域。\n"
         "【和招聘平台监控的差别】平台搜的是全市场岗位；这里看的是具体企业的一手"
         "招聘页——给已入库线索补岗位证据，不产生新线索。\n"
-        "【准确性】每轮按分数从高到低巡检（默认 20 家，可加 skip 轮换）；岗位标题"
+        "【准确性】每轮按分数从高到低巡检（默认 100 家），冷却天数默认 7（按 S/A/B/C 自动差异化）；岗位标题"
         "从严分类，拿不准的不标；信号合并回原线索并留证据链接，可点开核对。\n"
         "【建议节奏】配成每周定时跑：岗位下架了信号不删（历史证据），新岗位自动并入。"
     )
+    # ponytail: 移除「跳过前 N 家」字段——轮换是错觉，分数倒序 + 冷却天数已覆盖；
+    # 「每轮巡检企业数」+「冷却天数」= 唯一的两个旋钮，用户不应该手动改 skip
     param_schema = [
         {
             "key": "limit",
@@ -166,14 +168,6 @@ class CareerSiteCollector(Collector):
             # 实际 ~30 家），快覆盖；以前 20 家要 1 个月。线上运营 30-50 够覆盖
             "placeholder": "按分数倒序取前 N 家（有官网、ICP 门内）",
             "default": "100",
-        },
-        {
-            "key": "skip",
-            "label": "跳过前 N 家",
-            "required": False,
-            "type": "number",
-            "placeholder": "轮换巡检用：第 2 轮填 50、第 3 轮填 100 …",
-            "default": "0",
         },
         {
             "key": "cooldown_days",
@@ -188,7 +182,7 @@ class CareerSiteCollector(Collector):
     ]
 
     def validate_params(self, params: dict[str, Any]) -> None:
-        pass  # limit/skip 均可选，run() 内兜底
+        pass  # limit/cooldown_days 均可选，run() 内兜底
 
     async def run(self, ctx: TaskContext) -> None:
         from datetime import datetime, timedelta, timezone
@@ -202,20 +196,18 @@ class CareerSiteCollector(Collector):
 
         try:
             limit = max(1, min(int(ctx.params.get("limit") or 20), 100))
-            skip = max(0, int(ctx.params.get("skip") or 0))
             # 冷却天数（默认 7，参数可覆盖：params.cooldown_days=1 强制重跑）
             cooldown_days = max(
                 0, int(ctx.params.get("cooldown_days") or 7)
             )
         except ValueError:
-            limit, skip, cooldown_days = 20, 0, 7
+            limit, cooldown_days = 20, 7
 
         cooldown_threshold = datetime.now(timezone.utc) - timedelta(days=cooldown_days)
 
         async with async_session() as s:
             # 2026-09-11：7 天冷却——避免每天重抓同一 lead 的招聘页（公司不会每天
             # 发新岗位）。NULL=从未巡检；< threshold=冷却中跳过；>= threshold=可重跑
-            # skip/offset 仍兼容老用法（高 offset + 7 天冷却可手动轮换）
             rows = (
                 await s.execute(
                     select(
@@ -233,7 +225,6 @@ class CareerSiteCollector(Collector):
                         ),
                     )
                     .order_by(Lead.score.desc(), Lead.id)
-                    .offset(skip)
                     .limit(limit)
                 )
             ).all()
@@ -241,7 +232,7 @@ class CareerSiteCollector(Collector):
             await ctx.log("info", "没有符合条件的线索（需有官网且在 ICP 门内）")
             return
         ctx.set_total(len(rows))
-        await ctx.log("info", f"待巡检企业 {len(rows)} 家（score 倒序，跳过前 {skip}）")
+        await ctx.log("info", f"待巡检企业 {len(rows)} 家（score 倒序）")
 
         # 渲染兜底懒启动（SPA 招聘站如 Moka）；None=还没启动，False=不可用哨兵
         _browser: Any = None
@@ -409,6 +400,6 @@ class CareerSiteCollector(Collector):
         if ok == 0 and rows:
             raise BusinessError(
                 code=50001,
-                message="全部企业都没找到招聘页（官网不可达或无招聘栏目）——换一批（调大 skip）或稍后重跑",
+                message="全部企业都没找到招聘页（官网不可达或无招聘栏目）——稍后重跑或扩 limit",
             )
         await ctx.log("info", f"巡检完成：找到招聘页 {ok}/{len(rows)}，命中岗位信号 {hit} 家")

@@ -222,7 +222,7 @@ SEED_PAYLOAD_JSON = """
   "job_signals": {},
   "ad_count": 0,
   "sources": [
-   "web_search"
+   "job_posting"
   ]
  },
  {
@@ -329,7 +329,7 @@ SEED_PAYLOAD_JSON = """
   "job_signals": {},
   "ad_count": 0,
   "sources": [
-   "web_search"
+   "job_posting"
   ]
  }
 ]
@@ -337,17 +337,6 @@ SEED_PAYLOAD_JSON = """
 
 _TASKS_JSON = """
 [
- {
-  "name": "Meta 广告库挖掘（每日）",
-  "collector": "meta_ads",
-  "cron_expr": "30 2 * * *",
-  "params": {
-   "keywords": "smart watch,leggings,wig,shapewear,led strip light,phone case,jewelry,game",
-   "countries": "MY,SG,ID,TH,PH,VN,AE,SA",
-   "probe_pages": "true",
-   "max_pages": "2"
-  }
- },
  {
   "name": "招聘信号巡检（每日）",
   "collector": "job_posting",
