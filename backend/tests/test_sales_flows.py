@@ -202,7 +202,7 @@ async def test_data_sources_with_grade_dist(client, admin_credentials):
     sources = r.json()["data"]
     names = {s["collector"] for s in sources}
     # 2026-09-01 口径：富化是内部步骤不是数据源——不在列表，其余数据源在
-    assert {"meta_ads", "job_posting"} <= names
+    assert {"job_posting", "career_site"} <= names
     assert "website_enrich" not in names
     assert all("grade_dist" in s and set(s["grade_dist"]) == {"S", "A", "B", "C"} for s in sources)
 

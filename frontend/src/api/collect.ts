@@ -617,7 +617,7 @@ export function getFollowOptions() {
 
 /** 记录跟进：更新线索跟进人/状态并写一条历史，返回更新后的线索 */
 export function followUpLead(id: number, payload: FollowUpPayload) {
-  return request.post<Lead, Lead>(`/collect/leads/${id}/follow-up`, payload)
+  return request.post<Lead, Lead>(`/collect/leads/${id}/follow-ups`, payload)
 }
 
 /** 跟进历史（最近 50 条，最新在前） */
@@ -695,7 +695,6 @@ export interface CollectStats {
   icp_counts: Record<IcpStatus, number>
   /** 管道健康度：采集通道与调度状态（今日商机为空时用于给出原因） */
   pipeline_health: {
-    meta_ads_ready: boolean
     scheduler_enabled: boolean
     qualified_leads: number
   }

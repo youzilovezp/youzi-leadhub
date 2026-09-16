@@ -619,7 +619,7 @@ onMounted(fetchDetail)
                       class="mr-1"
                     >{{ c }}</n-tag>
                   </template>
-                  <template v-else>未识别（跑 meta_ads 采集后累计）</template>
+                  <template v-else>未识别（跑外销站英文联系页或简历侦察后累计）</template>
                 </span>
                 <span class="k">业务类型</span><span>{{ detail.export_type || '—' }}</span>
                 <template v-if="detail.enrich_fail">

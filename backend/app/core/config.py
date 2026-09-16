@@ -157,23 +157,9 @@ class Settings(BaseSettings):
     AUTO_SEED_BUSINESS: bool = True
 
     # ---------- 线索采集 ----------
-    # Meta 广告资料库（Ad Library API）访问令牌，meta_ads 采集器必填。
-    # 获取：https://www.facebook.com/ads/archive/api 创建应用申请 token（免费），
-    # 需要的权限很窄（ads_archive 只读公开广告数据）。
-    META_ADS_ACCESS_TOKEN: str = ""
-    # meta_ads 主页探测开关（True = 抓每个广告主主页提取 WhatsApp/邮箱/官网；慢但信息全）
-    # 默认 False——Ads Library ad 创意已含 page_name / page_profile_uri，单纯
-    # 跑采集器足够；主页探测留给 website_enrich 自动接力，避免采集层过载
-    META_ADS_PROBE_PAGES: bool = False
-    # web_search 采集器（§6.2 P1 搜索数据源）。默认引擎 duckduckgo 零 key 零费用
-    # （DDG 不可达时自动降级 bing_cn）；bing_cn = 必应中国版直连（国内网络免代理）；
-    # 可选：searxng（自托管开源元搜索，SEARXNG_URL 指向实例的 JSON API）、
-    # google_cse / bing（付费加速通道，需凭据——纯免费部署保持不配即可）
-    SEARCH_ENGINE: Literal["duckduckgo", "bing_cn", "searxng", "google_cse", "bing"] = "duckduckgo"
-    SEARXNG_URL: str = ""  # 如 http://localhost:8888（SearxNG 实例，format=json 已开）
-    GOOGLE_CSE_KEY: str = ""  # Google Custom Search JSON API key（免费 100 次/天，超出付费）
-    GOOGLE_CSE_CX: str = ""  # Google CSE 的搜索引擎 ID
-    BING_SEARCH_KEY: str = ""  # Bing Web Search（Azure）key
+    # 2026-09-13：web_search + meta_ads collector 已移除（git history 可恢复）。
+    # 后续激活时：git revert + 重新引入对应 env vars + 加回 _REGISTRY。
+    COLLECT_MAX_CONCURRENT: int = 2  # 同时运行的采集任务数（满则排队）
     COLLECT_MAX_CONCURRENT: int = 2  # 同时运行的采集任务数（满则排队）
     COLLECT_TASK_TIMEOUT: int = 3600  # 单任务超时（秒）
     # 采集代理策略（2026-09-01 用户裁决：爬虫不得被本机 VPN/代理环境变量干扰）。
@@ -191,6 +177,13 @@ class Settings(BaseSettings):
     # job_posting/meta_ads）任务完成 → 自动排入一个隐式 website_enrich 全库扫描
     # （官网发现 + 信号复核）。依赖关系由系统承担，用户不需要知道「先采集后富化」的顺序。
     AUTO_CHAIN_ENRICH: bool = True
+    # 搜索引擎发现（web_search 采集器 + website_enrich._discover_website 共享）
+    # 默认 duckduckgo = 零 key 零费用；切到 bing/google_cse 需配 key
+    SEARCH_ENGINE: str = "duckduckgo"
+    SEARXNG_URL: str = ""  # 自托管 SearXNG 实例（可选加速）
+    GOOGLE_CSE_API_KEY: str = ""
+    GOOGLE_CSE_ID: str = ""
+    BING_SEARCH_API_KEY: str = ""
     # 自动接力去重：已有全库富化（params 为空）排队中就不再堆——排队中的那次
     # 扫描必然覆盖新增线索；不设时间窗口（刚跑完的富化扫不到本次新增，会漏）
     ENRICH_CONCURRENCY: int = 5  # 富化并发站点数

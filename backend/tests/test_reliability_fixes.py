@@ -173,15 +173,3 @@ async def test_import_rejects_oversized_csv(client, admin_credentials):
     assert r.status_code == 400
     assert r.json()["code"] == 40001
     assert "5000" in r.json()["message"]
-
-
-# ---------- meta_ads 韩文豁免 ----------
-
-
-def test_looks_cn_excludes_hangul():
-    from app.collectors.meta_ad_library import _looks_cn  # noqa: SLF001
-
-    assert _looks_cn(["跨境小铺 CrossBorder"]) is True
-    assert _looks_cn(["山田商事株式会社"]) is True  # 纯汉字无假名：保持中文判定
-    assert _looks_cn(["삼성무역 상사"]) is False  # 谚文 → 韩文
-    assert _looks_cn(["ヤマト商事"]) is False  # 假名 → 日文

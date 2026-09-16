@@ -57,7 +57,7 @@ async def test_own_scope_isolation(client: AsyncClient, admin_credentials):
     # a 认领一条线索（跟进即持有）
     lead_a = await _create_manual_lead(client, admin, "ScopeA Co")
     r = await client.post(
-        f"/api/v1/collect/leads/{lead_a['id']}/follow-up",
+        f"/api/v1/collect/leads/{lead_a['id']}/follow-ups",
         headers=a,
         json={"status": "contacted", "note": "a 认领"},
     )
@@ -68,7 +68,7 @@ async def test_own_scope_isolation(client: AsyncClient, admin_credentials):
     assert (await client.get(f"/api/v1/collect/leads/{lead_a['id']}/contacts", headers=b)).status_code == 404
     assert (
         await client.post(
-            f"/api/v1/collect/leads/{lead_a['id']}/follow-up",
+            f"/api/v1/collect/leads/{lead_a['id']}/follow-ups",
             headers=b,
             json={"status": "contacted"},
         )
@@ -88,7 +88,7 @@ async def test_own_scope_isolation(client: AsyncClient, admin_credentials):
     b_list2 = (await client.get("/api/v1/collect/leads", headers=b)).json()["data"]["items"]
     assert any(item["id"] == shared["id"] for item in b_list2)
     r = await client.post(
-        f"/api/v1/collect/leads/{shared['id']}/follow-up",
+        f"/api/v1/collect/leads/{shared['id']}/follow-ups",
         headers=b,
         json={"status": "pending", "note": "b 认领共享池"},
     )
@@ -105,7 +105,7 @@ async def test_followup_cannot_reassign_without_perm(client: AsyncClient, admin_
     lead = await _create_manual_lead(client, admin, "ScopeAssign Co")
     # a 先认领
     await client.post(
-        f"/api/v1/collect/leads/{lead['id']}/follow-up", headers=a, json={"status": "contacted"}
+        f"/api/v1/collect/leads/{lead['id']}/follow-ups", headers=a, json={"status": "contacted"}
     )
     # a（无 assign:lead）试图把 owner 改成 b 的 user id → 403
     users = (await client.get("/api/v1/users", headers=admin)).json()["data"]
@@ -113,7 +113,7 @@ async def test_followup_cannot_reassign_without_perm(client: AsyncClient, admin_
     user_list = users["items"] if isinstance(users, dict) and "items" in users else users
     b_id = next(u["id"] for u in user_list if u["username"] == "scope-d")
     r = await client.post(
-        f"/api/v1/collect/leads/{lead['id']}/follow-up",
+        f"/api/v1/collect/leads/{lead['id']}/follow-ups",
         headers=a,
         json={"status": "contacted", "owner_id": b_id},
     )
@@ -121,7 +121,7 @@ async def test_followup_cannot_reassign_without_perm(client: AsyncClient, admin_
 
     # 主管（admin，超管旁路）可以指派
     r = await client.post(
-        f"/api/v1/collect/leads/{lead['id']}/follow-up",
+        f"/api/v1/collect/leads/{lead['id']}/follow-ups",
         headers=admin,
         json={"status": "contacted", "owner_id": b_id},
     )

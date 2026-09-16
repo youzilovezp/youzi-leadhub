@@ -193,15 +193,13 @@ class JobPostingCollector(Collector):
     name = "job_posting"
     title = "中国招聘网站监控（jobui/猎聘/前程无忧）"
     logic_note = (
-        "【抓什么】监控中国招聘网站的在招岗位，为库内已有线索的公司补充招聘信号"
-        "（在招海外客服=有海外客户、在招 WhatsApp 运营=在用 WA 做私域）。"
-        "默认不产生新线索——招聘站公司大多无官网、联系方式无从补全，价值在信号不在发现。"
-        "扩量请用「B2B 出口目录」采集器（出口工厂名单，联系方式由官网富化补全）。\n"
-        "【词怎么填（重要）】两种模式用不同的词：\n"
-        "· 巡检（默认关发现）→ 用岗位词：跨境电商客服/英语客服/海外社媒运营/私域运营；\n"
-        "· 发现（开『发现新线索』）→ 用品类词：假发/LED灯带/宠物用品/渔具/户外家具——"
-        "岗位词发现进来的全是货代物流公司（它们才大量招这些岗，实测 8 家全 non_buyer），"
-        "品类词发现进来的才是品类工厂/品牌（实测 12 家全真实企业）。品类越具体越准。\n"
+        "【抓什么】按品类词到中国招聘网站搜在招岗位，发现出口工厂/品牌入库——"
+        "在招海外客服=有海外客户、在招 WhatsApp 运营=在用 WA 做私域。"
+        "线索入库后系统自动接力「网站富化」补官网、识别信号、重新评分。\n"
+        "【词怎么填（重要）】用品类词：假发/LED灯带/宠物用品/户外家具/渔具——"
+        "岗位词（跨境电商客服/英语客服）搜进来的全是货代物流公司"
+        "（实测 8 家全 non_buyer），品类词发现进来的才是品类工厂/品牌"
+        "（实测 12 家全真实企业）。品类越具体越准。\n"
         "【支持站点】职友集（聚合站）/ 猎聘 / 前程无忧，均为无头浏览器渲染抓取；"
         "BOSS 直聘与智联因验证码拦截暂未接入（选了会明确报错说明原因）。\n"
         "【信号分类】岗位标题自动分五类：WhatsApp 运营/客服、海外客服、海外社媒运营、"
@@ -209,12 +207,13 @@ class JobPostingCollector(Collector):
         "【准确性】同一家公司的多个岗位合并成一条线索（落库前先按域名/电话/公司名+城市"
         "三身份反查去重，绝不重复建线索）；每个岗位帖的链接都存进证据链，可点开核对。"
         "抓取失败的任务直接判失败，不会假装成功。\n"
-        "【自动接力】任务完成后系统自动执行「网站富化」——招聘页没有公司官网，"
-        "富化会先搜官网再抓信号、重新评分。\n"
-        "【建议节奏】配成每天定时跑：新出现的岗位自动并入同一家公司，岗位还在投递也会持续刷新佐证。\n"
-        "【边界】站内搜索只认中文岗位词（推荐：跨境电商客服、英语客服、海外社媒运营、私域运营、"
-        "外贸业务员）；单个词容易被模糊匹配稀释，多词组合效果好。"
+        "【建议节奏】配成每周 1-2 次定时跑换不同品类词，配合每天的全库富化，"
+        "新线索会自动补全官网与联系方式。\n"
+        "【边界】站内搜索只认中文品类词；英文单词会被模糊匹配稀释跑偏（实测「whatsapp」"
+        "联想到 UI 设计师），多词组合效果好。"
     )
+    # ponytail: 移除『发现新线索』开关——采集器统一按发现模式跑；
+    # 关键词默认用品类词（与发现逻辑匹配），空时兜底中文岗位词仍保持向后兼容。
     param_schema = [
         {
             "key": "site",
@@ -233,26 +232,12 @@ class JobPostingCollector(Collector):
             "label": "搜索关键词",
             "required": False,
             "type": "tags",
-            "placeholder": "巡检用岗位词或品类词（jobui/猎聘/前程 可同时搜岗位词 + 站名）。开『发现新线索』请用"
-            "品类词（假发/LED灯带/宠物用品），岗位词发现进来的全是货代物流公司（不符合 BSP 客户）",
-            # 2026-09-13 默认 keywords 改品类词（与 meta_ads 一致）：
-            # - 巡检模式（discover_new=false）：库内 7 条 lead 招聘页大概率不含 BSP 视角词
-            #   （招聘页用「业务经理/产品经理」不用「跨境客服」）→ 用品类词先匹配「假发/LED」
-            #   业务相关 lead，再合并成信号分
-            # - 发现模式：必填品类词（dispatch 由 validate_params 强校验）
-            # - 单条 dummy 兜底 ["跨境电商客服"] 保持向后兼容（万一全空）
-            "default": "假发,LED灯带,宠物用品,户外家具,渔具,跨境电商",
-        },
-        {
-            "key": "discover_new",
-            "label": "发现新线索（默认关）",
-            "required": False,
-            "type": "switch",
-            # 2026-09-12 强化：默认关 = 安全；开 = 改词 + 高噪声风险
-            "placeholder": "默认只给库内已有公司补招聘信号（安全）。打开后作为新线索来源——此时关键词务必"
-            "改用品类词（假发/LED灯带/宠物用品），岗位词发现进来的全是货代物流公司"
-            "（不符合 BSP 客户画像，会污染销售池）",
-            "default": "false",
+            "placeholder": "品类词发现企业（BSP 视角：wig、LED strip、pet products、outdoor furniture）"
+            "，岗位词进来的是货代物流公司——品类越具体越准",
+            # ponytail: 默认词只用品类词——『跨境电商』是岗位词不是品类，
+            # 站内搜出来全是货代物流公司（同一份 logic_note 行 203 的实测警告）。
+            # 5 个词 = code 注释里验证过的精品类集合
+            "default": "假发,LED灯带,宠物用品,户外家具,渔具",
         },
         # 翻页数不在表单暴露：固定默认 2 页（run() 里兜底），需要调参属于运维场景
     ]
@@ -266,15 +251,6 @@ class JobPostingCollector(Collector):
                 code=40001,
                 message=f"不支持的站点：{site}（当前支持：{'/'.join(SITE_CONFIGS)}）",
             )
-        # 2026-09-13：开『发现新线索』必须填品类词——空关键词拉进来全是货代物流公司
-        # （不符合 BSP 客户画像，会污染销售池）。这是发现模式必填，巡检模式不卡
-        if str(params.get("discover_new") or "false").lower() in ("1", "true", "yes"):
-            kws = [k.strip() for k in split_csv(str(params.get("keywords") or "")) if k.strip()]
-            if not kws:
-                raise BusinessError(
-                    code=40001,
-                    message="『发现新线索』模式必须填写品类关键词（不能用岗位词，否则只挖到货代物流公司）",
-                )
 
     async def run(self, ctx: TaskContext) -> None:
         site = str(ctx.params.get("site") or "jobui").strip()
@@ -283,9 +259,6 @@ class JobPostingCollector(Collector):
         # （2026-08-31 实测「whatsapp运营」联想到 UI 设计师；2026-09-01 审计
         # 兜底 ["whatsapp"] 与自述口径矛盾）
         keywords = split_csv(str(ctx.params.get("keywords"))) or ["跨境电商客服"]
-        # 巡检模式（默认）：只给库内已有公司补招聘信号（career_site 同款口径）；
-        # 『发现新线索』开关打开后才作为新线索来源建行
-        discover = str(ctx.params.get("discover_new") or "false").lower() in ("1", "true", "yes")
         try:
             max_pages = max(1, min(int(ctx.params.get("max_pages") or 2), 5))
         except ValueError:
@@ -340,14 +313,12 @@ class JobPostingCollector(Collector):
                             continue
                         ok_pages += 1
                         drafts = cfg["parse"](html, url)
-                        skipped_offline = 0  # 本页库外公司数（巡检模式跳过计数）
                         for d in drafts:
-                            lead_id, _created = await ctx.emit(d, create_if_missing=discover)
+                            # ponytail: 统一发现模式，库外公司也建线索（按域名/电话/
+                            # 公司名+城市三身份反查去重，不会重复）；lead_id=0 只在
+                            # 公司名缺失的边界情况出现，跳过信号落库
+                            lead_id, _created = await ctx.emit(d, create_if_missing=True)
                             if lead_id == 0:
-                                # 库外公司（巡检模式未命中库内）或空公司名：
-                                # 不落信号证据——lead_id=0 没有可挂靠的行
-                                if not discover:
-                                    skipped_offline += 1
                                 continue
                             # 信号级证据（§4.1）：招聘信号带岗位帖 URL 作证据；
                             # 写失败降级 warn 不放大为任务失败（2026-08-31 审计）
@@ -373,20 +344,11 @@ class JobPostingCollector(Collector):
                                     )
                         wa_n = sum(1 for d in drafts if d.whatsapp_job)
                         sig_n = sum(1 for d in drafts if d.job_signals)
-                        if discover:
-                            head = f"「{kw}」第 {pg} 页 → {len(drafts)} 个在招岗位"
-                            if sig_n:
-                                head += f"，带海外/运营信号 {sig_n} 个"
-                            if wa_n:
-                                head += f"（含 WhatsApp 岗位 {wa_n}）"
-                        else:
-                            # 巡检口径：只报命中库内几家 / 跳过库外几家
-                            head = (
-                                f"「{kw}」第 {pg} 页 → {len(drafts)} 个在招岗位"
-                                f"，命中库内 {len(drafts) - skipped_offline} 家"
-                            )
-                            if skipped_offline:
-                                head += f"，跳过库外 {skipped_offline} 家（巡检模式）"
+                        head = f"「{kw}」第 {pg} 页 → {len(drafts)} 个在招岗位"
+                        if sig_n:
+                            head += f"，带海外/运营信号 {sig_n} 个"
+                        if wa_n:
+                            head += f"（含 WhatsApp 岗位 {wa_n}）"
                         await ctx.log(
                             "info",
                             head

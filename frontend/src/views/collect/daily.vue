@@ -234,15 +234,6 @@ onMounted(fetchData)
       class="mb-4"
     >
       <ul style="margin: 0; padding-left: 18px; line-height: 1.9">
-        <li v-if="health && !health.meta_ads_ready">
-          <b>还没接广告库</b>——高分商机主要靠它（谁在向海外投广告、主页有没有挂 WhatsApp）。
-          在 backend/.env 配置 META_ADS_ACCESS_TOKEN 后重启即可，免费申请：
-          <a
-            href="https://www.facebook.com/ads/archive/api"
-            target="_blank"
-            rel="noopener"
-          >facebook.com/ads/archive/api</a>
-        </li>
         <li v-if="health && !health.scheduler_enabled">
           <b>定时任务还没开</b>：采集不会每天自动跑。可在「采集任务」里手动执行，
           或把 backend/.env 的 SCHEDULER_ENABLED 改为 true 让它每天自己转
@@ -251,7 +242,7 @@ onMounted(fetchData)
           <b>池子里还没有中国出海企业</b>：先在「采集任务」跑一次招聘监控（用默认关键词即可），
           系统会自动补官网和信号
         </li>
-        <li v-if="!health || (health.meta_ads_ready && health.scheduler_enabled && health.qualified_leads > 0)">
+        <li v-if="!health || (health.scheduler_enabled && health.qualified_leads > 0)">
           今天确实没有新变化——分数不够的线索都在培育池养着，去
           <router-link to="/collect/lead">
             线索列表
