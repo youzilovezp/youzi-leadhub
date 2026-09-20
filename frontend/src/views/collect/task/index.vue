@@ -86,8 +86,14 @@ function currentCollector(): CollectorInfo | undefined {
  *    ① 发现任务完成 → 自动接力；② 每日 cron「网站富化·全库」（任务列表可手动执行）；
  *    ③ 线索列表勾选 → 「富化选中」
  *  - 已移除：web_search（无 token，搜索引擎 API 待用户配置）+ meta_ads（Ads Library API 审核中） */
-const SOURCE_COLLECTORS = ['b2b_supplier', 'job_posting', 'career_site']
-const DISCOVERY_COLLECTORS = ['b2b_supplier', 'job_posting']
+// 数据源白名单（前端能手动创建/定时跑的采集器）：b2b_supplier / job_posting / career_site +
+// shoplazza_cases（2026-09-16 新增——公开案例研究的「中国出海独立站」数据源）
+// cifnews_cases 不在此列：雨果 topic 列表 API 受限未启用（见 collectors/cifnews_cases.py logic_note）
+// shopline_stories 不在此列：列表页被 Cloudflare v3 挡住（见 collectors/shopline_stories.py logic_note）
+const SOURCE_COLLECTORS = ['b2b_supplier', 'job_posting', 'career_site', 'shoplazza_cases']
+// 发现类（完成后自动接力 website_enrich 补官网/联系方式）：
+// b2b_supplier/job_posting/shoplazza_cases 都是「只有公司名 + 联系方式靠富化」模式
+const DISCOVERY_COLLECTORS = ['b2b_supplier', 'job_posting', 'shoplazza_cases']
 const isDiscovery = computed(() => DISCOVERY_COLLECTORS.includes(form.collector))
 /** 创建对话框的采集器选项：数据源（发现类 + 招聘页巡检），不含 website_enrich */
 const creatableCollectors = computed(() =>
