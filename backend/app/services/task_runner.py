@@ -36,8 +36,14 @@ class TaskRunner:
     # 发现类任务成功完成 → 自动排入隐式富化复核任务（官网发现 + 分级重爬）。
 
     # b2b_supplier 同为发现类（2026-09-01）：B2B 目录线索的联系方式全靠
-    # 自动接力富化从官网补全——不接力等于只领名单不建联
-    _CHAIN_ENRICH_AFTER = frozenset({"web_search", "job_posting", "meta_ads", "b2b_supplier"})
+    # 自动接力富化从官网补全——不接力等于只领名单不建联。
+    # shoplazza_cases（2026-09-16）：公开案例页只有公司名，联系方式全靠
+    # 自动接力富化从公司自己的官网联系页拿——同 b2b_supplier 模式。
+    # shopline_stories 不在此集合（2026-09-16 被 Cloudflare 挡住未启用）。
+    _CHAIN_ENRICH_AFTER = frozenset({
+        "web_search", "job_posting", "meta_ads", "b2b_supplier",
+        "shoplazza_cases",
+    })
 
     async def _maybe_chain_enrich(
         self, log_fn, task_id: int, collector: str, created_by: int | None
