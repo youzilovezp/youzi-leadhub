@@ -1,0 +1,10 @@
+# 技术选型：每层用 GitHub 最合适的轮子（不重复造轮子——硬约束）
+scrapy>=2.11          # 爬取框架：robots/自动限速/重试/并发/断点/大响应截断 全内置
+phonenumbers>=8.13    # 号码归一（Google libphonenumber 官方移植）
+tldextract>=5.1       # 注册域 eTLD+1（公共后缀表 PSL 标准）
+httpx>=0.27            # 种子下载（Tranco zip / CC CDX REST）
+fastapi>=0.115        # 只读 API 层
+uvicorn>=0.30         # ASGI 服务器
+pytest>=8             # 测试框架
+# 可选渠道（不装则 App 渠道不可用，其余不受影响）：
+# google-play-scraper>=1.2

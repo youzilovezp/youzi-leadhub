@@ -1,184 +1,80 @@
-<div align="center">
+# youzi-bsp — WhatsApp BSP 线索获取管道
 
-<img src="frontend/public/youzi-logo.svg" width="110" alt="youzi logo"/>
+依据 [`research-2026-09/whatsapp-bsp-leadgen-可行性分析.md`](../research-2026-09/whatsapp-bsp-leadgen-可行性分析.md)（v6.1）实施。
+获取"在用 WhatsApp 承接客户的海外企业"线索：**不限中国出海（P0 优先层），全量入库分层打分**。
 
-# 🎯 Youzi Leadhub · WhatsApp 商机获取系统
+> ⚠️ **合规红线（报告第七节）**：本工具只做**线索发现与准备**，不包含任何外联/发送能力。
+> 绝不对爬到的号码做 WhatsApp 群发/自动化营销；不引入反爬绕过层，被挑战即弃站。
 
-**为 WhatsApp Business API 产品获客：挖「做海外生意的中国企业」——投 CTWA 类广告、主页挂 wa.me、在招 WA 客服的出海品牌/跨境大卖，销售直接跟进建联**
+## 技术选型（GitHub 视角全新评估，不重复造轮子）
 
-> 🆓 **纯开源免费运行**：全链路零 API 费用——Meta Ad Library API（免费公开数据）+ DuckDuckGo/SearxNG（零 key/自托管）+ 自研官网爬虫 + 规则引擎评分（LLM 可选，接本地 Ollama 即零成本）。技术栈 FastAPI/Vue3/PostgreSQL 全开源。
+| 层 | 选型 | 理由 |
+|----|------|------|
+| 爬取调度 | **Scrapy** | robots 遵守/自动限速/重试/去重/断点（JOBDIR）/大响应截断全内置 |
+| HTML 解析 | **parsel**（Scrapy 自带，lxml 底座） | 链接提取用成熟解析器，非正则 |
+| 号码归一 | **phonenumbers** | Google libphonenumber 官方移植，E164/有效性判定 |
+| 域名归一 | **tldextract** | PSL 标准实现（含私有段 → myshopify 回退 host 粒度） |
+| 种子下载 | **httpx** | Tranco zip / Common Crawl CDX REST |
+| App 种子 | **google-play-scraper**（可选） | 按国家×类目分榜（总榜被大 app 霸榜） |
+| API | **FastAPI + uvicorn** | 只读 /api/stats、/api/leads |
+| 前端 | **@appica/ui-react**（默认配色）+ React 19 + Tailwind v4 + Vite | 用户指定 UI 库 |
+| 测试 | **pytest** | 业界标准 |
 
-![License](https://img.shields.io/badge/License-MIT-orange.svg)
-![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB.svg)
-![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-009688.svg)
-![Vue](https://img.shields.io/badge/Vue-3.4-42b883.svg)
-![Naive UI](https://img.shields.io/badge/Naive%20UI-2.6-green.svg)
+自写仅业务层（GitHub 无现成轮子）：两层检测（~100 行）、分层打分（~80 行）、三表 schema、种子渠道编排。
 
-[📘 使用手册](docs/使用手册.md) · [📖 业务逻辑](docs/业务逻辑.md) · [🛠️ 运维部署](docs/运维部署.md) · [🤖 AI 开发手册](AGENTS.md)
-
-</div>
-
----
-
-## 🚀 30 秒上手
-
-**第 1 步 · 把系统下载到电脑**（同一台电脑只做一次）：把下面整行复制进终端（Terminal）回车
-
-```bash
-git clone git@github.com:youzilovezp/youzi-leadhub.git   # 下载系统，会在当前位置生成 youzi-leadhub 文件夹
-cd youzi-leadhub                                          # 进入这个文件夹，后面的命令都在这里执行
-```
-
-> 💡 如果第一条命令报错 `Permission denied (publickey)`，说明这台电脑还没配过 GitHub 密钥——没关系，换成下面这条再执行，效果完全一样：
->
-> ```bash
-> git clone https://github.com/youzilovezp/youzi-leadhub.git
-> ```
-
-**第 2 步 · 一键启动**：
+## 快速开始
 
 ```bash
-make dev    # 自动装依赖 + 启动前后端，Ctrl+C 一起停
+cd youzi-bsp
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/bin/python -m pytest tests/        # 36 项全绿（两层检测/归一/幂等/打分/预算/SSRF 边界）
 ```
 
-**第 3 步 · 打开网页登录**：访问 **http://localhost:3000**，账号 `admin` / 密码见 `backend/.env` 的 `INITIAL_ADMIN_PASSWORD`（默认 `admin`），登录成功 ✅
-
-> 💡 默认密码方便本地开发。**生产前必须改密码：`make admin-pass NEW='<强密码>'`。**
-
-分开跑（输出更清晰）：`make install` → `make backend-dev`（终端 A）→ `make frontend-dev`（终端 B）。
-
-### 🌐 启动后访问
-
-| 服务 | 地址 | 用途 |
-|---|---|---|
-| 🖥️ 前端 | http://localhost:3000 | 用户界面 |
-| ⚡ 后端 API | http://localhost:8000 | REST 接口 |
-| 📘 API 文档 | http://localhost:8000/docs | Swagger UI（点 Authorize 输 token 调试） |
-| 🗄️ 数据库 UI | http://localhost:8080 | adminer（手动启动：`docker compose --env-file backend/.env up -d adminer`） |
-
-> 💡 adminer 登录：Docker 起的 PG 填 Server=`youzi-leadhub-postgres`；复用本机 PG 填 `host.docker.internal`。用户名/密码/库见 `backend/.env`。
-
-### ⚙️ 高频可选配置
-
-| 配置项 | 作用 |
-|---|---|
-| `META_ADS_ACCESS_TOKEN` | 主通道 meta_ads 必填（免费申请：[Ad Library API](https://www.facebook.com/ads/archive/api)） |
-| `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | AI 分析/话术（OpenAI 兼容；可指向本地 Ollama 零成本；未配置降级规则模板，全功能可用） |
-| `SEARCH_ENGINE` | `duckduckgo`（默认零 key）/ `searxng`（自托管）/ google_cse、bing（付费加速） |
-| `SCORING_DIM_WEIGHTS` / `TARGET_REGIONS` / `SCHEDULER_ENABLED` | 六维评分权重 / 目标地区 / cron 定时调度 |
-
-> 完整配置项：[backend/docs/配置说明.md](backend/docs/配置说明.md) ／ 生产核对清单：[docs/运维部署.md](docs/运维部署.md)
-
----
-
-## 🤔 这是什么？
-
-给销售找「需要用 WhatsApp 做生意」的企业线索，完整链路：**采集 → 归一化 → 去重合并 → ICP 二重门 → 六维评分分级 → 今日商机批次 → 领取 → 跟进建联 → 成交回传**。
-
-```
-采集器产出 LeadDraft（meta_ads 主通道 / web_search / seed_import / job_posting / website_enrich / 手工录入）
-        │
-        ▼
-归一化：电话 E.164 · 域名 registrable domain · 公司名归一
-        │
-        ▼
-去重合并：三身份列反查，跨来源合并到同一 Lead   ← 系统核心
-        │
-        ▼
-ICP 二重门（中国企业 + 出海证据才进销售池）+ 六维评分 → S/A/B/C
-        │
-        ▼
-控制台 UI：今日商机 / 画像详情 / 领取跟进 / CSV 导出 / 批量检测 WhatsApp
-```
-
-### ✨ 核心能力
-
-| 能力 | 说明 |
-|---|---|
-| 🔌 多源采集 | 插件式采集器，注册即接入任务/去重/评分体系；**meta_ads 主通道**挖在投海外广告的中国企业 |
-| 🧬 去重合并 | 电话 E.164 / 域名 / 公司名三身份列反查，跨来源合并——同一企业永远只有一条 |
-| 🚪 ICP 二重门 | 中国企业 + 出海证据才进销售池，非中国企业默认不出现在列表与导出 |
-| 📊 六维评分分级 | 出海25 / WhatsApp30 / SaaS需求20 / 规模10 / 营销10 / 联系人5，加权 0-100 → S/A/B/C |
-| 🔥 今日商机 | 每天自动汇总新晋 S/A + 新增高分 + 高价值预警，销售领取即跟进 |
-| 👤 联系人 | 手工 CRUD + 官网邮箱自动生成，职位自动分层（决策层/市场客服/技术） |
-| 🎯 产品推荐 | 规则引擎双产品线（WA 消息 / 出海 SaaS / 广告代理）+ 销售建议文案，不依赖 LLM |
-| 🤖 AI 能力 | 企业分析/话术生成（OpenAI 兼容协议，未配置降级规则模板） |
-| 📤 CSV 导出 | 当前筛选口径、36 个可选字段、Excel 直接打开 |
-| 👑 RBAC + 数据权限 | 5 种子角色 × 7 权限码；公司/团队/个人三级数据权限 |
-| ⏱️ 任务体系 | DB 即队列（无 Celery/Redis），并发闸门、取消、进度/日志实时轮询、cron 定时 |
-
-> 📖 业务细节（数据流、去重算法、评分权重、设计取舍）见 [docs/业务逻辑.md](docs/业务逻辑.md)；界面操作见 [docs/使用手册.md](docs/使用手册.md)。
-
----
-
-## 📁 项目结构
-
-```
-youzi-leadhub/
-├── backend/                # Python 后端（FastAPI）
-│   ├── app/
-│   │   ├── api/v1/endpoints/  # REST 接口
-│   │   ├── collectors/        # 插件式采集器（meta_ads / job_posting / website_enrich …）
-│   │   ├── crud/              # 数据访问（lead.py 的 upsert_lead = 去重合并核心）
-│   │   ├── models/  schemas/  # SQLAlchemy 模型 / Pydantic 校验
-│   │   └── services/          # task_runner（DB 队列）、scheduler（cron）
-│   ├── alembic/            # 数据库迁移
-│   ├── scripts/            # add_module.py / reset_admin.py
-│   └── docs/               # 架构/配置/开发/API 文档
-├── frontend/               # Vue 3 + TS
-│   ├── src/views/collect/  # 今日商机 / 线索 / 任务
-│   └── docs/               # 前端架构/配置/开发文档
-├── docs/                   # 使用手册 / 业务逻辑 / 运维部署
-├── docker-compose.yml      # PostgreSQL / Redis + adminer
-├── Makefile                # 常用命令（make help 看全量）
-└── AGENTS.md               # AI 开发手册（模块注册、勿动文件清单）
-```
-
----
-
-## 🛠️ 常用命令
+## D1–3：三渠道命中率对比（报告第八节）
 
 ```bash
-make help            # 查看完整命令列表
-make dev             # 一键启动
-make test            # 跑后端 + 前端测试（独立临时测试库，不碰开发数据）
-make db-migrate MSG="add order"   # 生成数据库迁移
-make db-upgrade      # 应用迁移（db-downgrade 回滚一步，慎用）
-make backup          # 备份数据库 → backups/
-make restore FILE=backups/app_xxx.sql   # 恢复（⚠️ 清库导入，破坏性）
-make use-sqlite      # 切换 SQLite（零依赖单文件）；make use-pg 切回
-make reset-admin     # 忘了密码？重置为 admin
-make admin-pass NEW=xxx  # 重置为指定密码
+# 1) 生成种子（各渠道 1–2 千域名）
+.venv/bin/python -m youzi_bsp seed tranco --top 2000
+.venv/bin/python -m youzi_bsp seed myshopify --limit 2000
+.venv/bin/python -m youzi_bsp seed play --country id --category BUSINESS --limit 200   # 需可选依赖
+.venv/bin/python -m youzi_bsp seed sample --file your-list.txt                        # 手工清单
+
+# 2) 分渠道爬取（礼貌：robots/自动限速/每站≤5页/超2MB丢弃/8s超时）
+.venv/bin/python -m youzi_bsp crawl --seed-file data/seeds-tranco.txt --channel tranco --limit 1000
+.venv/bin/python -m youzi_bsp crawl --seed-file data/seeds-myshopify.txt --channel myshopify --limit 1000
+# 断点续跑：加 --jobdir data/job1（Scrapy JOBDIR：队列/去重指纹持久化，重跑同目录续传）
+
+# 3) 命中率统计 + 导出
+.venv/bin/python -m youzi_bsp stats
+.venv/bin/python -m youzi_bsp export --out data/leads.csv
 ```
 
----
+参考基线（待实测校准，报告 3.2）：Shopify ≥8%、垂直目录 ≥5%、Tranco ≥2%。
 
-## 🔧 技术栈一览
+## Web 面板（appica-ui，默认配色）
 
-| 层 | 技术 |
-|---|---|
-| ⚡ 后端 | FastAPI + SQLAlchemy 2 + Alembic，PostgreSQL（默认）/ SQLite（零依赖模式） |
-| 🕷️ 采集 | Crawlee（HTTP 爬虫）、Playwright（渲染采集）、httpx[socks]、phonenumbers、tldextract、APScheduler 3.x |
-| 🎨 前端 | Vue 3 + TypeScript + Vite + Naive UI + Tailwind（原子类布局） |
-| 🗄️ 中间件 | Docker Compose（PostgreSQL / Redis / adminer），优先复用本机已运行实例 |
+```bash
+# API + 前端产物（frontend/dist 已构建，FastAPI 直接托管）
+BSP_DB=data/leads.db .venv/bin/uvicorn youzi_bsp.api:app --port 8788
+# 打开 http://127.0.0.1:8788
 
-> 版本明细：[backend/docs/技术栈.md](backend/docs/技术栈.md) · [frontend/docs/技术栈.md](frontend/docs/技术栈.md)
+# 前端开发态（热更新，/api 代理到 8788）
+cd frontend && pnpm install && pnpm dev   # http://localhost:5173
+```
 
----
+## 数据模型（SQLite，PG 兼容三表）
 
-## 📚 文档导航
+```
+domain(entity_key, channel, seed_host, status, widget, p0, market, lang, score, first_seen, last_crawled)
+phone(e164, valid, country)
+sighting(entity_key, e164, url, layer, first_seen, last_seen)   -- 多对多证据表 = 合规留痕
+```
 
-| 你想了解什么 | 看这里 |
-|---|---|
-| 📘 **怎么用**（销售跟进 / 管理员建任务 / 导出 / 权限） | [docs/使用手册.md](docs/使用手册.md) |
-| 🧠 业务逻辑（数据流 / 去重合并 / 评分 / 任务生命周期 / 设计取舍） | [docs/业务逻辑.md](docs/业务逻辑.md) |
-| 🛠️ 运维部署（部署架构 / 上线 checklist / 备份恢复 / 故障 runbook / PII 合规） | [docs/运维部署.md](docs/运维部署.md) |
-| 🤖 改代码（加模块 / 加采集器 / 勿动文件清单 / 开发约定） | [AGENTS.md](AGENTS.md) |
-| ⚙️ 后端架构 / 配置 / 开发 / API | [架构](backend/docs/架构说明.md) · [配置](backend/docs/配置说明.md) · [开发](backend/docs/开发指南.md) · [API](backend/docs/API文档.md) |
-| 🎨 前端架构 / 配置 / 开发 | [架构](frontend/docs/架构说明.md) · [配置](frontend/docs/配置说明.md) · [开发](frontend/docs/开发指南.md) |
+幂等：全部 upsert——同批重跑不产生重复 sighting。
 
----
+## 检测能力边界（报告 v6.1）
 
-## 📄 License
-
-MIT
+- 两层扫描：链接层（`wa.me/`、`api.whatsapp.com/send/?phone=`、`whatsapp://send`）+ 文本层（"whatsapp" 关键词 ±100 字符、仅国际格式）
+- **SaaS widget（Elfsight/Tidio）静态不可见**（号码运行时从厂商 API 拉取）——只记指纹；真实漏检率用 200 站 Playwright 校准（>15% 才升级引擎）
+- app-only 无官网的商家不可达（范围边界，非漏检）
+- **建议跑在海外 VPS**：CN 出口会被部分站点降级/拒绝（冒烟中 2 个 SEA 站超时即此因）

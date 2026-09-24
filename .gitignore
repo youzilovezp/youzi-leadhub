@@ -1,67 +1,33 @@
 # Python
 .venv/
-venv/
-env/
 __pycache__/
-**/__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
+*.pyc
 *.egg-info/
-dist/
-build/
-logs/
-*.log
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
 
-# Node（admin / ui 模式）
-node_modules/
-.pnp.*
-.yarn/
-
-# Build（admin / ui 模式）
-dist/
-dist-ssr/
-*.local
-.env.local
-.env.*.local
-
-# Auto-generated（admin / ui 模式）
-auto-imports.d.ts
-components.d.ts
-
-
-# IDE
-.vscode/
-.idea/
-*.swo
-*.swp
-
-# Env
-.env
-.env.local
-
-# 备份产物（含真实数据，绝不入库）
-backups/
-
-# SQLite 数据库文件（DB_TYPE=sqlite 时）
-backend/data/
+# 数据
 data/
+*.csv
+*.db
+*.sqlite*
 
-# Docker
-postgres_data/
-redis_data/
-rabbitmq_data/
-minio_data/
+# 前端
+frontend/node_modules/
+frontend/dist/
 
-# OS
+# 爬虫
+.scrapy/
+
+# 杂项
 .DS_Store
-Thumbs.db
-.serena
-storage
-.code-review-graph
-.claude
+*.log
+.env
+.idea
+docs
 .playwright-mcp
-.superpowers
+.claude
+scripts/node_modules/

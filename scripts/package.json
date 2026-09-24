@@ -1,0 +1,9 @@
+{
+  "name": "youzi-bsp-scripts",
+  "private": true,
+  "type": "module",
+  "description": "play 渠道种子生成依赖（Python 版 google-play-scraper 无分榜 API，改用 JS 版 list）",
+  "dependencies": {
+    "google-play-scraper": "^10.0.0"
+  }
+}
