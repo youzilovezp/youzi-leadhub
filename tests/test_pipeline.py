@@ -220,3 +220,17 @@ def test_error_item_never_degrades_crawled_or_scored(tmp_path):
     row2 = db.connect(dbp).execute("SELECT status, p0, score FROM domain").fetchone()
     assert row2["status"] == "scored"
     assert row2["score"] == row["score"]
+
+
+def test_private_signal_scoring():
+    """M2-3：wa_group/wa_business 私域信号各 +2（比挂号码更重的使用深度）。"""
+    from youzi_bsp.score import score_domain
+
+    base = {"lang": "en", "icp": False, "hreflang_zh": False, "title_zh": False,
+            "gambling": False}
+    plain = score_domain(base, ["US"], "x.com")["score"]
+    group = score_domain({**base, "wa_group": True}, ["US"], "x.com")["score"]
+    biz = score_domain({**base, "wa_business": True}, ["US"], "x.com")["score"]
+    both = score_domain({**base, "wa_group": True, "wa_business": True},
+                        ["US"], "x.com")["score"]
+    assert group == plain + 2 and biz == plain + 2 and both == plain + 4

@@ -123,6 +123,43 @@ def sample(src: str, out: Path) -> Path:
 # Overpass 公共端点（免费、限速；CN 网络如被拒走 HTTPS_PROXY）
 _OVERPASS = "https://overpass-api.de/api/interpreter"
 
+# 公共端点间歇 504/429 限速：主站 + 两镜像轮换，各退避重试一次
+_OVERPASS_ENDPOINTS = (_OVERPASS,
+                       "https://overpass.kumi.systems/api/interpreter",
+                       "https://overpass.private.coffee/api/interpreter")
+_UA = "youzi-leadhub/0.1 (BSP leadgen; polite; youzi99013@gmail.com)"
+
+
+def overpass_post(q: str) -> dict:
+    """Overpass 查询：三端点轮换 + 429/504 退避重试（osm/osm_direct 共用）。"""
+    import time
+
+    last: Exception | None = None
+    for endpoint in _OVERPASS_ENDPOINTS:
+        for attempt in (1, 2):
+            try:
+                r = httpx.post(endpoint, data={"data": q}, timeout=200,
+                               headers={"User-Agent": _UA})
+                if r.status_code in (429, 504) and attempt == 1:
+                    time.sleep(15)
+                    continue
+                r.raise_for_status()
+                return r.json()
+            except httpx.HTTPStatusError as e:
+                last = e
+                if e.response.status_code not in (429, 504, 502, 503):
+                    raise
+                time.sleep(15)
+            except httpx.HTTPError as e:   # 网络层错误 → 换端点
+                last = e
+    raise last if last else RuntimeError("overpass unreachable")
+
+# 印尼全域 area 查询超公共端点承载力（504 实测）——bbox 分 4 片（south,west,north,east）
+_ID_BBOXES = [(-6.0, 95.0, 6.0, 106.0),      # 苏门答腊
+              (-9.5, 105.0, -5.8, 115.7),    # 爪哇
+              (-4.5, 108.0, 4.5, 119.0),     # 加里曼丹
+              (-11.0, 118.0, 1.5, 141.0)]    # 苏拉威西以东
+
 
 def osm(countries: str, limit: int, out: Path) -> Path:
     """OSM Overpass 渠道：本地商家（shop/餐饮/咖啡馆）带 website 标签 → 种子。
@@ -136,16 +173,23 @@ def osm(countries: str, limit: int, out: Path) -> Path:
     urls: list[str] = []
     for code in codes:
         # ["website"] 标签存在性过滤：只取有官网的商家（实测无过滤时仅 ~18% 带 website）
-        q = (f'[out:json][timeout:180];area["ISO3166-1"="{code}"]->.a;'
-             f'(nwr["shop"]["website"](area.a);'
-             f'nwr["amenity"~"^(restaurant|cafe|fast_food)$"]["website"](area.a););'
-             f'out tags {per};')
-        r = httpx.post(_OVERPASS, data={"data": q}, timeout=180,
-                       headers={"User-Agent": "youzi-leadhub/0.1 "
-                                              "(BSP leadgen; polite; youzi99013@gmail.com)"})
-        r.raise_for_status()
-        for el in r.json().get("elements", []):
-            w = (el.get("tags", {}).get("website") or "").strip()
-            if w.startswith("http"):
-                urls.append(w)
+        # 印尼走 bbox 分片（area 查询必 504），片间均摊配额
+        if code == "ID":
+            for bbox in _ID_BBOXES:
+                q = (f'[out:json][timeout:180];'
+                     f'(nwr["shop"]["website"]{bbox};'
+                     f'nwr["amenity"~"^(restaurant|cafe|fast_food)$"]["website"]{bbox};);'
+                     f'out tags {max(per // len(_ID_BBOXES), 50)};')
+                urls.extend(_osm_query(q))
+        else:
+            q = (f'[out:json][timeout:180];area["ISO3166-1"="{code}"]->.a;'
+                 f'(nwr["shop"]["website"](area.a);'
+                 f'nwr["amenity"~"^(restaurant|cafe|fast_food)$"]["website"](area.a););'
+                 f'out tags {per};')
+            urls.extend(_osm_query(q))
     return _write(out, urls)
+
+
+def _osm_query(q: str) -> list[str]:
+    return [w.strip() for el in overpass_post(q).get("elements", [])
+            if (w := (el.get("tags", {}).get("website") or "").strip()).startswith("http")]

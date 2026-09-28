@@ -48,6 +48,12 @@ def main(argv=None) -> None:
     fg.add_argument("--db", default="data/leads.db")
     fg.add_argument("--entity", required=True, help="实体键（eTLD+1，如 example.com）")
 
+    imp = sub.add_parser("import-osm",
+                         help="OSM 直标签导入：phone/contact:whatsapp 免爬取直接入库")
+    imp.add_argument("--country", default="MY", help="ISO 国家码逗号分隔（MY,TH,PH）")
+    imp.add_argument("--limit", type=int, default=1000)
+    imp.add_argument("--db", default="data/leads.db")
+
     a = p.parse_args(argv)
     data = Path("data")
 
@@ -103,6 +109,11 @@ def main(argv=None) -> None:
         conn = db.connect(a.db)
         n = db.forget(conn, a.entity)
         print(f"已删除 {n} 个实体及其证据" if n else f"未找到实体: {a.entity}")
+
+    elif a.cmd == "import-osm":
+        from youzi_bsp.osm_direct import import_osm
+        n = import_osm(a.country, a.limit, a.db)
+        print(f"OSM 直标签导入: {n} 条线索（幂等，可重复执行）")
 
 
 if __name__ == "__main__":

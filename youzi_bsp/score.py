@@ -66,6 +66,11 @@ def score_domain(flags: dict, phone_countries: list[str | None], entity: str = "
         score += 3
     if zh_weak and not p0:
         score += 2
+    # 私域运营信号（leadhub 遗产，M2-3）：社群与业务号自述各 +2——比"挂了号码"更重的使用深度
+    if flags.get("wa_group"):
+        score += 2
+    if flags.get("wa_business"):
+        score += 2
     if gray:
         score = max(score - 8, 0)
     return {"p0": int(p0), "market": market, "lang": flags.get("lang"), "score": score}

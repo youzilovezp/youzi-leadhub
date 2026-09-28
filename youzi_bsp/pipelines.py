@@ -99,12 +99,15 @@ class WaStorePipeline:
             countries.setdefault(entity, []).append(country)
         # 先物化再写：SELECT 游标扫描期间 UPDATE 同表属未定义行为（可能跳行）
         for d in self.conn.execute(
-                """SELECT entity_key, lang, icp, hreflang_zh, title_zh, gambling
+                """SELECT entity_key, lang, icp, hreflang_zh, title_zh, gambling, widget
                    FROM domain WHERE status IN ('pending', 'scored')"""
         ).fetchall():
+            widget = d["widget"] or ""
             fl = {"lang": d["lang"], "icp": d["icp"],
                   "hreflang_zh": d["hreflang_zh"], "title_zh": d["title_zh"],
-                  "gambling": d["gambling"]}
+                  "gambling": d["gambling"],
+                  "wa_group": "wa_group" in widget,       # 私域社群运营（M2-3）
+                  "wa_business": "wa_business" in widget}
             sc = score_domain(fl, countries.get(d["entity_key"], []), d["entity_key"])
             self.conn.execute(
                 """UPDATE domain SET status='scored', p0=?, market=?, score=?
