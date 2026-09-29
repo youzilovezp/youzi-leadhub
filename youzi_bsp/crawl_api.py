@@ -151,6 +151,13 @@ def _spawn(channel: str, seed_file: str, limit: int, max_pages: int,
     return job
 
 
+def _seed_count(path: Path) -> int:
+    """种子文件有效行数（URL each line，# 注释与空行不算）。"""
+    with open(path, encoding="utf-8") as fh:
+        return sum(1 for ln in fh
+                   if ln.strip() and not ln.lstrip().startswith("#"))
+
+
 def _channel_busy(channel: str) -> bool:
     """该渠道是否仍有活着的 job（先收割已退出进程的真实状态再判）。"""
     for j in _JOBS_RUNNING.values():
@@ -208,7 +215,13 @@ def post_crawl(req: CrawlRequest):
         if not seed or not (_CWD / seed).exists():
             skipped.append({"channel": ch, "reason": f"无种子文件（需先跑 seed {ch}）"})
             continue
-        job = _spawn(ch, seed, req.limit, req.max_pages, db_path, req.mode)
+        # 增量模式不切片种子文件（2026-09-29 修复）：旧实现取前 limit 条，同一
+        # 种子文件反复跑永远轮不到第 limit+1 条（实测：seeds 309 条、limit 200，
+        # 18:19 增量 filtered 200 / 0.042s 结束 / 永远 +0）。全量交给 dupefilter
+        # 跳已爬——指纹查表极廉价，被滤的种子不产生网络请求。
+        limit = (_seed_count(_CWD / seed) if req.mode == "incremental"
+                 else req.limit)
+        job = _spawn(ch, seed, limit, req.max_pages, db_path, req.mode)
         spawned.append(JobInfo(
             job_id=job.job_id, channel=job.channel, pid=job.pid,
             started_at=job.started_at, status=job.status,

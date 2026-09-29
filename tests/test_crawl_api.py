@@ -61,6 +61,29 @@ def test_post_crawl_allows_exited_job(monkeypatch):
     assert out["total"] == 0          # 无种子 → skipped 而非 409
 
 
+def test_incremental_limit_is_full_seed_file(monkeypatch, tmp_path):
+    """2026-09-29 修复：增量模式 limit=种子全量行数（旧实现取前 200 条，
+    第 201+ 条种子永远轮不到 → 增量永远 +0）；full 模式仍用用户 limit。"""
+    seed = tmp_path / "seeds-x.txt"
+    seed.write_text("https://a.com/\n" * 309 + "# comment\n\n", encoding="utf-8")
+    monkeypatch.setattr(crawl_api, "_pick_seed", lambda ch: str(seed))
+    monkeypatch.setattr(crawl_api, "_CWD", tmp_path)
+    calls = {}
+    monkeypatch.setattr(crawl_api, "_spawn",
+                        lambda ch, s, limit, mp, db, mode:
+                            calls.update(channel=ch, limit=limit, mode=mode)
+                            or _fake_job(ch))
+
+    crawl_api.post_crawl(crawl_api.CrawlRequest(channels=["play"],
+                                                limit=200,
+                                                mode="incremental"))
+    assert calls["limit"] == 309      # 全量种子交给 dupefilter 跳 seen
+
+    crawl_api.post_crawl(crawl_api.CrawlRequest(channels=["play"],
+                                                limit=200, mode="full"))
+    assert calls["limit"] == 200      # full 模式照旧按用户 limit 切片
+
+
 def test_tail_reads_only_tail(tmp_path):
     """_tail 只读尾部 64KB：200KB 日志含末行也能取到，且输出 ≤ max_bytes。"""
     log = tmp_path / "big.log"
