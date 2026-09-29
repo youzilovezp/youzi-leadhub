@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from youzi_bsp import db, stats
+from youzi_bsp.crawl_api import router as crawl_router
 
 DB_PATH = os.environ.get("BSP_DB", "data/leads.db")
 
@@ -26,9 +27,14 @@ def _conn(path: str):
 
 app = FastAPI(title="youzi-bsp", version="0.1.0",
               description="WhatsApp BSP 线索获取 · 只发现不外联")
-app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173",
-                                                  "http://127.0.0.1:5173"],
-                   allow_methods=["GET"])
+app.add_middleware(CORSMiddleware,
+                   allow_origins=["http://localhost:5173",
+                                   "http://127.0.0.1:5173",
+                                   "http://localhost:8788",
+                                   "http://127.0.0.1:8788"],
+                   allow_methods=["GET", "POST"],
+                   allow_credentials=False)
+app.include_router(crawl_router)
 
 
 @app.get("/api/stats")
@@ -37,7 +43,8 @@ def get_stats():
 
 
 @app.get("/api/leads")
-def get_leads(limit: int = 200, channel: str | None = None, p0: int | None = None):
+def get_leads(limit: int = 200, channel: str | None = None, p0: int | None = None,
+              market_group: str | None = None):
     conn = _conn(DB_PATH)
     where, params = [], []
     if channel:
@@ -46,9 +53,14 @@ def get_leads(limit: int = 200, channel: str | None = None, p0: int | None = Non
     if p0 is not None:
         where.append("d.p0 = ?")
         params.append(p0)
+    if market_group:
+        # 落库时一律存大写（_market_group() 实现），查询也规范成大写避免漏匹配
+        where.append("d.market_group = ?")
+        params.append(market_group.upper())
     wsql = ("WHERE " + " AND ".join(where)) if where else ""
     rows = conn.execute(
-        f"""SELECT d.entity_key AS entity, d.channel, d.market, d.lang, d.p0, d.score,
+        f"""SELECT d.entity_key AS entity, d.channel, d.market, d.market_group,
+                   d.lang, d.p0, d.score, d.widget, d.developer_name,
                    GROUP_CONCAT(DISTINCT s.e164) AS phones
             FROM domain d
             JOIN sighting s ON s.entity_key = d.entity_key

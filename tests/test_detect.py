@@ -70,3 +70,44 @@ def test_none():
     res = detect(_html("none.html"))
     assert res["candidates"] == []
     assert res["widgets"] == []
+
+
+def test_link_layer_wa_me_url_encoded_plus():
+    """C2 修复：wa.me/<URL-encoded +号码> 必须命中（浏览器 + 服务器都允许）。"""
+    res = detect(_html("wa_url_encoded.html"))
+    # 捕获组是数字部分（%2B 已识别）；号码本身被识别即可
+    assert ("628123456789", "link") in res["candidates"]
+
+
+def test_text_layer_spanish_separators():
+    """MED 验证：文本层字符类收 ·（西/葡语常见排版点）——`+52 55 4444 1234` 与
+    中间排版点都能被识别为完整号码。"""
+    res = detect(_html("wa_text_spanish.html"))
+    raws = [raw for raw, layer in res["candidates"] if layer == "text"]
+    assert any("+52" in r for r in raws)
+    assert any("55 4444" in r or "55 4444 1234" in r for r in raws)
+
+
+def test_email_format_validation():
+    """H2 修复：mailto 链接必须经最低格式校验——`bad@`/`no-tld@x`/`x@y` 都不入邮箱集合。
+    合法邮件保留、查询串剥除、归一化小写保持原行为。"""
+    html = (
+        '<a href="mailto:Sales@Example.com?subject=hi">ok</a>'
+        '<a href="mailto:bad@">b1</a>'
+        '<a href="mailto:no-tld@x">b2</a>'
+        '<a href="mailto:foo@bar">b3</a>'
+    )
+    res = detect(html)
+    assert res["emails"] == ["sales@example.com"]
+
+
+def test_widget_joinchat_static_visible():
+    """WordPress joinchat 插件最常用：变量名 `joinchat_settings` 静态可见。
+    新 widget 边界 (?<![a-zA-Z])...(?![a-zA-Z]) 允许下划线连接。"""
+    html = ('<script>'
+            'var joinchat_settings = {tel: "+62812345678", button_text: "Hubungi"};'
+            '</script>')
+    res = detect(html)
+    assert "joinchat" in res["widgets"]
+    # 号码在 JS 内联配置中，不在 <a href>，也不带 "whatsapp" 关键词——不会进 candidates。
+    # 该检测期望的只是 widget 指纹识别（特征 diff 信号）。

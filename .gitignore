@@ -30,4 +30,7 @@ frontend/dist/
 docs
 .playwright-mcp
 .claude
+.serena
 scripts/node_modules/
+node_modules/
+backups/

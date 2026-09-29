@@ -11,17 +11,19 @@ from pathlib import Path
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS domain (
-  entity_key   TEXT PRIMARY KEY,        -- eTLD+1；平台公共后缀(myshopify.com 等 PSL 私有段)回退完整 host
-  channel      TEXT NOT NULL,           -- 种子渠道: tranco / myshopify / play / sample
-  seed_host    TEXT,                    -- 种子来源 host（重定向前）
-  status       TEXT NOT NULL DEFAULT 'pending',  -- pending|scored|redirected|blocked|error
-  widget       TEXT,                    -- 站内 widget 指纹（无号码也记录，作 diff 特征）
-  p0           INTEGER NOT NULL DEFAULT 0,
-  market       TEXT,                    -- 号码国家（ISO 地区码）
-  lang         TEXT,
-  score        INTEGER NOT NULL DEFAULT 0,
-  first_seen   TEXT NOT NULL,
-  last_crawled TEXT
+  entity_key      TEXT PRIMARY KEY,        -- eTLD+1；平台公共后缀(myshopify.com 等 PSL 私有段)回退完整 host
+  channel         TEXT NOT NULL,           -- 种子渠道: tranco / myshopify / play / sample
+  seed_host       TEXT,                    -- 种子来源 host（重定向前）
+  developer_name  TEXT,                    -- 种子来源开发者主体名（play 渠道独有；P0 第 1 强信号）
+  status          TEXT NOT NULL DEFAULT 'pending',  -- pending|scored|redirected|blocked|error
+  widget          TEXT,                    -- 站内 widget 指纹（无号码也记录，作 diff 特征）
+  p0              INTEGER NOT NULL DEFAULT 0,
+  market          TEXT,                    -- 号码国家（ISO 地区码）
+  market_group    TEXT,                    -- 市场分组标签（SEA/LATAM/MENA/EU/OTHER）
+  lang            TEXT,
+  score           INTEGER NOT NULL DEFAULT 0,
+  first_seen      TEXT NOT NULL,
+  last_crawled    TEXT
 );
 CREATE TABLE IF NOT EXISTS phone (
   e164    TEXT PRIMARY KEY,
@@ -67,14 +69,30 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE domain ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0")
     if "email" not in cols:
         conn.execute("ALTER TABLE domain ADD COLUMN email TEXT")  # 富化：站内 mailto（Q8）
+    if "developer_name" not in cols:
+        conn.execute("ALTER TABLE domain ADD COLUMN developer_name TEXT")  # P0 第 1 强信号
+    if "market_group" not in cols:
+        conn.execute("ALTER TABLE domain ADD COLUMN market_group TEXT")    # 市场分组标签
+
+    # E2 fix: 索引补充（按 v7 spec 高频查询路径）
+    # 单条 ALTER 后即时建索引——>10k 行后无索引会让 /api/leads 按 market_group 扫表
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_domain_market_group ON domain(market_group)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_domain_score ON domain(score DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_domain_p0 ON domain(p0) WHERE p0 = 1")  # 部分索引，小
 
 
-def upsert_domain(conn, key: str, channel: str, seed_host: str | None) -> None:
+def upsert_domain(conn, key: str, channel: str, seed_host: str | None,
+                  developer_name: str | None = None) -> None:
+    """新实体首次落库：channel/seed_host/developer_name 仅在首次写（ON CONFLICT 不动）。
+
+    developer_name 来自种子渠道（play 渠道 = 开发者主体名），是 P0 第 1 强信号
+    （spec 3.5）——首跑时入表，后续重跑不覆盖（防止某次爬取命中的开发者名篡改种子值）。
+    """
     conn.execute(
-        """INSERT INTO domain(entity_key, channel, seed_host, first_seen)
-           VALUES(?, ?, ?, ?)
+        """INSERT INTO domain(entity_key, channel, seed_host, developer_name, first_seen)
+           VALUES(?, ?, ?, ?, ?)
            ON CONFLICT(entity_key) DO NOTHING""",
-        (key, channel, seed_host, now()),
+        (key, channel, seed_host, developer_name, now()),
     )
 
 

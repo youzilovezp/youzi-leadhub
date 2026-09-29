@@ -7,6 +7,14 @@ from pathlib import Path
 from youzi_bsp import db, seeds, stats
 
 
+def _max_pages(value: str) -> int:
+    n = int(value)
+    if n < 1:
+        raise argparse.ArgumentTypeError(
+            f"--max-pages 必须 ≥ 1（实测 0/负数会让预算计算退化），got {n}")
+    return n
+
+
 def main(argv=None) -> None:
     p = argparse.ArgumentParser(prog="youzi_bsp",
                                 description="WhatsApp BSP 线索获取管道（只发现不外联）")
@@ -28,14 +36,15 @@ def main(argv=None) -> None:
     c.add_argument("--seed-file", required=True)
     c.add_argument("--channel", default="sample")
     c.add_argument("--limit", type=int, default=1000)
-    c.add_argument("--max-pages", type=int, default=5)
+    c.add_argument("--max-pages", type=_max_pages, default=5)
     c.add_argument("--delay", type=float, default=0.0,
                    help="每域下载间隔秒（被 429 限流的渠道用它降速，如 myshopify 用 2~3）")
     c.add_argument("--concurrency", type=int, default=0,
                    help="全局并发上限（IP 级 429 限流时压低，如 myshopify 用 6）")
     c.add_argument("--db", default="data/leads.db")
     c.add_argument("--jobdir", default=None,
-                   help="断点续跑目录（Scrapy JOBDIR：队列/去重指纹持久化）")
+                   help="断点续跑目录（Scrapy JOBDIR：队列/去重指纹持久化）；"
+                        "缺省时落到 data/.job/<channel>-<yyyymmdd>/ 避免忘传丢续跑")
 
     st = sub.add_parser("stats", help="分渠道命中率")
     st.add_argument("--db", default="data/leads.db")
@@ -53,6 +62,17 @@ def main(argv=None) -> None:
     imp.add_argument("--country", default="MY", help="ISO 国家码逗号分隔（MY,TH,PH）")
     imp.add_argument("--limit", type=int, default=1000)
     imp.add_argument("--db", default="data/leads.db")
+
+    gp = sub.add_parser("golden-prelabel",
+                        help="金标准集预标注：抓样本页缓存 HTML + 检测器重放，"
+                             "label 预填建议值，人工只纠错（报告 9.1）")
+    gp.add_argument("--csv", default="docs/golden-set-sample.csv")
+    gp.add_argument("--cache", default="data/golden-html")
+
+    ge = sub.add_parser("golden-eval",
+                        help="金标准集 precision 重放裁决（报告 9.2 阈值："
+                             "链接层 P≥98%%、文本层 FP≤5%%）")
+    ge.add_argument("--csv", default="docs/golden-set-sample.csv")
 
     a = p.parse_args(argv)
     data = Path("data")
@@ -75,6 +95,7 @@ def main(argv=None) -> None:
 
     elif a.cmd == "crawl":
         import os
+        from datetime import datetime
 
         os.environ.setdefault("SCRAPY_SETTINGS_MODULE", "youzi_bsp.settings")
         from scrapy.crawler import CrawlerProcess
@@ -82,8 +103,14 @@ def main(argv=None) -> None:
 
         sset = get_project_settings()
         sset.set("BSP_DB", a.db)
-        if a.jobdir:
-            sset.set("JOBDIR", a.jobdir)
+        # MED 修复：--jobdir 缺省时落到 data/.job/<channel>-<yyyymm-dd>/，避免
+        # 5 万站中途崩溃从头爬。显式传 --jobdir "" 仍生效（空字符串 = 不续跑）。
+        if a.jobdir is None:
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            default_jobdir = Path("data") / ".job" / f"{a.channel}-{stamp}"
+            default_jobdir.mkdir(parents=True, exist_ok=True)
+            a.jobdir = str(default_jobdir)
+        sset.set("JOBDIR", a.jobdir)
         if a.delay:
             sset.set("DOWNLOAD_DELAY", a.delay)
         if a.concurrency:
@@ -114,6 +141,17 @@ def main(argv=None) -> None:
         from youzi_bsp.osm_direct import import_osm
         n = import_osm(a.country, a.limit, a.db)
         print(f"OSM 直标签导入: {n} 条线索（幂等，可重复执行）")
+
+    elif a.cmd == "golden-prelabel":
+        from youzi_bsp import golden
+        st = golden.prelabel(Path(a.csv), Path(a.cache))
+        print(f"预标注完成: 抓到 {st['fetched']} / 失败 {st['missed']} / "
+              f"重放复现 {st['reproduced']}——label 列已预填建议值，"
+              f"人工只需纠错改 FP")
+
+    elif a.cmd == "golden-eval":
+        from youzi_bsp import golden
+        print(golden.report(golden.evaluate(Path(a.csv))))
 
 
 if __name__ == "__main__":

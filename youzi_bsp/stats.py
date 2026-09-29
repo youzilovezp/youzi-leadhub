@@ -25,7 +25,8 @@ def channel_stats(conn) -> list[dict]:
 def export_csv(conn, out_path: str) -> int:
     rows = conn.execute(
         """
-        SELECT d.entity_key, d.channel, d.market, d.lang, d.p0, d.score,
+        SELECT d.entity_key, d.channel, d.market, d.market_group, d.lang, d.p0,
+               d.score, d.developer_name,
                GROUP_CONCAT(DISTINCT s.e164) AS phones
         FROM domain d
         JOIN sighting s ON s.entity_key = d.entity_key
@@ -35,8 +36,9 @@ def export_csv(conn, out_path: str) -> int:
     ).fetchall()
     with open(out_path, "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
-        w.writerow(["entity", "channel", "market", "lang", "p0", "score", "phones"])
+        w.writerow(["entity", "channel", "market", "market_group", "lang", "p0",
+                    "score", "developer_name", "phones"])
         for r in rows:
-            w.writerow([r["entity_key"], r["channel"], r["market"], r["lang"],
-                        r["p0"], r["score"], r["phones"]])
+            w.writerow([r["entity_key"], r["channel"], r["market"], r["market_group"],
+                        r["lang"], r["p0"], r["score"], r["developer_name"], r["phones"]])
     return len(rows)

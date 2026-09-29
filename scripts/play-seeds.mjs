@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 /**
- * play 渠道种子生成：国家 × 类目分榜 → 开发者官网（developerWebsite，非 website）。
+ * play 渠道种子生成：国家 × 类目分榜 → 开发者官网（developerWebsite）+ 开发者主体名。
+ *
+ * 输出格式：每行 `URL<TAB>developerName`（developerName 可空）——seeds.py 解析时按
+ * \t 切，前段做 URL 归一，后段作为 P0 第 1 强信号入打分（spec 3.5）。
  *
  * 为什么是 JS：Python 版 google-play-scraper 已无 top_chart/list 分榜 API，
  * JS 版 list(collection, category, fullDetail:true) 一次拿全详情。
@@ -25,7 +28,7 @@ const categories = (opt('categories', 'BUSINESS')).split(',').map((s) => s.trim(
 const num = parseInt(opt('num', '150'), 10)
 const out = opt('out', 'data/seeds-play.txt')
 
-const all = new Set()
+const all = new Map()  // web -> developer
 let failed = 0
 
 for (const country of countries) {
@@ -48,8 +51,11 @@ for (const country of countries) {
       for (const a of apps) {
         const web = (a.developerWebsite || '').trim()
         if (web.startsWith('http')) {
-          all.add(web)
-          got++
+          // 同一官网多家 app 共用：保留首个非空 developer 名（首次见到时存）
+          if (!all.has(web)) {
+            all.set(web, (a.developer || '').trim())
+            got++
+          }
         }
       }
       console.log(`${country} ${category}: apps=${apps.length} with-site=${got}`)
@@ -61,7 +67,7 @@ for (const country of countries) {
   }
 }
 
-const urls = [...all]
-writeFileSync(out, urls.join('\n') + '\n')
-console.log(`TOTAL unique=${urls.length} -> ${out}${failed ? ` (failed-charts=${failed})` : ''}`)
-process.exitCode = urls.length === 0 ? 1 : 0
+const lines = [...all.entries()].map(([web, dev]) => dev ? `${web}\t${dev}` : web)
+writeFileSync(out, lines.join('\n') + '\n')
+console.log(`TOTAL unique=${lines.length} -> ${out}${failed ? ` (failed-charts=${failed})` : ''}`)
+process.exitCode = lines.length === 0 ? 1 : 0

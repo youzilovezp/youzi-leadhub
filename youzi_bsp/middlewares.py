@@ -73,3 +73,77 @@ class PrivateNetMiddleware:
         host = (urlsplit(request.url).hostname or "").strip("[]").lower()
         if not host or not self._allowed(host):
             raise IgnoreRequest(f"private/cgnet host blocked: {host}")
+
+
+# ============================================================================
+# HIGH #6：RetryAfterMiddleware —— Scrapy 内置 RetryMiddleware 不读 Retry-After
+# 头（spec §五.4 "429/503 尊重 Retry-After 退避"，也是 §7.3 礼貌红线）。
+#
+# 2026-09-28 重写（审查 P2，双代理独立验证旧实现是死代码）：
+# 1. 旧实现往 request.meta["download_delay"] 注入延迟——该 meta 在 Scrapy 2.13
+#    下载器重构后全框架无任何读取点（slot delay 只来自 DOWNLOAD_SLOTS/DOWNLOAD_DELAY）；
+# 2. 旧优先级 500 < 内置 RetryMiddleware 550，process_response 链按优先级降序执行
+#    且返回 Request 即短路——内置先看到 429/503 并重试，旧中间件只在重试耗尽后
+#    收到死响应。两重失效 = 429 被原地无延迟立即重试。
+#
+# 现改为子类化内置重试器并取代之（settings 里把内置置 None）：429/503 在重试前
+# 把下载槽 slot.delay 抬到 Retry-After 值（cap 防锁死），重试请求进同一槽自然等待。
+# ============================================================================
+
+import email.utils
+from datetime import datetime, timezone
+
+from scrapy.downloadermiddlewares.retry import RetryMiddleware
+
+
+class RetryAfterMiddleware(RetryMiddleware):
+    def __init__(self, settings):
+        super().__init__(settings)
+        self.max_delay = settings.getfloat("RETRY_AFTER_MAX_DELAY", 60)
+
+    @classmethod
+    def from_crawler(cls, crawler):
+        mw = cls(crawler.settings)
+        mw.crawler = crawler
+        return mw
+
+    def _parse_retry_after(self, value: str) -> float | None:
+        # 优先按秒数解析
+        try:
+            return max(0.0, float(value))
+        except ValueError:
+            pass
+        # 退路：HTTP 日期（RFC 7231）
+        try:
+            target = email.utils.parsedate_to_datetime(value)
+            if target is None:
+                return None
+            now = datetime.now(timezone.utc)
+            if target.tzinfo is None:
+                target = target.replace(tzinfo=timezone.utc)
+            return max(0.0, (target - now).total_seconds())
+        except (ValueError, TypeError):
+            return None
+
+    def process_response(self, request, response, spider=None):
+        if response.status in (429, 503):
+            ra = response.headers.get("Retry-After")
+            if ra is not None:
+                try:
+                    seconds = self._parse_retry_after(
+                        ra.decode("ascii", errors="ignore"))
+                except Exception:
+                    seconds = None
+                if seconds and seconds > 0:
+                    # cap 到 max_delay：避免 Retry-After: 86400（一整天）把爬虫锁死
+                    self._throttle(request, min(seconds, self.max_delay))
+        return super().process_response(request, response, spider)
+
+    def _throttle(self, request, seconds: float) -> None:
+        """抬升下载槽延迟——对同槽后续请求（含本响应触发的重试）生效。"""
+        key = request.meta.get("download_slot")
+        if not key:
+            return
+        slot = self.crawler.engine.downloader.slots.get(key)
+        if slot is not None:
+            slot.delay = max(slot.delay, seconds)

@@ -74,7 +74,9 @@ def myshopify(limit: int, out: Path, crawl_id: str | None = None) -> Path:
                         hosts.add(h)
                 if rec.get("resumeKey"):
                     nxt = rec["resumeKey"]
-            if nxt == resume or len(hosts) >= limit:
+            # 末页响应无 resumeKey（nxt=None）必须终止——旧条件 nxt==resume 判不上
+            # None，会乒乓回拉第 1 页直到 50 次上限（~48 次冗余请求白打免费端点）
+            if nxt is None or nxt == resume or len(hosts) >= limit:
                 break
             resume = nxt
     return _write(out, [f"https://{h}/" for h in sorted(hosts)[:limit]])

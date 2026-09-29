@@ -20,12 +20,27 @@ _SEPARATORS = re.compile(r"[\s\-().–—]")
 
 def normalize_url(url: str) -> str | None:
     """小写 host、去 fragment、剥 UTM、统一尾斜杠。非法输入返回 None。"""
+    if not isinstance(url, str) or not url:
+        return None
+    # 拒 ASCII 控制字符（\x00-\x1f, \x7f）——URL 不该含这些，浏览器/服务器也会拒
+    if any(ord(c) < 0x20 or ord(c) == 0x7f for c in url):
+        return None
     try:
         parts = urlsplit(url.strip())
     except ValueError:
         return None
     if parts.scheme not in ("http", "https") or not parts.hostname:
         return None
+    # 端口必须保留（P2 修复：hostname 重建 netloc 曾把 :8443 种子打到 443 错 origin）；
+    # 默认端口（80/443）规范化去除——:443 与裸 https 保持指纹同源。
+    # parts.port 对畸形端口（host:abc）抛 ValueError，与 urlsplit 同防线处理。
+    try:
+        port = parts.port
+    except ValueError:
+        return None
+    netloc = parts.hostname.lower()
+    if port is not None and port not in (80, 443):
+        netloc = f"{netloc}:{port}"
     path = parts.path or "/"
     if path != "/" and path.endswith("/"):
         path = path.rstrip("/")
@@ -33,7 +48,7 @@ def normalize_url(url: str) -> str | None:
         [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
          if not _UTM_RE.match(k)]
     )
-    return urlunsplit((parts.scheme, parts.hostname.lower(), path, query, ""))
+    return urlunsplit((parts.scheme, netloc, path, query, ""))
 
 
 def normalize_phone(raw: str, imply_plus: bool = False) -> tuple[str, str | None] | None:
@@ -41,7 +56,11 @@ def normalize_phone(raw: str, imply_plus: bool = False) -> tuple[str, str | None
 
     imply_plus=True 用于链接层（wa.me/8613800138000 按规范无 + 前缀，补 + 解析）；
     文本层保持 False —— 只收 +/00 开头的国际格式，控误报（报告 9.2 最大风险点）。
+
+    C1 fix：raw=None/非字符串直接返 None，不抛 TypeError。
     """
+    if not isinstance(raw, str):
+        return None
     import phonenumbers
 
     s = unquote(raw).strip()

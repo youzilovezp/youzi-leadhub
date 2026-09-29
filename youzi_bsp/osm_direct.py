@@ -11,8 +11,8 @@ from urllib.parse import urlsplit
 
 from youzi_bsp import db
 from youzi_bsp.normalize import entity_key, normalize_phone
+from youzi_bsp.pipelines import score_pending
 from youzi_bsp.seeds import overpass_post
-from youzi_bsp.score import score_domain
 
 # 电话来源标签优先级：contact:whatsapp 语义最强（明确是 WA 号）
 _PHONE_TAGS = ("contact:whatsapp", "contact:mobile", "phone", "contact:phone")
@@ -79,11 +79,11 @@ def import_osm(countries: str, limit: int, db_path: str | Path) -> int:
             db.upsert_domain(conn, row["entity"], "osm", None)
             db.upsert_phone(conn, row["e164"], row["country"])
             db.upsert_sighting(conn, row["entity"], row["e164"], row["osm_url"], "osm")
-            sc = score_domain({"lang": None}, [row["country"]], row["entity"])
-            conn.execute(
-                "UPDATE domain SET status='scored', market=?, p0=?, score=? WHERE entity_key=?",
-                (sc["market"], sc["p0"], sc["score"], row["entity"]))
             n += 1
         conn.commit()
+    # 打分走 close_spider 同款 DB 派生路径（P1 修复）：不在导入时用空 flags 算分
+    # ——否则覆盖同实体已爬取的 icp/developer_name 派生结果，且漏写 market_group
+    score_pending(conn)
+    conn.commit()
     conn.close()
     return n
