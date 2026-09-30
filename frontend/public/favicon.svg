@@ -5,8 +5,7 @@
       <stop offset="100%" stop-color="#09090B"/>
     </linearGradient>
   </defs>
-  <rect width="32" height="32" rx="8" fill="url(#fbg)"/>
-  <rect x="0.5" y="0.5" width="31" height="31" rx="7.5" fill="none" stroke="#FFFFFF" stroke-opacity="0.07"/>
+  <rect width="32" height="32" fill="url(#fbg)"/>
   <path d="M 11 9 Q 9 9 9 11 V 19 Q 9 21 11 21 L 11 25 L 15 21 H 21 Q 23 21 23 19 V 11 Q 23 9 21 9 Z" fill="#FAFAFA"/>
   <path d="M 14 11.5 C 13.4 11.5 13 12 13 12.5 C 13 15 14.7 17.3 17.5 17.5 C 18 17.5 18.5 17 18.5 16.5 L 18.5 16 C 18.5 15.5 18 15 17.5 15 L 17 15 C 16 15 15.5 14.5 15.5 13.5 L 15.5 13 C 15.5 12.5 15 12 14.5 12 Z" fill="#18181B"/>
 </svg>
