@@ -55,6 +55,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { cn } from '@/lib/utils'
+import { getTier, TIER_STYLE } from '@/lib/leads'
 
 /* ============================================================
  * 类型
@@ -636,9 +637,11 @@ function LeadsTable({
                 {pageLeads.map((l) => {
                   const phones = l.phones.split(',')
                   const Style = channelStyle(l.channel)
+                  const tier = getTier(l)
+                  const tierCls = TIER_STYLE[tier]
                   return (
-                    <TableRow key={l.entity} className="group">
-                      <TableCell className="py-3 align-top">
+                    <TableRow key={l.entity} className={cn('group', tierCls.bg)}>
+                      <TableCell className={cn('border-l-[2px] border-solid py-3 align-top', tierCls.border)}>
                         <div className="flex flex-col gap-0.5">
                           <div className="flex items-center gap-1.5">
                             {/* entity 可点击直达官网：开新标签，rel=noopener 安全 */}
