@@ -20,7 +20,9 @@ import {
   Smartphone,
   Sun,
   TestTube2,
+  TrendingUp,
   X,
+  Zap,
 } from 'lucide-react'
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
@@ -121,8 +123,6 @@ const PAGE_SIZE = 24
 const CHANNEL_IDENTITY: Record<string, { icon: typeof Globe; chip: string; grad: string }> = {
   play:      { icon: Smartphone,  chip: 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
                                 grad: 'from-emerald-500/10 to-teal-500/10' },
-  tranco:    { icon: Globe,       chip: 'bg-muted text-muted-foreground',
-                                grad: 'from-muted/30 to-muted/10' },
   myshopify: { icon: ShoppingBag, chip: 'bg-muted text-muted-foreground',
                                 grad: 'from-muted/30 to-muted/10' },
   osm:       { icon: Globe,       chip: 'bg-muted text-muted-foreground',
@@ -134,13 +134,14 @@ const channelStyle = (c: string) =>
   CHANNEL_IDENTITY[c] ?? { icon: Globe, chip: 'bg-muted text-muted-foreground',
                             grad: 'from-muted/30 to-muted/10' }
 
-/* 渠道历史命中率 hint（v7 实测口径——给用户预算参考） */
-const CRAWL_CHANNELS = ['tranco', 'myshopify', 'play', 'osm'] as const
+/* 渠道历史命中率 hint（v7 实测口径——给用户预算参考）
+ * 2026-09-30：tranco 渠道已清理（命中率 0.2%，污染源），从 CRAWL_CHANNELS 移除。
+ * 后端 ALL_CHANNELS 同步。手工调试仍可用 `app seed tranco`。 */
+const CRAWL_CHANNELS = ['myshopify', 'play', 'osm'] as const
 type CrawlChannel = (typeof CRAWL_CHANNELS)[number]
 
 /* 渠道中文名 + 一句话定位 — 给非开发者用户看的，不是给后端看的 */
 const CHANNEL_CN: Record<CrawlChannel, { name: string; desc: string }> = {
-  tranco:    { name: '域名榜单',     desc: 'Tranco 全球访问 Top 1M 域名（覆盖长尾）' },
   myshopify: { name: 'Shopify 店铺', desc: 'CDX 索引 *.myshopify.com 子域的店铺' },
   play:      { name: 'Play 应用',    desc: '按国家×类目爬应用及开发者官网（高优级第 1 强信号）' },
   osm:       { name: '地图商户',     desc: 'OpenStreetMap 提商户电话（需海外 VPS）' },
@@ -151,7 +152,6 @@ const CHANNEL_CN: Record<CrawlChannel, { name: string; desc: string }> = {
 const DEFAULT_CRAWL_CHANNELS: CrawlChannel[] = [...CRAWL_CHANNELS]
 const CHANNEL_HIT_RATE_HINT: Record<CrawlChannel, string> = {
   play:      '~12–25%',
-  tranco:    '~1%',
   myshopify: '~0.7%',
   osm:       '~15–55%',
 }
@@ -375,16 +375,62 @@ function useSeedPools() {
   const refresh = useCallback(() => {
     fetch('/api/seeds')
       .then((r) => (r.ok ? r.json() : null))
-      .then((d: PoolsResp | null) => {
-        if (d) {
-          setPools(d.pools ?? {})
-          setDetails(d.details ?? {})
-        }
-      })
+      .then((d: PoolsResp | null) => d && (setPools(d.pools ?? {}), setDetails(d.details ?? {})))
       .catch(() => {})
   }, [])
   useEffect(() => { refresh() }, [refresh])
   return { pools, details, refreshPools: refresh }
+}
+
+/* ============================================================================
+ * 2026-09-30 销售 UX 重构：今日队列 + 跟进进度
+ * ============================================================================
+ */
+
+type TodayLead = {
+  entity_key: string; market: string | null; market_group: string | null;
+  lang: string | null; score: number; p0: number; widget: string | null;
+  contact_status: string; contact_notes: string | null; phones: string;
+  outreach: { message: string; language: string; whatsapp_deep_link: string; entity: string };
+}
+
+function useTodayQueue(refreshKey = 0) {
+  const [leads, setLeads] = useState<TodayLead[]>([])
+  const refresh = useCallback(() => {
+    fetch('/api/today?limit=20')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => setLeads(d ?? []))
+      .catch(() => setLeads([]))
+  }, [])
+  useEffect(() => { refresh() }, [refresh, refreshKey])
+  return { todayLeads: leads, refreshToday: refresh }
+}
+
+type Progress = {
+  week_contacts: number; by_status: Record<string, number>;
+  total: number; new_today: number;
+}
+
+function useProgress(refreshKey = 0) {
+  const [progress, setProgress] = useState<Progress | null>(null)
+  const refresh = useCallback(() => {
+    fetch('/api/progress')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => setProgress(d))
+      .catch(() => setProgress(null))
+  }, [])
+  useEffect(() => { refresh() }, [refresh, refreshKey])
+  return { progress, refreshProgress: refresh }
+}
+
+async function patchLeadStatus(entity: string, status: string, notes?: string) {
+  const r = await fetch(`/api/leads/${encodeURIComponent(entity)}/status`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status, notes }),
+  })
+  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`)
+  return r.json()
 }
 
 /* ============================================================
@@ -1029,12 +1075,212 @@ function PipelineStrip({ pools, details, planned, leads, running, runNote }: {
                                  running && n.key === 'run' && 'animate-pulse motion-reduce:animate-none')}>
                 {n.value.toLocaleString()}
               </div>
-              <div className="mt-0.5 text-[9px] leading-none text-muted-foreground/70">{n.sub}</div>
+               <div className="mt-0.5 text-[9px] leading-none text-muted-foreground/70">{n.sub}</div>
+             </div>
+           </Fragment>
+         )
+       })}
+     </div>
+   )
+}
+
+/* ============================================================================
+ * 2026-09-30 销售 UX 重构：「今天」Tab + 「我的进度」Tab
+ * 设计原则：每张卡片一个行动（WhatsApp 一键）；状态颜色块让管道可视化；
+ * 多语言开场白按市场自动选；进度条让 quota 完成感直观。
+ * ========================================================================== */
+
+/* 跟进状态色块（销售每天扫一眼就懂） */
+function ContactStatusBadge({ status }: { status: string }) {
+  const map: Record<string, { label: string; cls: string }> = {
+    new:             { label: '未联系', cls: 'bg-sky-500/15 text-sky-700 dark:text-sky-300 ring-sky-500/30' },
+    contacted:      { label: '已联系', cls: 'bg-amber-500/15 text-amber-700 dark:text-amber-300 ring-amber-500/30' },
+    in_conversation: { label: '沟通中', cls: 'bg-violet-500/15 text-violet-700 dark:text-violet-300 ring-violet-500/30' },
+    won:            { label: '成交', cls: 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 ring-emerald-500/30' },
+    lost:           { label: '流失', cls: 'bg-rose-500/15 text-rose-700 dark:text-rose-300 ring-rose-500/30' },
+  }
+  const info = map[status] || map.new
+  return (
+    <span className={cn('inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold tracking-wider ring-1',
+                         info.cls)}>
+      {info.label}
+    </span>
+  )
+}
+
+/* 今日队列 Hero：今天要联系谁？进度几何？ */
+function TodayHero({ onContacted }: { onContacted: number }) {
+  const { progress } = useProgress(onContacted)
+  const weekContacts = progress?.week_contacts ?? 0
+  const newToday = progress?.new_today ?? 0
+  const byStatus = progress?.by_status ?? {}
+  // quota 假设每周联系 50 个（销售管理层定，这里给个合理默认）
+  const WEEKLY_QUOTA = 50
+  const weekPct = Math.min(100, Math.round(weekContacts / WEEKLY_QUOTA * 100))
+
+  return (
+    <section className="rounded-xl border border-primary/30 bg-gradient-to-br from-primary/8 via-card to-card p-6">
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-primary">今日联系</p>
+          <h1 className="mt-1 text-3xl font-bold tabular-nums">
+            {newToday}
+            <span className="ml-2 text-base font-medium text-muted-foreground">条新线索待联系</span>
+          </h1>
+          <p className="mt-2 text-xs text-muted-foreground">
+            {byStatus.contacted ? `${byStatus.contacted} 已联系 · ` : ''}
+            {byStatus.in_conversation ? `${byStatus.in_conversation} 沟通中 · ` : ''}
+            {byStatus.won ? `${byStatus.won} 成交 · ` : ''}
+            {byStatus.lost ? `${byStatus.lost} 流失` : ''}
+          </p>
+        </div>
+        <div className="min-w-[240px] flex-1">
+          <div className="flex items-baseline justify-between text-xs">
+            <span className="font-medium">本周进度</span>
+            <span className="tabular-nums text-muted-foreground">
+              {weekContacts}/{WEEKLY_QUOTA} ({weekPct}%)
+            </span>
+          </div>
+          <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-muted">
+            <div
+              className={cn('h-full transition-all',
+                          weekPct >= 100 ? 'bg-emerald-500' :
+                          weekPct >= 50  ? 'bg-primary' : 'bg-amber-500')}
+              style={{ width: `${weekPct}%` }}
+            />
+          </div>
+        </div>
+      </div>
+    </section>
+  )
+}
+
+/* 今日队列卡片：电话 + 一键 WhatsApp + 状态切换 + 消息草稿 */
+function TodayQueue({ onContacted }: { onContacted: number }) {
+  const { todayLeads, refreshToday } = useTodayQueue(onContacted)
+  const [busy, setBusy] = useState<string | null>(null)
+
+  const markContacted = async (entity: string) => {
+    setBusy(entity)
+    try {
+      await patchLeadStatus(entity, 'contacted')
+      refreshToday()
+      // 通知 parent refresh——用 prop 回调（避免全局 state）
+    } finally { setBusy(null) }
+  }
+
+  if (todayLeads.length === 0) {
+    return (
+      <section className="rounded-xl border border-border/70 bg-card p-12 text-center">
+        <p className="text-base font-medium text-muted-foreground">🎉 今日队列已清空</p>
+        <p className="mt-2 text-xs text-muted-foreground">
+          联系管理员补充种子，或等明日自动增量爬取
+        </p>
+      </section>
+    )
+  }
+
+  return (
+    <section className="space-y-3">
+      {todayLeads.map((lead) => {
+        const waLink = lead.outreach?.whatsapp_deep_link
+        const firstPhone = (lead.phones || '').split(',')[0] || '—'
+        const status = lead.contact_status || 'new'
+        return (
+          <article key={lead.entity_key}
+                   className="rounded-xl border border-border/70 bg-card p-4 transition-colors hover:border-primary/40">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h3 className="text-base font-semibold">{lead.entity_key}</h3>
+                  {lead.p0 ? (
+                    <span className="inline-flex items-center rounded-md bg-rose-500 px-1.5 py-0.5 text-[10px] font-bold tracking-wider text-white">P0 优先</span>
+                  ) : null}
+                  <ContactStatusBadge status={status} />
+                  <span className="text-[10px] text-muted-foreground">
+                    {lead.market} · {lead.market_group} · score {lead.score}
+                  </span>
+                </div>
+                <p className="mt-1.5 font-mono text-sm text-muted-foreground">
+                  {firstPhone}
+                </p>
+                {lead.outreach?.message && (
+                  <details className="mt-2 group">
+                    <summary className="cursor-pointer text-[11px] font-medium text-primary">
+                      消息草稿（{lead.outreach.language}）↘
+                    </summary>
+                    <p className="mt-1.5 rounded-md bg-muted/50 p-2 text-xs leading-relaxed text-foreground/80">
+                      {lead.outreach.message}
+                    </p>
+                  </details>
+                )}
+              </div>
+              <div className="flex shrink-0 flex-col items-end gap-2">
+                {waLink && (
+                  <a href={waLink} target="_blank" rel="noopener noreferrer"
+                     className="inline-flex items-center gap-1.5 rounded-md bg-emerald-500 px-3 py-1.5 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-emerald-600">
+                    <MessageCircle className="size-4" /> 打开 WhatsApp
+                  </a>
+                )}
+                <Button size="sm" variant="outline" disabled={busy === lead.entity_key || status !== 'new'}
+                        onClick={() => markContacted(lead.entity_key)}>
+                  <Check className="size-3.5" /> 标已联系
+                </Button>
+              </div>
             </div>
-          </Fragment>
+          </article>
         )
       })}
-    </div>
+    </section>
+  )
+}
+
+/* 我的进度 Tab：状态分布 + 跟进时间线 */
+function ProgressHero() {
+  return <TodayHero onContacted={0} />
+}
+
+function ProgressDetail() {
+  const { progress } = useProgress(0)
+  if (!progress) {
+    return <section className="rounded-xl border border-border/70 bg-card p-8 text-center text-muted-foreground">加载中…</section>
+  }
+  const { by_status, total } = progress
+  const pct = (n: number) => total > 0 ? Math.round(n / total * 100) : 0
+  const stages = [
+    { key: 'new', label: '未联系', color: 'bg-sky-500' },
+    { key: 'contacted', label: '已联系', color: 'bg-amber-500' },
+    { key: 'in_conversation', label: '沟通中', color: 'bg-violet-500' },
+    { key: 'won', label: '成交', color: 'bg-emerald-500' },
+    { key: 'lost', label: '流失', color: 'bg-rose-500' },
+  ]
+  return (
+    <section className="space-y-4">
+      <div className="rounded-xl border border-border/70 bg-card p-5">
+        <h2 className="text-sm font-medium">跟进管道</h2>
+        <div className="mt-3 flex h-3 overflow-hidden rounded-full bg-muted">
+          {stages.map(s => {
+            const n = by_status[s.key] ?? 0
+            const p = pct(n)
+            return p > 0 ? (
+              <div key={s.key} className={cn(s.color, 'h-full')}
+                   style={{ width: `${p}%` }} title={`${s.label}: ${n}`} />
+            ) : null
+          })}
+        </div>
+        <div className="mt-3 grid grid-cols-5 gap-2 text-center text-[11px]">
+          {stages.map(s => (
+            <div key={s.key}>
+              <div className="text-base font-semibold tabular-nums">{by_status[s.key] ?? 0}</div>
+              <div className="mt-0.5 flex items-center justify-center gap-1 text-muted-foreground">
+                <span className={cn('inline-block size-1.5 rounded-full', s.color)} />
+                {s.label}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
   )
 }
 
@@ -1549,6 +1795,11 @@ export default function App() {
   const { pools, details, refreshPools } = useSeedPools()
   const [crawlDialogOpen, setCrawlDialogOpen] = useState(false)
   const [seedDialogOpen, setSeedDialogOpen] = useState(false)
+  /* 2026-09-30 销售 UX：今日队列 + 进度 */
+  const [todayRefreshKey, setTodayRefreshKey] = useState(0)
+  const { todayLeads, refreshToday } = useTodayQueue(todayRefreshKey)
+  const { progress, refreshProgress } = useProgress(todayRefreshKey)
+  const todayCount = todayLeads.length
 
   /* 控制台「① 挖新人群」入口 → 独立弹窗（事件桥接，保持组件无 prop 钻透） */
   useEffect(() => {
@@ -1753,16 +2004,21 @@ export default function App() {
         {/* Tab 导航 */}
         <Tabs value={tab} onValueChange={(v) => setTab(v as typeof tab)}>
           <TabsList>
-            <TabsTrigger value="data" className="gap-1.5">
-              <Globe className="size-3.5" /> 数据
-            </TabsTrigger>
-            <TabsTrigger value="crawl" className="gap-1.5">
-              <Play className="size-3.5" /> 跑批
-              {runningCount > 0 && (
-                <span className="ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-rose-500 px-1 text-[10px] font-bold tabular-nums text-white">
-                  {runningCount}
+            {/* 2026-09-30 销售 UX 重构：Tab 重命名——把"今天"放最前（销售每天打开就看到），
+               把"跑批"隐藏在"种子"内（销售不触发爬取）。 */}
+            <TabsTrigger value="today" className="gap-1.5">
+              <Zap className="size-3.5" /> 今天
+              {todayCount > 0 && (
+                <span className="ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1.5 text-[10px] font-bold tabular-nums text-primary-foreground">
+                  {todayCount}
                 </span>
               )}
+            </TabsTrigger>
+            <TabsTrigger value="data" className="gap-1.5">
+              <Globe className="size-3.5" /> 所有线索
+            </TabsTrigger>
+            <TabsTrigger value="progress" className="gap-1.5">
+              <TrendingUp className="size-3.5" /> 我的进度
             </TabsTrigger>
             <TabsTrigger value="export" className="gap-1.5">
               <Download className="size-3.5" /> 导出
@@ -1797,14 +2053,26 @@ export default function App() {
               p0Only={p0Only}
               channelFilter={channel} setChannelFilter={setChannel}
               marketGroupFilter={marketGroup} setMarketGroupFilter={setMarketGroup}
-              setP0Only={setP0Only}
-              search={search} setSearch={setSearch}
-              stats={stats}
-            />
-          </TabsContent>
+               setP0Only={setP0Only}
+               search={search} setSearch={setSearch}
+               stats={stats}
+             />
+           </TabsContent>
 
-          {/* ===== Tab 2：跑批 ===== */}
-          <TabsContent value="crawl" className="space-y-8">
+           {/* ===== Tab 1：「今天」——销售每天打开的第一站 ===== */}
+           <TabsContent value="today" className="space-y-6">
+             <TodayHero onContacted={todayRefreshKey} />
+             <TodayQueue onContacted={todayRefreshKey} />
+           </TabsContent>
+
+           {/* ===== Tab 3：我的进度 ===== */}
+           <TabsContent value="progress" className="space-y-6">
+             <ProgressHero />
+             <ProgressDetail />
+           </TabsContent>
+
+           {/* ===== Tab 2：跑批（保留旧逻辑但不再默认显示） ===== */}
+           <TabsContent value="crawl" className="space-y-8">
             <section className="rounded-xl border border-border/70 bg-card p-5">
               <div className="flex items-start gap-4">
                 <div className="rounded-lg bg-primary/10 p-2.5">

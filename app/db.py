@@ -87,6 +87,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "outreach_message" not in cols:
         conn.execute("ALTER TABLE domain ADD COLUMN outreach_message TEXT")  # LLM 开场白草稿（D6+）
 
+    # 2026-09-30 销售 UX 重构：跟进状态字段（销售每天工作流核心）
+    # 状态机：new → contacted → in_conversation → won / lost
+    if "contact_status" not in cols:
+        conn.execute("ALTER TABLE domain ADD COLUMN contact_status TEXT NOT NULL DEFAULT 'new'")
+    if "contacted_at" not in cols:
+        conn.execute("ALTER TABLE domain ADD COLUMN contacted_at TEXT")
+    if "contact_notes" not in cols:
+        conn.execute("ALTER TABLE domain ADD COLUMN contact_notes TEXT")
+
     # E2 fix: 索引补充（按 v7 spec 高频查询路径）
     # 单条 ALTER 后即时建索引——>10k 行后无索引会让 /api/leads 按 market_group 扫表
     conn.execute("CREATE INDEX IF NOT EXISTS idx_domain_market_group ON domain(market_group)")
@@ -96,11 +105,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_domain_market_score "
                  "ON domain(market_group, score DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_domain_p0 ON domain(p0) WHERE p0 = 1")  # 部分索引，小
+    # 销售高频查询：今日队列 = (contact_status='new' AND p0=1) ORDER BY score DESC
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_domain_today_queue "
+                 "ON domain(contact_status, p0, score DESC) "
+                 "WHERE contact_status = 'new'")
 
 
 def upsert_domain(conn, key: str, channel: str, seed_host: str | None,
                   developer_name: str | None = None) -> None:
-    """新实体首次落库：channel/seed_host/developer_name 仅在首次写（ON CONFLICT 不动）。
+    """新实体首次落库：channel/seed_host/developer_name 仅首次写（ON CONFLICT 不动）。
 
     developer_name 来自种子渠道（play 渠道 = 开发者主体名），是 P0 第 1 强信号
     （spec 3.5）——首跑时入表，后续重跑不覆盖（防止某次爬取命中的开发者名篡改种子值）。
@@ -111,6 +124,24 @@ def upsert_domain(conn, key: str, channel: str, seed_host: str | None,
            ON CONFLICT(entity_key) DO NOTHING""",
         (key, channel, seed_host, developer_name, now()),
     )
+
+
+def update_contact_status(conn, entity: str, status: str, notes: str | None = None) -> bool:
+    """更新销售跟进状态（new/contacted/in_conversation/won/lost）。
+
+    返回 True 表示更新成功，False 表示实体不存在。`contacted_at` 自动戳。
+    仅 `contact_status` 与 `contact_notes` 改变，其他字段不动。
+    """
+    cur = conn.execute(
+        """UPDATE domain SET
+             contact_status = ?,
+             contact_notes = COALESCE(?, contact_notes),
+             contacted_at = CASE WHEN ? IN ('contacted','in_conversation','won','lost')
+                                  THEN ? ELSE contacted_at END
+           WHERE entity_key = ?""",
+        (status, notes, status, now(), entity),
+    )
+    return cur.rowcount > 0
 
 
 def upsert_phone(conn, e164: str, country: str | None) -> None:

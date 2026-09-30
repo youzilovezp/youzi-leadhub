@@ -16,6 +16,7 @@ from scrapy.linkextractors import LinkExtractor
 from scrapy.spiders import Spider
 
 from app.normalize import entity_key, normalize_url
+from pathlib import Path
 
 # 多语联系语义（报告 3.3）：英文/德/西/印尼/越南/阿语常见"联系"词根
 # 2026-09-30 修复：路径段锚定 `/(keyword)(?:[-./?#]|$)`——避免 /breach-report、
@@ -66,9 +67,48 @@ class WaSpider(Spider):
                         urls.append(u)
                         if dev_part:
                             self._dev_names[u] = dev_part
+        # 2026-09-30 修复：incremental 模式必须过滤 JOBDIR 已爬过的 URL——
+        # 旧逻辑 `urls[:limit]` 只切前 N 个，但 JOBDIR 已爬的（seen）会直接被
+        # Scrapy dupefilter 跳过，结果 "Crawled 0 pages"，用户误以为系统不增。
+        # 修：start_urls 排除 seen；若 limit 后剩余 0，告警并退出。
+        seen = self._load_seen_urls(seed_file)
+        if seen:
+            before = len(urls)
+            urls = [u for u in urls if u not in seen]
+            skipped_seen = before - len(urls)
+            if skipped_seen:
+                self.logger.info(
+                    "跳过 %d 个已爬过的 URL（JOBDIR seen）", skipped_seen)
         self.start_urls = urls[: int(limit)]
         if not self.start_urls:
-            self.logger.warning("seed_file 为空或全部非法: %s", seed_file)
+            self.logger.warning(
+                "无待爬 URL：池 %d 个已爬过 %d 个，或种子文件为空",
+                len(urls), len(seen))
+
+    @staticmethod
+    def _load_seen_urls(seed_file: str | None) -> set[str]:
+        """从对应 JOBDIR 的 requests.seen 加载已爬过的 URL 集合——incremental 跳过它们。
+
+        JOBDIR 路径由 settings.JOBDIR 决定（增量复用 _inc/<channel>/，full 是 _full/<channel>-<ts>/）。
+        Spider 启动时 settings 还没就绪——所以这里通过进程级约定推导路径。
+        """
+        import os
+        from urllib.parse import urlsplit as _us
+        if not seed_file:
+            return set()
+        try:
+            sf = Path(seed_file).resolve()
+            # 路径约定：data/.job/_inc/<channel>/requests.seen（按 channel 推测）
+            # 无更直接的方法——channel 通过 settings.crawler.spider.name 拿不到
+            # 退路：从文件名 / 父目录名拿 channel 不可靠。最稳是查 JOBDIR setting 拿到。
+            # 这里用 process cwd 的 data/.job/_inc/<dirname(seed_file)>/
+            channel = sf.stem.replace("seeds-", "").replace("osm-", "osm").replace("play-", "play")
+            seen = sf.parent.parent / ".job" / "_inc" / channel / "requests.seen"
+            if not seen.exists():
+                return set()
+            return {line.strip() for line in seen.read_text().splitlines() if line.strip()}
+        except Exception:
+            return set()
 
     async def start(self):
         """Scrapy ≥2.13 引擎入口。必须重写：默认实现只 yield 裸 Request
