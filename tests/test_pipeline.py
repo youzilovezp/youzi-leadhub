@@ -383,6 +383,37 @@ def test_widget_email_second_merge_no_crash(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM sighting").fetchone()[0] == 1
 
 
+def test_widget_email_rejects_control_chars(tmp_path):
+    """2026-09-30 P0 修复回归：mailto 链接含 URL 编码控制字符（典型 %00）经
+    unquote 解出 \\x00 进入 detect。旧过滤器只挡 ,/"/\\，让控制字符放行 → 第一次
+    合并裸写入 DB → 第二次合并 SQL 包 JSON 时 json_each 抛 malformed JSON →
+    Scrapy 丢整个 item（candidates/widgets 全废，号码系统性丢失）。
+
+    修复后：控制字符 token 直接丢弃（同 ,/"/" 一样），后续合并不踩雷。
+    """
+    dbp = str(tmp_path / "leads.db")
+    pl = WaStorePipeline(db_path=dbp)
+    pl.open_spider(None)
+    # 首页：含 URL 编码 \\x00 的 mailto（实际生产路径，parsel 抽 raw href 后 unquote
+    # 解出 \\x00；旧 parsel 抽出来直接是 \\x00 形式 → ADDR_RE \\s 不挡 → 进 emails）
+    pl.process_item({"url": "https://x.com/", "html":
+        '<a href="mailto:foo%00null@x.com">x</a>',
+        "channel": "sample", "seed_host": "x.com"}, None)
+    # 联系页：含正常号码 + 正常邮箱 + 含 \\n 邮箱（模拟 mailto:%0A@x.com）
+    pl.process_item({"url": "https://x.com/contact", "html":
+        '<a href="https://wa.me/85221234567">wa</a>'
+        '<a href="mailto:sales@x.com">s</a>'
+        '<a href="mailto:bad%0Anewline@x.com">b</a>',
+        "channel": "sample", "seed_host": "x.com"}, None)
+    pl.close_spider(None)
+    conn = db.connect(dbp)
+    row = conn.execute("SELECT email FROM domain WHERE entity_key='x.com'").fetchone()
+    # \\x00 / \\n 邮箱全部被静默丢弃，sales@x.com 保留
+    assert row["email"] == "sales@x.com", f"got {row['email']!r}"
+    # 关键：联系页的号码 sighting 必须存活（修复前随 OperationalError 一起丢）
+    assert conn.execute("SELECT COUNT(*) FROM sighting").fetchone()[0] == 1
+
+
 def test_developer_name_persists_and_drives_p0(tmp_path):
     """CRIT #1 端到端：play 渠道带 developerName 的种子 → domain.developer_name
     入表 → close_spider 打分时 read 回 score_domain → 中国公司名命中 P0。

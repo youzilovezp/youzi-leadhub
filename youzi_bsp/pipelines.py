@@ -26,20 +26,28 @@ def _atomic_merge_csv(conn, table: str, key: str, new_values: set[str],
     E1 fix: 单个值超 4KB 截断——widget 名（如 joinchat_settings 含大段 JS 字符串），
     或 attacker 灌入超长字符串，会让 domain 行变 MB 级。截到 4KB 保留信号同时防 bloat。
 
-    2026-09-28 P0 修复：非空列重拼 JSON 缺首尾引号（'[' || ... || ']'），单值列产出
-    [joinchat] 裸 token / 多值列产出 [a@x.com","b@x.com]——均非法 JSON，json_each 抛
-    OperationalError → Scrapy 丢 item。触发路径即核心路径：首页 widget 落库后，同站
-    第 2 个 item（联系页）必然走 ELSE 分支 → 联系页号码系统性丢失。
-    含 ','/'"'/'\\' 的值直接丢弃——CSV 存储格式本身承载不了这些字符（widget 指纹是
-    固定 token 名，email 正则本地部理论可含逗号，在此拦住）。
+    2026-09-30 P0 修复：拒收 ASCII 控制字符（任何 ord(c) < 0x20）。原过滤器只挡
+    ','/'"'/'\\'，但 mailto 链接含 URL 编码控制字符（典型：mailto:%00null@x.com
+    经 unquote 变 'foo\x00null@x.com'）能进入。流程：①detect 正则 `\\s` 不挡 \x00
+    → ②本函数过 padding → ③第一次合并：json.dumps 把 \x00 转义成 \\u0000，新值正常
+    写入 → ④**第二次合并**：SQL 直接把旧值 'foo\x00null@x.com' wrap 进 JSON 字符串，
+    json_each 抛 malformed JSON → Scrapy 丢整个 item（candidates/widgets 全废）。
+    真实证据：data/.crawl-logs/_inc-osm.log 2026-09-28 21:31:25~18:47:40 出现 36 次
+    `sqlite3.OperationalError: malformed JSON`——首页 widget/email 落库后，同站第 2 个
+    item（联系页）踩中 → 联系页号码系统性丢失。修复即在配置阶段直接丢弃任何含控制
+    字符的 token；JSON 中 raw control char 必转义，而 SQL CASE 表达式不转义旧值。
     """
     if not new_values:
         return
     # 单 token 限长：widget 名通常是 1-30 字符（joinchat, tidio, wa_business...），
     # 超过 4KB 视为异常输入直接截断
     MAX_TOKEN = 4096
+    # ponytail: 控制字符判定走 ord < 0x20（JSON spec: control chars in string
+    # must be \uXXXX escaped）；DEL(\x7f) 也拒——URL normalize 已拒，但 detect 阶段
+    # mailto 解码可能漏，留兜底。实现为生成器+集合推导一行，无额外依赖。
     new_values = {v[:MAX_TOKEN] for v in new_values
-                  if v and "," not in v and '"' not in v and "\\" not in v}
+                  if v and "," not in v and '"' not in v and "\\" not in v
+                  and not any(ord(c) < 0x20 for c in v)}
     if not new_values:
         return
     new_json = json.dumps(sorted(new_values))
