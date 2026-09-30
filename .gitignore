@@ -9,11 +9,6 @@ __pycache__/
 .coverage
 htmlcov/
 
-# 数据
-data/
-*.csv
-*.db
-*.sqlite*
 
 # 前端
 frontend/node_modules/

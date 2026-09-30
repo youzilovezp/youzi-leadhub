@@ -93,3 +93,44 @@ def test_tail_reads_only_tail(tmp_path):
     assert "LAST-LINE" in text
     assert len(text.encode()) <= 4096
     assert _tail(tmp_path / "nope.log") is None
+
+
+# ============================================================================
+# 挖新人群（2026-09-29）：POST /api/seeds + seeds.append_merge
+# ============================================================================
+
+def test_append_merge_dedups_by_url(tmp_path):
+    """按 URL 去重追加：旧行（含 developerName）保留，仅新 URL 进池。"""
+    from youzi_bsp.seeds import append_merge
+
+    target = tmp_path / "seeds-play.txt"
+    target.write_text("https://old.com/\t老开发者\nhttps://dup.com/\n", encoding="utf-8")
+    src = tmp_path / "gen.txt"
+    src.write_text("https://new.com/\t新开发者\nhttps://dup.com/\n"
+                   "# 注释\n\nhttps://old.com/\n", encoding="utf-8")
+    assert append_merge(target, src) == 1
+    lines = target.read_text(encoding="utf-8").splitlines()
+    assert lines[0] == "https://old.com/\t老开发者"   # 旧行原样
+    assert lines[-1] == "https://new.com/\t新开发者"  # 只追加新 URL
+
+
+def test_post_seeds_spawns_append_job(monkeypatch, tmp_path):
+    """POST /api/seeds → spawn 带 --append 的种子任务并登记进度。"""
+    seed = tmp_path / "seeds-play.txt"
+    seed.write_text("https://a.com/\n", encoding="utf-8")
+    monkeypatch.setattr(crawl_api, "_pick_seed", lambda ch: str(seed))
+    monkeypatch.setattr(crawl_api, "_CWD", tmp_path)
+    cmd_seen = {}
+    monkeypatch.setattr(crawl_api.subprocess, "Popen",
+                        lambda cmd, **k: cmd_seen.update(cmd=cmd, cwd=k["cwd"])
+                        or type("P", (), {"pid": 42, "poll": lambda self: None})())
+    out = crawl_api.post_seeds(crawl_api.SeedsRequest(
+        channel="play", countries="br,mx", categories="SHOPPING", limit=500))
+    assert "--append" in cmd_seen["cmd"]
+    assert "--country" in cmd_seen["cmd"] and "br,mx" in cmd_seen["cmd"]
+    assert "--category" in cmd_seen["cmd"] and "SHOPPING" in cmd_seen["cmd"]
+    assert out["job"]["status"] == "running"
+    # 同渠道互斥：running 种子任务挡住新种子请求（409）
+    with pytest.raises(HTTPException) as e:
+        crawl_api.post_seeds(crawl_api.SeedsRequest(channel="play"))
+    assert e.value.status_code == 409

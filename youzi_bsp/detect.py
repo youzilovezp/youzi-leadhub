@@ -41,6 +41,22 @@ _WA_BUSINESS_RES = [
 _TEXT_KEYWORD = re.compile(r"whats[\s\-]?app", re.I)
 _TEXT_PHONE = re.compile(r"\+?\d[\d\s\-().–—]{7,24}")
 
+# 预过滤（2026-09-29 性能优化）：WA 信号的关键词集是封闭的——链接层三正则全含
+# wa.me/whatsapp、文本层 whats-app、widget 指纹是固定 token、email 走 mailto。
+# 页面（实测 ~70-80%）一个都不含 → 跳过 unescape 拷贝 + lxml 解析。
+# 实现注意：不能用多分支正则——13 分支 × 385KB 实测 20.5ms（逐位置回退），
+# 一次 lower() + 子串链只要 ~3ms（str.in 是 C 级两路查找）。
+# 已知上限：href 里实体编码到域名级（"whats&#97;pp"）的极端页会漏——金标准集
+# 重放可裁决该损失是否可测。
+_PREFILTER_TOKENS = ("wa.me", "whatsapp", "whats app", "whats-app", "mailto",
+                     "ht-ctc", "joinchat", "getbutton", "chaty", "elfsight",
+                     "tidio", "wp-chat", "click-to-chat")
+
+
+def _signal_possible(html: str) -> bool:
+    h = html.lower()
+    return any(t in h for t in _PREFILTER_TOKENS)
+
 
 def detect(html: str) -> dict:
     """返回 {'candidates': [(raw, layer)], 'widgets': [str, ...], 'emails': [str, ...]}。
@@ -51,6 +67,11 @@ def detect(html: str) -> dict:
     emails：站内 mailto 富化（报告 3.1；WhatsApp 号即触达渠道，邮箱为备用渠道）。
     """
     from urllib.parse import unquote
+
+    # 性能早退：全文无任何 WA 信号关键词 → 不可能有候选/widget/email，
+    # 跳过 unescape 拷贝 + lxml 解析（页面处理成本的大头）
+    if not _signal_possible(html):
+        return {"candidates": [], "widgets": [], "emails": []}
 
     # detect 边界 fix：HTML 实体（&#43; 等）解码后再扫文本层。
     # parsel Selector.text 在新版本已弃用，且 .css('::text') 也不解码实体；

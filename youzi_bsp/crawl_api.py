@@ -184,6 +184,74 @@ def _safe_db_path(p: str) -> str:
     return p
 
 
+class SeedsRequest(BaseModel):
+    """挖新人群（2026-09-29）：换国家×类目生成新种子并去重追加进渠道种子池。"""
+    channel: Literal["play", "osm"]
+    countries: str = Field(default="", description="ISO 国家码逗号分隔（play: br,mx,th；osm: SG,VN,PH）。空 = 渠道默认")
+    categories: str = Field(default="BUSINESS",
+                            description="play 专用类目逗号分隔（BUSINESS/SHOPPING/COMMUNICATION/FINANCE/FOOD_AND_DRINK）")
+    limit: int = Field(default=800, ge=1, le=5000)
+
+
+def _spawn_seed(channel: str, countries: str, categories: str,
+                limit: int, out_file: str) -> _Job:
+    """后台生成种子并 --append 去重追加（Overpass/play node 慢，不阻塞 API）。
+
+    job 进 _JOBS_RUNNING（跑批页可见进度）；同渠道互斥复用 _channel_busy——
+    种子任务写种子文件期间不允许同渠道再起爬取/种子任务（文件完整性）。
+    """
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    log_file = _LOGS / f"seed-{channel}-{stamp}.log"
+    job_id = f"seed-{channel}-{stamp}"
+    cmd = [sys.executable, "-m", "youzi_bsp", "seed", channel,
+           "--limit", str(limit), "--out", out_file, "--append"]
+    if countries:
+        cmd += ["--country", countries]
+    if channel == "play":
+        cmd += ["--category", categories]
+    log_handle = open(log_file, "a", encoding="utf-8")
+    # CN 出口直连 Google Play 超时（docs 3.2）：play 的 node 脚本需要
+    # NODE_USE_ENV_PROXY=1 + 本地代理才走 proxy；默认 7890，BSP_PROXY 可覆盖
+    env = None
+    if channel == "play":
+        proxy = os.environ.get("BSP_PROXY", "http://127.0.0.1:7890")
+        env = {**os.environ, "NODE_USE_ENV_PROXY": "1",
+               "HTTPS_PROXY": proxy, "HTTP_PROXY": proxy}
+    proc = subprocess.Popen(cmd, cwd=str(_CWD), stdout=log_handle,
+                            stderr=subprocess.STDOUT, start_new_session=True,
+                            env=env)
+    log_handle.close()
+    job = _Job(job_id=job_id, channel=channel, pid=proc.pid,
+               started_at=time.time(), proc=proc, log_file=log_file,
+               status="running")
+    _JOBS_RUNNING[job_id] = job
+    return job
+
+
+@router.get("/api/seeds")
+def get_seed_pools():
+    """各渠道当前种子池行数（挖新人群追加后立即反映）——前端管道状态条用。"""
+    pools: dict[str, int] = {}
+    for ch in ALL_CHANNELS:
+        seed = _pick_seed(ch)
+        pools[ch] = _seed_count(_CWD / seed) if seed and (_CWD / seed).exists() else 0
+    return pools
+
+
+@router.post("/api/seeds")
+def post_seeds(req: SeedsRequest):
+    target = _pick_seed(req.channel) or f"data/seeds-{req.channel}.txt"
+    if _channel_busy(req.channel):
+        raise HTTPException(
+            409, f"渠道 {req.channel} 已有运行中的任务（种子文件读写互斥），稍后再试")
+    job = _spawn_seed(req.channel, req.countries, req.categories,
+                      req.limit, target)
+    return {"job": JobInfo(job_id=job.job_id, channel=job.channel, pid=job.pid,
+                           started_at=job.started_at, status=job.status).model_dump(),
+            "target": target,
+            "hint": "生成完成后到跑批页确认退出码，再点『增量爬取』吃新种子"}
+
+
 @router.post("/api/crawl")
 def post_crawl(req: CrawlRequest):
     """触发爬取。channels=空/未传 = 全部可爬渠道；非空 = 仅指定渠道。

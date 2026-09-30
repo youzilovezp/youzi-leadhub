@@ -31,6 +31,9 @@ def main(argv=None) -> None:
     s.add_argument("--crawl-id", default=None, help="myshopify: CC 档期 id，默认最新")
     s.add_argument("--file", default=None, help="sample: URL/域名清单文件")
     s.add_argument("--out", default=None)
+    s.add_argument("--append", action="store_true",
+                   help="去重追加进 --out（增量挖新人群：换国家×类目扩种子池，"
+                        "旧种子与 developerName 保留）")
 
     c = sub.add_parser("crawl", help="跑爬虫（Scrapy）")
     c.add_argument("--seed-file", required=True)
@@ -78,7 +81,16 @@ def main(argv=None) -> None:
     data = Path("data")
 
     if a.cmd == "seed":
+        import time as _t
+
         out = Path(a.out) if a.out else data / f"seeds-{a.channel}.txt"
+        real_out = out
+        # --append：先生成到临时文件，成功后按 URL 去重追加进目标——防止生成
+        # 中途失败把既有种子池写坏
+        if a.append:
+            tmp_dir = data / ".seeds-tmp"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            out = tmp_dir / f"{a.channel}-{_t.strftime('%Y%m%d-%H%M%S')}.txt"
         if a.channel == "tranco":
             seeds.tranco(a.top, out)
         elif a.channel == "myshopify":
@@ -91,7 +103,11 @@ def main(argv=None) -> None:
             if not a.file:
                 p.error("sample 渠道需要 --file")
             seeds.sample(a.file, out)
-        print(f"seed 文件已生成: {out}")
+        if a.append:
+            n = seeds.append_merge(real_out, out)
+            print(f"种子追加: +{n} 新（按 URL 去重）→ {real_out}")
+        else:
+            print(f"seed 文件已生成: {out}")
 
     elif a.cmd == "crawl":
         import os

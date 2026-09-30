@@ -25,6 +25,25 @@ def _write(out: Path, urls: list[str]) -> Path:
     return out
 
 
+def append_merge(target: Path, src: Path) -> int:
+    """把 src 种子行追加进 target，按 URL（行首 \t 前部分）去重。
+
+    增量挖新人群的落点：换国家×类目生成的新种子与旧池合并，增量爬取只吃
+    没见过的 URL——旧行原样保留（play 渠道的 URL<TAB>developerName 不丢）。
+    返回追加的新行数。"""
+    def urls(path: Path) -> list[str]:
+        return [ln for ln in path.read_text(encoding="utf-8").splitlines()
+                if ln.strip() and not ln.lstrip().startswith("#")]
+
+    old = urls(target) if target.exists() else []
+    seen = {ln.split("\t", 1)[0].strip() for ln in old}
+    fresh = [ln for ln in urls(src) if ln.split("\t", 1)[0].strip() not in seen]
+    if fresh:
+        with open(target, "a", encoding="utf-8") as fh:
+            fh.write("\n".join(fresh) + "\n")
+    return len(fresh)
+
+
 def tranco(top: int, out: Path) -> Path:
     r = httpx.get(TRANCO_URL, follow_redirects=True, timeout=120)
     r.raise_for_status()

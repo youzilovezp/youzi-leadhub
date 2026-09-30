@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertCircle,
   Check,
@@ -11,6 +11,7 @@ import {
   MessageCircle,
   Moon,
   Play,
+  Plus,
   RefreshCw,
   Search,
   Settings2,
@@ -330,10 +331,17 @@ function useCrawlStatus() {
 
   useEffect(() => {
     let alive = true
+    let lastRaw: string | null = null
     const poll = () => {
       fetch('/api/crawl/status')
-        .then((r) => (r.ok ? r.json() : null))
-        .then((d) => alive && d && setJobs(d))
+        .then((r) => (r.ok ? r.text() : null))
+        .then((raw) => {
+          /* 性能：空闲时响应逐字节相同 → 跳过 setState，避免全应用 2s 一次的
+           * 无效重渲染（jobs 在 App 根组件，一次更新带动整棵树 diff） */
+          if (!alive || raw === null || raw === lastRaw) return
+          lastRaw = raw
+          setJobs(JSON.parse(raw))
+        })
         .catch(() => {})
     }
     poll()
@@ -345,6 +353,19 @@ function useCrawlStatus() {
   }, [tick])
 
   return { jobs, bump: () => setTick((t) => t + 1) }
+}
+
+/* 种子池：各渠道待爬种子数（挖新人群追加后刷新） */
+function useSeedPools() {
+  const [pools, setPools] = useState<Record<string, number>>({})
+  const refresh = useCallback(() => {
+    fetch('/api/seeds')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => d && setPools(d))
+      .catch(() => {})
+  }, [])
+  useEffect(() => { refresh() }, [refresh])
+  return { pools, refreshPools: refresh }
 }
 
 /* ============================================================
@@ -363,6 +384,22 @@ async function triggerCrawl(opts: {
   })
   if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`)
   return r.json() as Promise<{ mode: string; spawned: CrawlJob[]; skipped: unknown[]; total: number }>
+}
+
+/* 挖新人群：换国家×类目生成新种子，后端去重追加进渠道种子池（后台任务） */
+async function triggerSeeds(opts: {
+  channel: 'play' | 'osm'
+  countries: string
+  categories: string
+  limit: number
+}) {
+  const r = await fetch('/api/seeds', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(opts),
+  })
+  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`)
+  return r.json() as Promise<{ job: CrawlJob; target: string; hint: string }>
 }
 
 async function exportCsv(opts: { channel?: string; p0?: boolean; marketGroup?: string }) {
@@ -899,29 +936,215 @@ function EmptyLeads({ hasFilter, onClear }: { hasFilter: boolean; onClear: () =>
 }
 
 /* ============================================================
- * Tab 2：触发爬取
+ * Tab 2：跑一次采集 —— 任务控制台（重构 2026-09-29）
+ *
+ * 设计判断：
+ * 1. 「挖新人群」是前置的异步任务，与「跑这次采集」生命周期不同 → 拆成独立弹窗
+ * 2. ①种子 → ②模式 → ③渠道 是真实的决策顺序 → 编号即结构
+ * 3. 发射后弹窗切进度态，不玩"提交即失联"
+ * 4. 术语去工程化：JOBDIR/dupefilter 不出现在操作者面前
  * ============================================================ */
+
+/* 管道状态条（签名元素）：种子池 → 本次采集 → 线索库，实时数字连通成一条管道 */
+function PipelineStrip({ pools, planned, leads, running, runNote }: {
+  pools: Record<string, number>
+  planned: number
+  leads: number
+  running: boolean
+  runNote: string
+}) {
+  const poolTotal = Object.values(pools).reduce((a, b) => a + b, 0)
+  const nodes = [
+    { key: 'seeds', label: '种子池', value: poolTotal, sub: '待爬站点的来源池',
+      icon: Database },
+    { key: 'run', label: '本次采集', value: planned, sub: running ? '采集中…' : runNote,
+      icon: Play, active: true },
+    { key: 'leads', label: '线索库', value: leads, sub: '已入库带号线索', icon: Check },
+  ]
+  return (
+    <div className="grid grid-cols-[1fr_auto_1fr_auto_1fr] items-stretch gap-1" role="img"
+         aria-label={`种子池 ${poolTotal}，本次 ${planned} 站，线索库 ${leads}`}>
+      {nodes.map((n, i) => {
+        const Icon = n.icon
+        return (
+          <Fragment key={n.key}>
+            {i > 0 && (
+              <div className="flex w-5 items-center justify-center"
+                   aria-hidden="true">
+                <span className={cn('h-px w-full bg-muted-foreground/40',
+                                    running && n.key === 'leads'
+                                      && 'animate-pulse motion-reduce:animate-none')} />
+              </div>
+            )}
+            <div className={cn(
+                   'rounded-lg border px-2.5 py-2 text-center',
+                   n.active ? 'border-primary/50 bg-primary/5' : 'border-border/60 bg-muted/30'
+                 )}>
+              <div className="flex items-center justify-center gap-1 text-[10px] text-muted-foreground">
+                <Icon className="size-3" aria-hidden="true" />
+                {n.label}
+              </div>
+              <div className={cn('mt-0.5 text-lg font-semibold tabular-nums leading-none',
+                                 n.active && 'text-primary',
+                                 running && n.key === 'run' && 'animate-pulse motion-reduce:animate-none')}>
+                {n.value.toLocaleString()}
+              </div>
+              <div className="mt-0.5 text-[9px] leading-none text-muted-foreground/70">{n.sub}</div>
+            </div>
+          </Fragment>
+        )
+      })}
+    </div>
+  )
+}
+
+/* 挖新人群：换国家×类目扩种子池（独立弹窗——异步分钟级任务不该塞进采集表单） */
+function SeedDialog({ open, onOpenChange }: {
+  open: boolean
+  onOpenChange: (v: boolean) => void
+}) {
+  const [seedCh, setSeedCh] = useState<'play' | 'osm'>('play')
+  const [countries, setCountries] = useState('br,mx,th')
+  const [categories, setCategories] = useState('BUSINESS')
+  const [seedLimit, setSeedLimit] = useState('800')
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState<string | null>(null)
+  const [done, setDone] = useState(false)
+
+  useEffect(() => {
+    if (open) { setMsg(null); setDone(false) }
+  }, [open])
+
+  const submit = async () => {
+    const n = Math.round(Number(seedLimit) || 0)
+    if (n < 1) { setMsg('目标数量必须 ≥ 1'); return }
+    setBusy(true); setMsg(null)
+    try {
+      const res = await triggerSeeds({ channel: seedCh, countries: countries.trim(),
+                                       categories: categories.trim(), limit: n })
+      setDone(true)
+      setMsg(`已提交：正在挖 ${countries.trim() || '默认国家'} 的${seedCh === 'play' ? '应用榜官网' : '地图商户'}，追加进种子池（后台约 1–3 分钟）。完成后再回来「开始采集·只爬新增」。`)
+      void res
+    } catch (e) {
+      setMsg(`失败：${(e as Error).message}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>挖新人群</DialogTitle>
+          <DialogDescription>
+            换一批国家（或类目）生成新种子，追加进种子池。已有的不会重复。
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="grid grid-cols-2 gap-2">
+          {([
+            ['play', 'Play 应用榜', '国家×类目分榜 → 开发者官网（命中率 ~12–25%）'],
+            ['osm', 'OSM 地图商户', '按国家挖带官网的本地商家（命中率 ~55%）'],
+          ] as const).map(([value, label, desc]) => (
+            <label key={value}
+                   className={cn('flex cursor-pointer gap-2 rounded-lg border p-3 transition-colors',
+                                 seedCh === value ? 'border-primary/50 bg-primary/5'
+                                                   : 'border-border/60 hover:border-muted-foreground/40')}>
+              <input type="radio" name="seed-channel" checked={seedCh === value}
+                     onChange={() => setSeedCh(value)}
+                     className="mt-0.5 size-4 accent-primary" aria-label={label} />
+              <div>
+                <div className="text-sm font-medium">{label}</div>
+                <p className="mt-0.5 text-[11px] leading-snug text-muted-foreground">{desc}</p>
+              </div>
+            </label>
+          ))}
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div className="space-y-1.5">
+            <Label htmlFor="seed-countries">国家码</Label>
+            <Input id="seed-countries" value={countries}
+                   onChange={(e) => setCountries(e.target.value)}
+                   placeholder={seedCh === 'osm' ? 'SG,VN,PH' : 'br,mx,th'} />
+            <p className="text-[10px] text-muted-foreground">ISO 两位码，逗号分隔</p>
+          </div>
+          {seedCh === 'play' ? (
+            <div className="space-y-1.5">
+              <Label htmlFor="seed-category">类目</Label>
+              <Input id="seed-category" value={categories}
+                     onChange={(e) => setCategories(e.target.value)} />
+              <p className="text-[10px] text-muted-foreground">
+                BUSINESS / SHOPPING / COMMUNICATION / FINANCE / FOOD_AND_DRINK
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              <Label htmlFor="seed-limit">目标数量</Label>
+              <Input id="seed-limit" type="number" min={1} max={5000} value={seedLimit}
+                     onChange={(e) => setSeedLimit(e.target.value)} />
+            </div>
+          )}
+        </div>
+        {seedCh === 'play' && (
+          <div className="space-y-1.5">
+            <Label htmlFor="seed-limit-play">目标数量</Label>
+            <Input id="seed-limit-play" type="number" min={1} max={5000} value={seedLimit}
+                   onChange={(e) => setSeedLimit(e.target.value)} />
+            <p className="text-[10px] text-muted-foreground">按国家均摊；生成走本地代理（7890）</p>
+          </div>
+        )}
+
+        {msg && (
+          <p className={cn('rounded-md px-2.5 py-2 text-xs leading-relaxed',
+                           done ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground')}>
+            {msg}
+          </p>
+        )}
+
+        <DialogFooter>
+          <Button onClick={done ? () => onOpenChange(false) : submit}
+                  disabled={busy || done}
+                  aria-label={done ? '关闭挖新人群' : '开始生成种子'}>
+            {busy ? (<><Loader2 className="size-4 animate-spin" /> 生成中…</>)
+                  : done ? '好，知道了'
+                         : (<><Plus className="size-4" /> 开始生成种子</>)}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+/* 跑一次采集：任务控制台 */
 function CrawlDialog({
-  open, onOpenChange, defaultChannels,
+  open, onOpenChange, defaultChannels, jobs, pools, leadsTotal,
 }: {
   open: boolean
   onOpenChange: (v: boolean) => void
   defaultChannels: CrawlChannel[]
+  jobs: CrawlJob[]
+  pools: Record<string, number>
+  leadsTotal: number
 }) {
   const [mode, setMode] = useState<'incremental' | 'full'>('incremental')
   const [selected, setSelected] = useState<Set<CrawlChannel>>(new Set(defaultChannels))
-  const [limit, setLimit] = useState(200)
-  const [maxPages, setMaxPages] = useState(3)
+  /* 数字输入用字符串状态：清空即 0 的受控 number 框会让每次输入都以"0"开头 */
+  const [maxPages, setMaxPages] = useState('3')
+  const [fullLimit, setFullLimit] = useState('500')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [phase, setPhase] = useState<'configure' | 'launched'>('configure')
+  const [launchedChannels, setLaunchedChannels] = useState<Set<CrawlChannel>>(new Set())
 
   useEffect(() => {
     if (open) {
       setSelected(new Set(defaultChannels))
       setMode('incremental')
-      setLimit(200)
-      setMaxPages(3)
+      setMaxPages('3')
       setError(null)
+      setPhase('configure')
     }
   }, [open, defaultChannels])
 
@@ -934,15 +1157,26 @@ function CrawlDialog({
     })
   }
 
+  /* 运行中感知：同渠道任务在跑时按钮让位，不再让用户撞 409 */
+  const busyChannels = new Set(
+    jobs.filter((j) => j.status === 'running' && !j.job_id.startsWith('seed-'))
+        .map((j) => j.channel as CrawlChannel))
+  const launchable = [...selected].filter((ch) => !busyChannels.has(ch))
+
+  const plannedSeeds = launchable.reduce((a, ch) => a + (pools[ch] ?? 0), 0)
+  const nPages = Math.round(Number(maxPages) || 0)
+
   const submit = async () => {
-    if (selected.size === 0) { setError('至少选一个渠道'); return }
-    if (limit < 1 || maxPages < 1) { setError('数量必须 ≥ 1'); return }
+    if (launchable.length === 0) { setError('所选渠道都在跑批中——等它结束，或换一个渠道'); return }
+    if (nPages < 1) { setError('每站页数必须 ≥ 1'); return }
     setBusy(true); setError(null)
     try {
       await triggerCrawl({
-        channels: [...selected], mode, limit, max_pages: maxPages,
+        channels: launchable, mode, max_pages: nPages,
+        limit: mode === 'full' ? Math.max(1, Math.round(Number(fullLimit) || 0)) : plannedSeeds,
       })
-      onOpenChange(false)
+      setLaunchedChannels(new Set(launchable))
+      setPhase('launched')
     } catch (e) {
       setError((e as Error).message)
     } finally {
@@ -950,115 +1184,192 @@ function CrawlDialog({
     }
   }
 
-  const totalSeeds = limit * selected.size
+  /* 进度态：盯本次发射的渠道；任务从 jobs（App 每 2s 轮询）实时来 */
+  const myJobs = jobs.filter((j) => launchedChannels.has(j.channel as CrawlChannel)
+                              && !j.job_id.startsWith('seed-'))
+  const allDone = myJobs.length > 0 && myJobs.every((j) => j.status === 'exited' || j.status === 'failed')
+  const anyRunning = myJobs.some((j) => j.status === 'running')
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
+
+        {phase === 'launched' ? (
+          /* ---------- 进度态：发射后弹窗不玩失踪 ---------- */
+          <div className="space-y-4">
+            <DialogHeader>
+              <DialogTitle>采集中</DialogTitle>
+              <DialogDescription>
+                {allDone
+                  ? (myJobs.every((j) => j.status === 'exited')
+                      ? '全部完成，数据已自动刷新。'
+                      : '部分渠道失败——详情看跑批页日志。')
+                  : '礼貌爬取需要时间，可以留在原地等，也可以放后台。'}
+              </DialogDescription>
+            </DialogHeader>
+            <ul className="space-y-1.5">
+              {myJobs.map((j) => {
+                const cnInfo = CHANNEL_CN[j.channel as CrawlChannel]
+                return (
+                  <li key={j.job_id}
+                      className="flex items-center gap-2.5 rounded-lg border border-border/60 px-3 py-2.5">
+                    {j.status === 'running'
+                      ? <Loader2 className="size-4 shrink-0 animate-spin text-primary" />
+                      : j.status === 'exited'
+                        ? <Check className="size-4 shrink-0 text-primary" />
+                        : <AlertCircle className="size-4 shrink-0 text-rose-500" />}
+                    <span className="text-sm font-medium">{cnInfo?.name ?? j.channel}</span>
+                    <span className="ml-auto text-xs tabular-nums text-muted-foreground">
+                      {j.status === 'running' ? '爬取中…'
+                        : j.status === 'exited' ? '完成'
+                        : `失败（exit ${j.exit_code}）`}
+                    </span>
+                  </li>
+                )
+              })}
+            </ul>
+            <DialogFooter>
+              <DialogClose asChild>
+                <Button variant={allDone ? 'default' : 'outline'}>
+                  {allDone ? '完成' : '放后台运行'}
+                </Button>
+              </DialogClose>
+            </DialogFooter>
+          </div>
+        ) : (
+          /* ---------- 配置态：① 种子 → ② 模式 → ③ 渠道（真实决策顺序） ---------- */
+          <>
         <DialogHeader>
-          <DialogTitle>触发爬取</DialogTitle>
+          <DialogTitle>跑一次采集</DialogTitle>
           <DialogDescription>
-            增量复用 JOBDIR 只爬新增；全覆盖重建 JOBDIR 每次从头爬。
+            种子池里有站没爬过就进线索库；都在池子里 → 先挖新人群。
           </DialogDescription>
         </DialogHeader>
 
-        <fieldset className="space-y-2">
-          <legend className="text-xs font-medium text-muted-foreground">跑批模式</legend>
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-            {([
-              ['incremental', '增量', '复用上次的 JOBDIR，Scrapy dupefilter 跳过已爬过的 URL。日常使用选这个。'],
-              ['full', '全覆盖', '全新 JOBDIR，每次从头跑。检测字段变化 / 重新校准用。'],
-            ] as const).map(([value, label, desc]) => (
-              <label
-                key={value}
-                className={cn(
-                  'flex cursor-pointer flex-col gap-1 rounded-lg border p-3 transition-colors',
-                  mode === value
-                    ? 'border-primary/50 bg-primary/5'
-                    : 'border-border/60 hover:border-muted-foreground/40'
-                )}
-              >
-                <div className="flex items-center gap-2">
-                  <input
-                    type="radio" name="crawl-mode" value={value}
-                    checked={mode === value} onChange={() => setMode(value)}
-                    className="size-4 accent-primary" aria-label={`${label} 模式`}
-                  />
-                  <span className="text-sm font-medium">{label}</span>
-                </div>
-                <p className="text-xs leading-relaxed text-muted-foreground">{desc}</p>
-              </label>
-            ))}
-          </div>
-        </fieldset>
+        <PipelineStrip pools={pools} planned={plannedSeeds} leads={leadsTotal}
+                       running={busyChannels.size > 0}
+                       runNote={mode === 'incremental' ? '池中新站（旧站自动跳过）' : '全部重爬'} />
 
-        <fieldset className="space-y-2">
-          <div className="flex items-baseline justify-between">
-            <legend className="text-xs font-medium text-muted-foreground">渠道（多选）</legend>
-            <span className="text-[10px] text-muted-foreground" title="目前 4 个自动发现渠道；自填 URL 走 seed sample 命令另算">
-              当前 4 种 · 自填见 seed sample
+        <section className="space-y-2">
+          <div className="flex items-center justify-between">
+            <h3 className="text-xs font-semibold text-muted-foreground">
+              <span className="mr-1.5 text-primary">①</span>种子池
+            </h3>
+            <span className="text-[10px] tabular-nums text-muted-foreground">
+              {Object.entries(pools).filter(([, n]) => n > 0)
+                .map(([c, n]) => `${CHANNEL_CN[c as CrawlChannel]?.name ?? c} ${n}`).join(' · ') || '空'}
             </span>
           </div>
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          <button
+            onClick={() => window.dispatchEvent(new CustomEvent('open-seed-dialog'))}
+            className="flex w-full items-center gap-2 rounded-lg border border-dashed border-border/70 px-3 py-2 text-left text-sm text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground"
+            aria-label="打开挖新人群"
+          >
+            <Plus className="size-4" aria-hidden="true" />
+            挖新人群——换国家×类目，给种子池补货
+            <span className="ml-auto text-[10px]">1–3 分钟 · 后台</span>
+          </button>
+        </section>
+
+        <section className="space-y-2">
+          <h3 className="text-xs font-semibold text-muted-foreground">
+            <span className="mr-1.5 text-primary">②</span>模式
+          </h3>
+          <div className="grid grid-cols-2 gap-2 rounded-lg bg-muted/50 p-1" role="radiogroup" aria-label="采集模式">
+            {([
+              ['incremental', '只爬新增', '跳过爬过的站，只吃新种子。快，日常用这个。'],
+              ['full', '全部重爬', '从头爬一遍，用于校准和对比变化。慢。'],
+            ] as const).map(([value, label, desc]) => (
+              <button
+                key={value}
+                role="radio" aria-checked={mode === value}
+                onClick={() => setMode(value)}
+                className={cn(
+                  'flex items-start gap-2 rounded-md px-3 py-2 text-left transition-colors',
+                  mode === value ? 'bg-background shadow-sm' : 'hover:bg-background/50'
+                )}
+              >
+                <span className={cn('mt-1 size-2 shrink-0 rounded-full border',
+                                    mode === value
+                                      ? 'border-primary bg-primary'
+                                      : 'border-muted-foreground/50')}
+                      aria-hidden="true" />
+                <span>
+                  <span className={cn('block text-sm font-medium',
+                                      mode === value && 'text-primary')}>{label}</span>
+                  <span className="mt-0.5 block text-[11px] leading-snug text-muted-foreground">{desc}</span>
+                </span>
+              </button>
+            ))}
+          </div>
+          {mode === 'full' && (
+            <div className="flex items-center gap-2 pl-1">
+              <Label htmlFor="full-limit" className="text-[11px] text-muted-foreground">
+                每渠道重爬上限
+              </Label>
+              <Input id="full-limit" type="number" min={1} max={2000} value={fullLimit}
+                     onChange={(e) => setFullLimit(e.target.value)}
+                     className="h-7 w-24 text-xs" />
+              <span className="text-[10px] text-muted-foreground">留空按整池</span>
+            </div>
+          )}
+        </section>
+
+        <section className="space-y-2">
+          <h3 className="text-xs font-semibold text-muted-foreground">
+            <span className="mr-1.5 text-primary">③</span>渠道
+          </h3>
+          <div className="grid grid-cols-2 gap-1.5" role="group" aria-label="采集渠道多选">
             {CRAWL_CHANNELS.map((ch) => {
               const checked = selected.has(ch)
-              const Style = channelStyle(ch)
-              const Icon = Style.icon
+              const running = busyChannels.has(ch)
+              const Icon = channelStyle(ch).icon
               const cnInfo = CHANNEL_CN[ch]
               return (
-                <label
+                <button
                   key={ch}
+                  role="checkbox" aria-checked={checked}
+                  onClick={() => toggle(ch)}
                   className={cn(
-                    'flex cursor-pointer gap-2 rounded-lg border p-2.5 transition-colors',
-                    checked ? 'border-primary/50 bg-primary/5'
-                            : 'border-border/60 hover:border-muted-foreground/40'
+                    'flex items-center gap-2 rounded-lg border px-2.5 py-2 text-left transition-colors',
+                    checked ? 'border-primary/50 bg-primary/5' : 'border-border/60 hover:border-muted-foreground/40',
+                    running && 'opacity-60'
                   )}
                 >
-                  <Checkbox checked={checked} onCheckedChange={() => toggle(ch)}
-                            aria-label={`选择 ${cnInfo.name}`}
-                            className="mt-0.5" />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-baseline gap-1.5">
-                      <Icon className="size-3.5 shrink-0 text-muted-foreground" />
-                      <span className="truncate text-sm font-medium">{cnInfo.name}</span>
-                      <span className="shrink-0 text-[10px] font-mono text-muted-foreground/70">{ch}</span>
-                    </div>
-                    <p className="mt-0.5 text-[11px] leading-snug text-muted-foreground">
-                      {cnInfo.desc}
-                    </p>
-                    <p className="mt-0.5 text-[10px] tabular-nums text-muted-foreground/70">
-                      历史命中率 {CHANNEL_HIT_RATE_HINT[ch]}
-                    </p>
-                  </div>
-                </label>
+                  <span className={cn('flex size-4 shrink-0 items-center justify-center rounded border',
+                                      checked ? 'border-primary bg-primary text-primary-foreground'
+                                              : 'border-muted-foreground/40')}
+                        aria-hidden="true">
+                    {checked && <Check className="size-3" />}
+                  </span>
+                  <Icon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-[13px] font-medium leading-tight">
+                      {cnInfo.name}
+                    </span>
+                    <span className="block text-[11px] tabular-nums leading-tight text-muted-foreground">
+                      {running ? '跑批中…' : `池 ${pools[ch] ?? 0} · 命中 ${CHANNEL_HIT_RATE_HINT[ch]}`}
+                    </span>
+                  </span>
+                </button>
               )
             })}
           </div>
-        </fieldset>
+        </section>
 
-        <fieldset className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <div className="space-y-1.5">
-            <Label htmlFor="crawl-limit">每渠道种子数</Label>
-            <Input id="crawl-limit" type="number" min={1} max={2000}
-                   value={limit} onChange={(e) => setLimit(Number(e.target.value))} />
-            <p className="text-[11px] text-muted-foreground tabular-nums">
-              4 渠道全选 → 共 {totalSeeds.toLocaleString()} 个种子
+        <section className="space-y-1.5">
+          <div className="flex items-end gap-3">
+            <div className="space-y-1">
+              <Label htmlFor="crawl-pages">每站页数</Label>
+              <Input id="crawl-pages" type="number" min={1} max={10} value={maxPages}
+                     onChange={(e) => setMaxPages(e.target.value)}
+                     className="h-8 w-20 text-sm" />
+            </div>
+            <p className="flex-1 pb-1.5 text-[11px] leading-snug text-muted-foreground">
+              一个站最多下钻几页（首页 → 联系页）；建议 3–5，礼貌上限 5。
             </p>
           </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="crawl-pages">
-              每站最多页数
-              <span className="ml-1.5 text-[10px] font-normal text-muted-foreground/70" title="每域名下钻链接层数。3 = 首页 → about → 联系页；建议 ≤ 5">
-                ↘
-              </span>
-            </Label>
-            <Input id="crawl-pages" type="number" min={1} max={10}
-                   value={maxPages} onChange={(e) => setMaxPages(Number(e.target.value))} />
-            <p className="text-[11px] leading-snug text-muted-foreground">
-              每域名下钻层数 · 建议 ≤ 5（超出 spec 上限）
-            </p>
-          </div>
-        </fieldset>
+        </section>
 
         {error && (
           <Alert variant="destructive">
@@ -1067,15 +1378,23 @@ function CrawlDialog({
           </Alert>
         )}
 
-        <DialogFooter>
+        <DialogFooter className="items-center gap-3">
+          <p className="flex-1 text-[11px] leading-snug text-muted-foreground" aria-live="polite">
+            {launchable.length === 0
+              ? '所选渠道都在跑批中——等它结束或换渠道'
+              : `${launchable.length} 个渠道 · ${plannedSeeds.toLocaleString()} 站 · 每站 ≤${nPages} 页`}
+          </p>
           <DialogClose asChild>
-            <Button variant="outline" disabled={busy}>取消</Button>
+            <Button variant="ghost" disabled={busy}>取消</Button>
           </DialogClose>
-          <Button onClick={submit} disabled={busy || selected.size === 0}>
+          <Button onClick={submit} disabled={busy || launchable.length === 0}
+                  aria-label="开始采集">
             {busy ? (<><Loader2 className="size-4 animate-spin" /> 启动中…</>)
-                   : (<><Play className="size-4" /> 开始爬取（{selected.size} 个渠道）</>)}
+                   : (<><Play className="size-4" /> 开始采集</>)}
           </Button>
         </DialogFooter>
+          </>
+        )}
       </DialogContent>
     </Dialog>
   )
@@ -1213,7 +1532,21 @@ export default function App() {
     search, setSearch, refresh,
   } = usePanelData()
   const { jobs, bump: bumpCrawl } = useCrawlStatus()
+  const { pools, refreshPools } = useSeedPools()
   const [crawlDialogOpen, setCrawlDialogOpen] = useState(false)
+  const [seedDialogOpen, setSeedDialogOpen] = useState(false)
+
+  /* 控制台「① 挖新人群」入口 → 独立弹窗（事件桥接，保持组件无 prop 钻透） */
+  useEffect(() => {
+    const open = () => setSeedDialogOpen(true)
+    window.addEventListener('open-seed-dialog', open)
+    return () => window.removeEventListener('open-seed-dialog', open)
+  }, [])
+  /* 种子任务结束 → 池子立刻反映追加结果 */
+  useEffect(() => {
+    const seedRunning = jobs.some((j) => j.job_id.startsWith('seed-') && j.status === 'running')
+    if (!seedRunning) refreshPools()
+  }, [jobs, refreshPools])
   const [tab, setTab] = useState<'data' | 'crawl' | 'export'>(() => {
     const h = window.location.hash.replace('#', '')
     return h === 'crawl' || h === 'export' ? h : 'data'
@@ -1364,6 +1697,13 @@ export default function App() {
               open={crawlDialogOpen}
               onOpenChange={(v) => { setCrawlDialogOpen(v); if (!v) bumpCrawl() }}
               defaultChannels={DEFAULT_CRAWL_CHANNELS}
+              jobs={jobs}
+              pools={pools}
+              leadsTotal={totalHits}
+            />
+            <SeedDialog
+              open={seedDialogOpen}
+              onOpenChange={(v) => { setSeedDialogOpen(v); if (!v) refreshPools() }}
             />
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
