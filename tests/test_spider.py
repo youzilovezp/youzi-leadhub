@@ -3,9 +3,15 @@ from scrapy.http import HtmlResponse, Request
 
 from app.spider import WaSpider
 
-# 首页 8 个不同联系链接 + 2 个归一化后重复的变体（尾斜杠/UTM）
-_LINKS = [f"https://x.com/contact{i}" for i in range(8)] + [
-    "https://x.com/contact0/", "https://x.com/contact1?utm_source=x"]
+# 首页 8 个不同语种联系页 + 2 个归一化后重复的变体（尾斜杠/UTM）
+# 全部走 CONTACT_WORDS 路径段锚定正则——`/<keyword>(?:[/?#]|$)`——确保 URL 是真实联系页 slug
+_LINKS = [
+    "https://x.com/contact", "https://x.com/contact-us", "https://x.com/kontakt",
+    "https://x.com/contacto", "https://x.com/hubungi", "https://x.com/sobre",
+    "https://x.com/contact-ar", "https://x.com/lienhe",
+    # 2 个重复变体（归一化后同 URL）
+    "https://x.com/contact/", "https://x.com/contact-us?utm_source=x",
+]
 HTML = "<html><body>" + "".join(f'<a href="{u}">c</a>' for u in _LINKS) + "</body></html>"
 
 
@@ -199,3 +205,31 @@ def test_sitemap_index_descends_one_level():
         "https://x.com/sitemap-posts.xml", idx,
         meta={"_entity": "x.com", "_sm_depth": 1})))
     assert out2 == []
+
+
+# ============================================================================
+# 2026-09-30 修复回归：CONTACT_WORDS 路径段锚定——防 /breach-report 误中
+# ============================================================================
+
+def test_contact_words_word_boundary():
+    """修复：CONTACT_WORDS 改为路径段匹配（含首尾 / ? # $ 锚定）——避免
+    breach-report、contactor、subcontractor 等被误认联系页耗光 ≤5 页预算。
+    """
+    sp = WaSpider(max_pages=20)
+    from scrapy.http import HtmlResponse
+    from scrapy.http import Request
+    html = ('<html><body>'
+            '<a href="https://x.com/breach-report">a</a>'
+            '<a href="https://x.com/contactor-list">b</a>'
+            '<a href="https://x.com/mission-reach">c</a>'
+            '<a href="https://x.com/contact">good</a>'  # 真正联系页
+            '</body></html>')
+    resp = HtmlResponse(url="https://x.com/", body=html.encode())
+    resp.request = Request("https://x.com/")
+    reqs = [o for o in sp.parse(resp) if isinstance(o, Request)]
+    urls = [r.url for r in reqs]
+    # 误中的 breach/contactor/mission-reach 不应入队；只有 /contact 应入
+    assert not any("breach-report" in u for u in urls), f"breach-report 不应入队: {urls}"
+    assert not any("contactor" in u for u in urls), f"contactor 不应入队: {urls}"
+    assert not any("mission-reach" in u for u in urls), f"mission-reach 不应入队: {urls}"
+    assert any("contact" in u for u in urls), f"/contact 应入队: {urls}"

@@ -8,7 +8,7 @@ import os
 from functools import lru_cache
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -43,8 +43,12 @@ def get_stats():
 
 
 @app.get("/api/leads")
-def get_leads(limit: int = 200, channel: str | None = None, p0: int | None = None,
+def get_leads(limit: int = Query(200, ge=1, le=1000,
+                                description="最大返回 1000 条（与 SQL clamp 一致）"),
+              channel: str | None = None, p0: int | None = None,
               market_group: str | None = None):
+    # 2026-09-30 修复：limit 上限显式 1000（与 SQL `min(limit, 1000)` 一致）；
+    # 之前 Pydantic 不限，传 limit=2000 被 SQL 静默截到 1000，前端拿不全数据。
     conn = _conn(DB_PATH)
     where, params = [], []
     if channel:

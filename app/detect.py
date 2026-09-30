@@ -39,7 +39,10 @@ _WA_BUSINESS_RES = [
 ]
 
 _TEXT_KEYWORD = re.compile(r"whats[\s\-]?app", re.I)
-_TEXT_PHONE = re.compile(r"\+?\d[\d\s\-().–—]{7,24}")
+# ponytail: 西/葡 `·`(U+00B7) / 印尼 `⁄`(U+2044) / 全角空格(U+3000) / 中文顿号(U+3001) 排版点
+# 字符类补全——缺这些真实西/葡/印尼/中文站的号码会漏检（review 2026-09-30 修复）
+# 全角 `＋` (U+FF0B) 中文站常见——起始也兼容
+_TEXT_PHONE = re.compile(r"[+\uff0b]?\d[\d\s\-().–—·⁄　、]{7,24}")
 
 # 预过滤（2026-09-29 性能优化）：WA 信号的关键词集是封闭的——链接层三正则全含
 # wa.me/whatsapp、文本层 whats-app、widget 指纹是固定 token、email 走 mailto。
@@ -104,13 +107,14 @@ def detect(html: str) -> dict:
     widgets = sorted(widgets)
 
     # ponytail: 文本层关键词命中截前 20 个——防关键词密集页拖爆扫描；邻域内号码
-    # 只在国际格式（+/00 开头）时收集，本地格式留给链接层（有 wa.me 链接才算实锤）
+    # 只在国际格式（+/00 开头 / 全角 + (U+FF0B)）时收集，本地格式留给链接层
     for m in list(_TEXT_KEYWORD.finditer(html_decoded))[:20]:
         window = html_decoded[max(0, m.start() - 100): m.end() + 100]
         for pm in _TEXT_PHONE.finditer(window):
             # 贪婪匹配可能吞下尾部分隔符（如 "+852 2123 4567 ("），剥掉再判格式
             raw = pm.group(0).strip().strip(" \t-().–—")
-            if raw.startswith("+") or raw.startswith("00"):
+            # 全角 `＋` (U+FF0B) 中文站常见——视为等价于 ASCII `+`
+            if raw[:1] in ("+", "＋") or raw.startswith("00"):
                 candidates.append((raw, "text"))
 
     seen: set[tuple[str, str]] = set()

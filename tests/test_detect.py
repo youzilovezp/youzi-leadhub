@@ -111,3 +111,29 @@ def test_widget_joinchat_static_visible():
     assert "joinchat" in res["widgets"]
     # 号码在 JS 内联配置中，不在 <a href>，也不带 "whatsapp" 关键词——不会进 candidates。
     # 该检测期望的只是 widget 指纹识别（特征 diff 信号）。
+
+
+# ============================================================================
+# 2026-09-30 修复回归：文本层字符类 + 全角 + 识别
+# ============================================================================
+
+def test_text_layer_layout_separators():
+    """修复：文本层字符类补 `·⁄　、`（西/葡/印尼/中文排版点）。
+    旧 fixture 是骗人的——真正数字用了普通空格；真实西语 `+52·55·4444·1234` 漏检。
+    """
+    res = detect('<html><body><p>WhatsApp: +52·55·4444·1234</p></body></html>')
+    raws = [r for r, l in res["candidates"] if l == "text"]
+    assert any("+52" in r for r in raws), f"西语排版点 `·` 应识别: {raws}"
+    # 印尼分隔 `⁄`
+    res2 = detect('<html><body><p>WhatsApp: +62⁄21⁄1234567</p></body></html>')
+    raws2 = [r for r, l in res2["candidates"] if l == "text"]
+    assert any("+62" in r for r in raws2), f"印尼排版点 `⁄` 应识别: {raws2}"
+
+
+def test_text_layer_fullwidth_plus():
+    """修复：中文站常把 `+` 渲染成全角 `＋` (U+FF0B)——视为等价。
+    """
+    res = detect('<html><body><p>WhatsApp: ＋86 138 0013 8000</p></body></html>')
+    raws = [r for r, l in res["candidates"] if l == "text"]
+    assert any("86" in r and ("+86" in r or "＋86" in r) for r in raws), \
+        f"全角 + 应被识别为国际格式: {raws}"

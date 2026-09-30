@@ -118,11 +118,16 @@ def play(country: str, category: str, limit: int, out: Path) -> Path:
     script = Path(__file__).resolve().parent.parent / "scripts" / "play-seeds.mjs"
     if not script.exists():
         raise RuntimeError(f"缺少种子脚本: {script}")
-    subprocess.run(
-        ["node", str(script), "--countries", country, "--categories", category,
-         "--num", str(limit), "--out", str(out)],
-        check=True,
-    )
+    try:
+        subprocess.run(
+            ["node", str(script), "--countries", country, "--categories", category,
+             "--num", str(limit), "--out", str(out)],
+            check=True,
+            timeout=600,  # 2026-09-30 修复：硬上限 10 分钟——node 卡死时
+                          # 后台 seed 任务永不结束，_JOBS_RUNNING 累积
+        )
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(f"play 渠道超时（>10min）——node 网络卡死: {e}")
     return out
 
 
@@ -170,14 +175,19 @@ def overpass_post(q: str) -> dict:
                 last = e
                 if e.response.status_code not in (429, 504, 502, 503):
                     raise
-                time.sleep(15)
+                # 2026-09-30 修复：sleep 只在"准备重试同端点"前；except 路径下一步就是
+                # 切端点，不该 sleep（否则每次切端点浪费 15s）
+                if e.response.status_code in (429, 504) and attempt == 1:
+                    time.sleep(15)
             except httpx.HTTPError as e:   # 网络层错误 → 换端点
                 last = e
     raise last if last else RuntimeError("overpass unreachable")
 
 # 印尼全域 area 查询超公共端点承载力（504 实测）——bbox 分 4 片（south,west,north,east）
+# 2026-09-30 修复：爪哇东边界 115.7 → 118.0，覆盖 Bali (lon 115)/Lombok (116)/
+# Sumbawa (117) 等主岛群——之前这些区域的餐厅/酒店全漏检
 _ID_BBOXES = [(-6.0, 95.0, 6.0, 106.0),      # 苏门答腊
-              (-9.5, 105.0, -5.8, 115.7),    # 爪哇
+              (-9.5, 105.0, -5.8, 118.0),    # 爪哇 + Bali/Lombok/Sumbawa
               (-4.5, 108.0, 4.5, 119.0),     # 加里曼丹
               (-11.0, 118.0, 1.5, 141.0)]    # 苏拉威西以东
 

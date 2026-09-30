@@ -18,9 +18,13 @@ from scrapy.spiders import Spider
 from app.normalize import entity_key, normalize_url
 
 # 多语联系语义（报告 3.3）：英文/德/西/印尼/越南/阿语常见"联系"词根
+# 2026-09-30 修复：路径段锚定 `/(keyword)(?:[-./?#]|$)`——避免 /breach-report、
+# /mission-reach、/contactor、/subcontractor 等被误认；`-` `.` 保留以支持
+# /contact-us、/about.us、/liên-he 等多语种带连字符/点的真实联系页 slug
 CONTACT_WORDS = (
-    r"contact|kontakt|kontak|contacto|contacte|hubungi|lien-he|lienhe|"
-    r"اتصل|impressum|reach|about-us|aboutus|nosotros|sobre"
+    r"/(contact|kontakt|kontak|contacto|contacte|hubungi|lien-he|lienhe|"
+    r"impressum|reach|nosotros|sobre|about-us|aboutus)"
+    r"(?:[-./?#]|$)"
 )
 
 # sitemap XML 的 <loc> 提取（Sitemap 协议；index 与 urlset 同构）

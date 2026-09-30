@@ -91,6 +91,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # 单条 ALTER 后即时建索引——>10k 行后无索引会让 /api/leads 按 market_group 扫表
     conn.execute("CREATE INDEX IF NOT EXISTS idx_domain_market_group ON domain(market_group)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_domain_score ON domain(score DESC)")
+    # 2026-09-30 修复：复合索引 — /api/leads?market_group=X ORDER BY score DESC
+    # 走单列 market_group 后 post-sort，10 万行扫描后再排是瓶颈
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_domain_market_score "
+                 "ON domain(market_group, score DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_domain_p0 ON domain(p0) WHERE p0 = 1")  # 部分索引，小
 
 
@@ -110,8 +114,11 @@ def upsert_domain(conn, key: str, channel: str, seed_host: str | None,
 
 
 def upsert_phone(conn, e164: str, country: str | None) -> None:
+    # 2026-09-30 修复：phone 重复入库时 country 也更新——以前 INSERT OR IGNORE
+    # 会让首次入库的 CN 永久覆盖后续 JP 号码的国家，导致 score market/market_group 偏错
     conn.execute(
-        "INSERT OR IGNORE INTO phone(e164, valid, country) VALUES(?, 1, ?)",
+        """INSERT INTO phone(e164, valid, country) VALUES(?, 1, ?)
+           ON CONFLICT(e164) DO UPDATE SET country=COALESCE(excluded.country, phone.country)""",
         (e164, country),
     )
 

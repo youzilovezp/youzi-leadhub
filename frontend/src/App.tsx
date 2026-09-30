@@ -356,16 +356,19 @@ function useCrawlStatus() {
 }
 
 /* 种子池：各渠道待爬种子数（挖新人群追加后刷新） */
+type PoolsResp = { pools: Record<string, number>; details: Record<string, Record<string, number>> }
+
 function useSeedPools() {
   const [pools, setPools] = useState<Record<string, number>>({})
+  const [details, setDetails] = useState<Record<string, Record<string, number>>>({})
   const refresh = useCallback(() => {
     fetch('/api/seeds')
       .then((r) => (r.ok ? r.json() : null))
-      .then((d) => d && setPools(d))
+      .then((d: PoolsResp | null) => d && (setPools(d.pools ?? {}), setDetails(d.details ?? {})))
       .catch(() => {})
   }, [])
   useEffect(() => { refresh() }, [refresh])
-  return { pools, refreshPools: refresh }
+  return { pools, details, refreshPools: refresh }
 }
 
 /* ============================================================
@@ -386,20 +389,29 @@ async function triggerCrawl(opts: {
   return r.json() as Promise<{ mode: string; spawned: CrawlJob[]; skipped: unknown[]; total: number }>
 }
 
-/* 挖新人群：换国家×类目生成新种子，后端去重追加进渠道种子池（后台任务） */
-async function triggerSeeds(opts: {
-  channel: 'play' | 'osm'
-  countries: string
-  categories: string
-  limit: number
-}) {
+/* 挖新人群（2026-09-30 简化）：选业务场景，后端自动展开到 play/osm 子任务。
+   销售不填 ISO 国家码 / 类目英文名 —— 按业务场景一键。*/
+type SeedScene = { id: string; label: string; pitch: string; channels: string[] }
+
+async function fetchScenes(): Promise<SeedScene[]> {
+  const r = await fetch('/api/scenes')
+  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`)
+  return r.json()
+}
+
+async function triggerSeedScene(sceneId: string) {
   const r = await fetch('/api/seeds', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(opts),
+    body: JSON.stringify({ scene: sceneId }),
   })
   if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`)
-  return r.json() as Promise<{ job: CrawlJob; target: string; hint: string }>
+  return r.json() as Promise<{
+    scene: { id: string; label: string; pitch: string }
+    jobs: CrawlJob[]
+    targets: string[]
+    hint: string
+  }>
 }
 
 async function exportCsv(opts: { channel?: string; p0?: boolean; marketGroup?: string }) {
@@ -946,8 +958,9 @@ function EmptyLeads({ hasFilter, onClear }: { hasFilter: boolean; onClear: () =>
  * ============================================================ */
 
 /* 管道状态条（签名元素）：种子池 → 本次采集 → 线索库，实时数字连通成一条管道 */
-function PipelineStrip({ pools, planned, leads, running, runNote }: {
+function PipelineStrip({ pools, details, planned, leads, running, runNote }: {
   pools: Record<string, number>
+  details: Record<string, Record<string, number>>
   planned: number
   leads: number
   running: boolean
@@ -955,7 +968,7 @@ function PipelineStrip({ pools, planned, leads, running, runNote }: {
 }) {
   const poolTotal = Object.values(pools).reduce((a, b) => a + b, 0)
   const nodes = [
-    { key: 'seeds', label: '种子池', value: poolTotal, sub: '待爬站点的来源池',
+    { key: 'seeds', label: '种子池', value: poolTotal, sub: '待爬站点（hover 看明细）',
       icon: Database },
     { key: 'run', label: '本次采集', value: planned, sub: running ? '采集中…' : runNote,
       icon: Play, active: true },
@@ -966,6 +979,10 @@ function PipelineStrip({ pools, planned, leads, running, runNote }: {
          aria-label={`种子池 ${poolTotal}，本次 ${planned} 站，线索库 ${leads}`}>
       {nodes.map((n, i) => {
         const Icon = n.icon
+        const tip = n.key === 'seeds' ? Object.entries(pools)
+          .filter(([, v]) => v > 0)
+          .map(([ch, v]) => `${ch} ${v.toLocaleString()}`)
+          .join(' · ') || '空' : ''
         return (
           <Fragment key={n.key}>
             {i > 0 && (
@@ -979,7 +996,8 @@ function PipelineStrip({ pools, planned, leads, running, runNote }: {
             <div className={cn(
                    'rounded-lg border px-2.5 py-2 text-center',
                    n.active ? 'border-primary/50 bg-primary/5' : 'border-border/60 bg-muted/30'
-                 )}>
+                 )}
+                 title={tip}>
               <div className="flex items-center justify-center gap-1 text-[10px] text-muted-foreground">
                 <Icon className="size-3" aria-hidden="true" />
                 {n.label}
@@ -998,35 +1016,38 @@ function PipelineStrip({ pools, planned, leads, running, runNote }: {
   )
 }
 
-/* 挖新人群：换国家×类目扩种子池（独立弹窗——异步分钟级任务不该塞进采集表单） */
+/* 挖新人群（2026-09-30 简化）：业务场景卡片选择 → 后端展开渠道子任务。*/
 function SeedDialog({ open, onOpenChange }: {
   open: boolean
   onOpenChange: (v: boolean) => void
 }) {
-  const [seedCh, setSeedCh] = useState<'play' | 'osm'>('play')
-  const [countries, setCountries] = useState('br,mx,th')
-  const [categories, setCategories] = useState('BUSINESS')
-  const [seedLimit, setSeedLimit] = useState('800')
+  const [scenes, setScenes] = useState<SeedScene[]>([])
+  const [picked, setPicked] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [msg, setMsg] = useState<string | null>(null)
-  const [done, setDone] = useState(false)
+  const [msg, setMsg] = useState<{ kind: 'info' | 'error'; text: string } | null>(null)
 
   useEffect(() => {
-    if (open) { setMsg(null); setDone(false) }
+    if (!open) return
+    setMsg(null)
+    setPicked(null)
+    fetchScenes().then(setScenes).catch((e) =>
+      setMsg({ kind: 'error', text: `加载场景失败：${(e as Error).message}` }),
+    )
   }, [open])
 
   const submit = async () => {
-    const n = Math.round(Number(seedLimit) || 0)
-    if (n < 1) { setMsg('目标数量必须 ≥ 1'); return }
+    if (!picked) return
     setBusy(true); setMsg(null)
     try {
-      const res = await triggerSeeds({ channel: seedCh, countries: countries.trim(),
-                                       categories: categories.trim(), limit: n })
-      setDone(true)
-      setMsg(`已提交：正在挖 ${countries.trim() || '默认国家'} 的${seedCh === 'play' ? '应用榜官网' : '地图商户'}，追加进种子池（后台约 1–3 分钟）。完成后再回来「开始采集·只爬新增」。`)
-      void res
+      const r = await triggerSeedScene(picked)
+      const scene = scenes.find((s) => s.id === picked)
+      const channels = r.jobs.map((j) => j.channel).join(' + ')
+      setMsg({
+        kind: 'info',
+        text: `已提交「${scene?.label}」→ 后台跑 ${channels}（${r.jobs.length} 个子任务，约 1–3 分钟）。完成后到「跑批」页确认退出码，再点「开始采集·只爬新增」。`,
+      })
     } catch (e) {
-      setMsg(`失败：${(e as Error).message}`)
+      setMsg({ kind: 'error', text: (e as Error).message })
     } finally {
       setBusy(false)
     }
@@ -1038,78 +1059,49 @@ function SeedDialog({ open, onOpenChange }: {
         <DialogHeader>
           <DialogTitle>挖新人群</DialogTitle>
           <DialogDescription>
-            换一批国家（或类目）生成新种子，追加进种子池。已有的不会重复。
+            选一个目标市场，后台自动生成种子并追加到种子池（已有不重复）。
           </DialogDescription>
         </DialogHeader>
 
-        <div className="grid grid-cols-2 gap-2">
-          {([
-            ['play', 'Play 应用榜', '国家×类目分榜 → 开发者官网（命中率 ~12–25%）'],
-            ['osm', 'OSM 地图商户', '按国家挖带官网的本地商家（命中率 ~55%）'],
-          ] as const).map(([value, label, desc]) => (
-            <label key={value}
-                   className={cn('flex cursor-pointer gap-2 rounded-lg border p-3 transition-colors',
-                                 seedCh === value ? 'border-primary/50 bg-primary/5'
-                                                   : 'border-border/60 hover:border-muted-foreground/40')}>
-              <input type="radio" name="seed-channel" checked={seedCh === value}
-                     onChange={() => setSeedCh(value)}
-                     className="mt-0.5 size-4 accent-primary" aria-label={label} />
-              <div>
-                <div className="text-sm font-medium">{label}</div>
-                <p className="mt-0.5 text-[11px] leading-snug text-muted-foreground">{desc}</p>
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          {scenes.map((s) => (
+            <label key={s.id}
+                   className={cn('flex cursor-pointer gap-2.5 rounded-lg border p-3 transition-colors',
+                                 picked === s.id
+                                   ? 'border-primary/60 bg-primary/8 ring-1 ring-primary/30'
+                                   : 'border-border/60 hover:border-muted-foreground/40')}>
+              <input type="radio" name="seed-scene" checked={picked === s.id}
+                     onChange={() => setPicked(s.id)}
+                     className="mt-0.5 size-4 accent-primary"
+                     aria-label={s.label} />
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium">{s.label}</span>
+                  <span className="text-[10px] text-muted-foreground">
+                    {s.channels.map((c) => c === 'play' ? 'Play' : '地图').join(' + ')}
+                  </span>
+                </div>
+                <p className="mt-0.5 text-[11px] leading-snug text-muted-foreground">{s.pitch}</p>
               </div>
             </label>
           ))}
         </div>
 
-        <div className="grid grid-cols-2 gap-3">
-          <div className="space-y-1.5">
-            <Label htmlFor="seed-countries">国家码</Label>
-            <Input id="seed-countries" value={countries}
-                   onChange={(e) => setCountries(e.target.value)}
-                   placeholder={seedCh === 'osm' ? 'SG,VN,PH' : 'br,mx,th'} />
-            <p className="text-[10px] text-muted-foreground">ISO 两位码，逗号分隔</p>
-          </div>
-          {seedCh === 'play' ? (
-            <div className="space-y-1.5">
-              <Label htmlFor="seed-category">类目</Label>
-              <Input id="seed-category" value={categories}
-                     onChange={(e) => setCategories(e.target.value)} />
-              <p className="text-[10px] text-muted-foreground">
-                BUSINESS / SHOPPING / COMMUNICATION / FINANCE / FOOD_AND_DRINK
-              </p>
-            </div>
-          ) : (
-            <div className="space-y-1.5">
-              <Label htmlFor="seed-limit">目标数量</Label>
-              <Input id="seed-limit" type="number" min={1} max={5000} value={seedLimit}
-                     onChange={(e) => setSeedLimit(e.target.value)} />
-            </div>
-          )}
-        </div>
-        {seedCh === 'play' && (
-          <div className="space-y-1.5">
-            <Label htmlFor="seed-limit-play">目标数量</Label>
-            <Input id="seed-limit-play" type="number" min={1} max={5000} value={seedLimit}
-                   onChange={(e) => setSeedLimit(e.target.value)} />
-            <p className="text-[10px] text-muted-foreground">按国家均摊；生成走本地代理（7890）</p>
-          </div>
-        )}
-
         {msg && (
           <p className={cn('rounded-md px-2.5 py-2 text-xs leading-relaxed',
-                           done ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground')}>
-            {msg}
+                           msg.kind === 'info' ? 'bg-primary/10 text-primary'
+                                                : 'bg-destructive/10 text-destructive')}>
+            {msg.text}
           </p>
         )}
 
         <DialogFooter>
-          <Button onClick={done ? () => onOpenChange(false) : submit}
-                  disabled={busy || done}
-                  aria-label={done ? '关闭挖新人群' : '开始生成种子'}>
+          <Button variant="outline" onClick={() => onOpenChange(false)}
+                  aria-label="关闭挖新人群">关闭</Button>
+          <Button onClick={submit} disabled={!picked || busy}
+                  aria-label="开始生成种子">
             {busy ? (<><Loader2 className="size-4 animate-spin" /> 生成中…</>)
-                  : done ? '好，知道了'
-                         : (<><Plus className="size-4" /> 开始生成种子</>)}
+                  : (<><Plus className="size-4" /> 开始生成</>)}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -1246,7 +1238,7 @@ function CrawlDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <PipelineStrip pools={pools} planned={plannedSeeds} leads={leadsTotal}
+        <PipelineStrip pools={pools} details={details} planned={plannedSeeds} leads={leadsTotal}
                        running={busyChannels.size > 0}
                        runNote={mode === 'incremental' ? '池中新站（旧站自动跳过）' : '全部重爬'} />
 
@@ -1532,7 +1524,7 @@ export default function App() {
     search, setSearch, refresh,
   } = usePanelData()
   const { jobs, bump: bumpCrawl } = useCrawlStatus()
-  const { pools, refreshPools } = useSeedPools()
+  const { pools, details, refreshPools } = useSeedPools()
   const [crawlDialogOpen, setCrawlDialogOpen] = useState(false)
   const [seedDialogOpen, setSeedDialogOpen] = useState(false)
 

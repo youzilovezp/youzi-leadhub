@@ -2,6 +2,8 @@
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from app import db
 from app.pipelines import WaStorePipeline
 from app.score import page_flags
@@ -109,6 +111,22 @@ def test_p0_strong_signals_only():
     # 强信号：中文页面 + CN 市场双确认
     assert score_domain({"lang": "zh", "icp": False, "hreflang_zh": False, "title_zh": False},
                         ["CN"], "some-brand.com")["p0"] == 1
+
+
+def test_developer_name_china_not_english_trader():
+    """2026-09-30 修复：_CITY_EN 移除裸 `China`——"Foo China Trading Co Ltd"
+    等英文贸易公司不再误判为出海中国主体。
+    """
+    from app.score import score_domain
+    flags = {"lang": "en", "icp": False, "hreflang_zh": False, "title_zh": False}
+    # 含 China 但不是中国主体 → 不应 P0
+    res = score_domain(flags, ["US"], "globaltrade.io",
+                       developer_name="Foo China Trading Co Ltd")
+    assert res["p0"] == 0, f"裸 'China' 不应触发 P0: got {res['p0']}"
+    # 真中国主体（Shenzhen + Technology）→ 仍 P0
+    res2 = score_domain(flags, ["US"], "brand.io",
+                        developer_name="Shenzhen Technology Co Ltd")
+    assert res2["p0"] == 1
 
 
 def test_gambling_downscored():
@@ -461,6 +479,37 @@ def test_atomic_merge_begin_immediate_actually_used(tmp_path):
         "SELECT widget FROM domain WHERE entity_key='race.com'").fetchone()["widget"] or "").split(","))
     assert widgets == {"widgetA", "widgetB"}, \
         f"并发合并丢更新: got {widgets}"
+
+
+def test_atomic_merge_raises_when_entity_missing(tmp_path):
+    """2026-09-30 修复：_atomic_merge_csv 在 domain 行不存在时 UPDATE 命中 0 行——
+    旧实现静默丢值，新实现抛 RuntimeError 让上层知道。
+    """
+    from app.pipelines import _atomic_merge_csv
+    dbp = str(tmp_path / "leads.db")
+    db.connect(dbp)  # 建表，但**不**插入 domain 行
+    conn = db.connect(dbp)
+    with pytest.raises(RuntimeError, match="目标行不存在"):
+        _atomic_merge_csv(conn, "domain", "ghost.com", {"someWidget"}, "widget")
+    conn.close()
+
+
+def test_phone_country_updates_on_conflict(tmp_path):
+    """2026-09-30 修复：phone 入库时 country 也更新（INSERT OR IGNORE 会让首次
+    写入的 CN 永久覆盖后续 JP 号码 → score market 偏错）。
+    """
+    from app import db
+    conn = db.connect(tmp_path / "t.db")
+    # 首次 CN
+    db.upsert_phone(conn, "+8613800138000", "CN")
+    # 同号再入 JP
+    db.upsert_phone(conn, "+8613800138000", "JP")
+    row = conn.execute("SELECT country FROM phone WHERE e164='+8613800138000'").fetchone()
+    assert row["country"] == "JP", f"country 应更新为 JP，got {row['country']}"
+    # 不传 country 时保留旧值（COALESCE 兜底）
+    db.upsert_phone(conn, "+8613800138000", None)
+    row2 = conn.execute("SELECT country FROM phone WHERE e164='+8613800138000'").fetchone()
+    assert row2["country"] == "JP", f"country=None 时保留 JP，got {row2['country']}"
 
 
 # ============================================================================

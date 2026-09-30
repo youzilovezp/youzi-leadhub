@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -57,6 +58,9 @@ class _Job:
 
 
 _JOBS_RUNNING: dict[str, _Job] = {}        # job_id → job
+# 2026-09-30 修复：进程内锁包住 check+spawn——防双请求同时过 _channel_busy 复跑同一 JOBDIR
+# 互毁指纹/队列；仅限**进程内**（uvicorn 多 worker 仍可能并发——已承认为设计上限）
+_BUSY_LOCK = threading.Lock()
 
 
 class CrawlRequest(BaseModel):
@@ -176,21 +180,34 @@ def _channel_busy(channel: str) -> bool:
 
 
 def _safe_db_path(p: str) -> str:
-    """db_path 只允许项目内相对路径（2026-09-28 收口：端点无鉴权，任意字符串
-    可在服务器任意可写路径建库写文件）。"""
+    """db_path 只允许项目内相对路径（2026-09-30 强化 symlink 防护）。
+
+    无鉴权端点 + 任意路径 → SQLite 在 cwd 建库可能写穿：
+    - `data/../../etc/x.db` 路径穿越（已挡）
+    - `data/leads.db -> /etc/passwd` 符号链接攻击（旧版 `..` 检查不挡——symlink 不在 parts 里）
+    修：先与 _CWD 拼接（db_path 在 crawl_api 语义里就是相对 _CWD），resolve 后 must_relative_to(_CWD)
+    """
     path = Path(p)
     if path.is_absolute() or ".." in path.parts:
         raise HTTPException(400, f"db_path 必须是项目内相对路径: {p!r}")
+    try:
+        # db_path 是相对路径，相对 _CWD 解析（crawl_api 路径语义）
+        joined = _CWD / path
+        resolved = joined.resolve(strict=False)
+        if not resolved.is_relative_to(_CWD.resolve()):
+            raise HTTPException(400, f"db_path 必须落在项目内: {p!r}")
+    except (OSError, ValueError):
+        raise HTTPException(400, f"db_path 非法: {p!r}")
     return p
 
 
 class SeedsRequest(BaseModel):
-    """挖新人群（2026-09-29）：换国家×类目生成新种子并去重追加进渠道种子池。"""
-    channel: Literal["play", "osm"]
-    countries: str = Field(default="", description="ISO 国家码逗号分隔（play: br,mx,th；osm: SG,VN,PH）。空 = 渠道默认")
-    categories: str = Field(default="BUSINESS",
-                            description="play 专用类目逗号分隔（BUSINESS/SHOPPING/COMMUNICATION/FINANCE/FOOD_AND_DRINK）")
-    limit: int = Field(default=800, ge=1, le=5000)
+    """挖新人群（2026-09-30 简化）：选业务场景，后端自动映射国家/类目/渠道。
+
+    销售不填 ISO 国家码、不懂英文类目名——按业务场景一键。
+    一个场景可同时触发 play + osm（各自独立 JOBDIR）。
+    """
+    scene: str = Field(..., description="场景 ID（sea_smb/latam_ecom/mena_biz/africa_new/id_food）")
 
 
 def _play_proxy() -> str | None:
@@ -243,28 +260,91 @@ def _spawn_seed(channel: str, countries: str, categories: str,
     return job
 
 
+@router.get("/api/scenes")
+def get_scenes():
+    """业务场景列表（前端挖新人群弹窗渲染卡片用）。"""
+    from app.seeds_scenes import SCENES
+    return [{"id": s.id, "label": s.label, "pitch": s.pitch,
+             "channels": [p.channel for p in s.plans]}
+            for s in SCENES]
+
+
+def _seed_candidates(channel: str) -> list[Path]:
+    """返回渠道的所有候选种子文件路径（按优先级排；多个都计入种子池行数）。"""
+    if channel == "play":
+        names = ["data/seeds-play-new.txt", "data/seeds-play.txt"]
+    elif channel == "tranco":
+        names = ["data/seeds-tranco.txt", "data/seeds-tranco-batch2.txt"]
+    elif channel == "myshopify":
+        names = ["data/seeds-myshopify.txt"]
+    elif channel == "osm":
+        names = ["data/seeds-osm.txt"]
+    else:
+        return []
+    return [p for n in names if (_CWD / n).exists() for p in [_CWD / n]]
+
+
 @router.get("/api/seeds")
 def get_seed_pools():
-    """各渠道当前种子池行数（挖新人群追加后立即反映）——前端管道状态条用。"""
+    """各渠道当前种子池行数（候选文件求和）——前端管道状态条用。
+
+    ponytail：原实现只取 _pick_seed 的首个候选，tranco 兜底永远显示 5 行（忽略
+    seeds-tranco-batch2.txt 的 5874 行）。改为所有候选文件求和——"种子池"反映真实总量。
+    """
     pools: dict[str, int] = {}
+    details: dict[str, dict[str, int]] = {}
     for ch in ALL_CHANNELS:
-        seed = _pick_seed(ch)
-        pools[ch] = _seed_count(_CWD / seed) if seed and (_CWD / seed).exists() else 0
-    return pools
+        cands = _seed_candidates(ch)
+        per_file = {c.name: _seed_count(c) for c in cands}
+        pools[ch] = sum(per_file.values())
+        if per_file:
+            details[ch] = per_file
+    return {"pools": pools, "details": details}
 
 
 @router.post("/api/seeds")
 def post_seeds(req: SeedsRequest):
-    target = _pick_seed(req.channel) or f"data/seeds-{req.channel}.txt"
-    if _channel_busy(req.channel):
-        raise HTTPException(
-            409, f"渠道 {req.channel} 已有运行中的任务（种子文件读写互斥），稍后再试")
-    job = _spawn_seed(req.channel, req.countries, req.categories,
-                      req.limit, target)
-    return {"job": JobInfo(job_id=job.job_id, channel=job.channel, pid=job.pid,
-                           started_at=job.started_at, status=job.status).model_dump(),
-            "target": target,
-            "hint": "生成完成后到跑批页确认退出码，再点『增量爬取』吃新种子"}
+    """按业务场景挖新人群：自动展开到 1–2 个渠道子任务并行 spawn。
+
+    ponytail: 一个场景 → 多个 ChannelPlan → 每个独立 spawn → 每个独立 JOBDIR。
+    失败隔离：play 失败不影响 osm；前端可看每个子 job 进度。
+    """
+    from app.seeds_scenes import get_scene
+
+    scene = get_scene(req.scene)
+    if scene is None:
+        raise HTTPException(400, f"未知场景: {req.scene!r}（GET /api/scenes 看可用列表）")
+
+    # 进程内 TOCTOU 锁：check_busy + spawn 必须原子——否则双请求同时过检查并发 spawn
+    # 同 JOBDIR 互毁指纹/队列（2026-09-30 修复）
+    with _BUSY_LOCK:
+        # 同场景内同渠道互斥（文件读写冲突）
+        busy = [p.channel for p in scene.plans if _channel_busy(p.channel)]
+        if busy:
+            raise HTTPException(
+                409, f"场景 {scene.label} 涉及的渠道 {busy} 已有运行中的种子任务（文件读写互斥），稍后再试")
+
+        spawned: list[JobInfo] = []
+        targets: list[str] = []
+        for plan in scene.plans:
+            target = _pick_seed(plan.channel) or f"data/seeds-{plan.channel}.txt"
+            # 2026-09-30 修复：play 的 --num 是 per-(country,category) 组合数（scripts/play-seeds.mjs
+            # 内每个 combo 拿 num 个），传入 per_country 即可；之前误乘国家数导致 5–15× 过度查询
+            # Google Play 触发限流概率大增
+            job = _spawn_seed(plan.channel, plan.countries, plan.categories,
+                              plan.per_country, target)
+            spawned.append(JobInfo(
+                job_id=job.job_id, channel=job.channel, pid=job.pid,
+                started_at=job.started_at, status=job.status,
+            ))
+            targets.append(target)
+
+    return {
+        "scene": {"id": scene.id, "label": scene.label, "pitch": scene.pitch},
+        "jobs": [j.model_dump() for j in spawned],
+        "targets": targets,
+        "hint": f"后台约 1–3 分钟；完成后到跑批页确认退出码，再点「增量爬取」吃新种子",
+    }
 
 
 @router.post("/api/crawl")
@@ -283,32 +363,33 @@ def post_crawl(req: CrawlRequest):
         raise HTTPException(400, f"未知渠道: {invalid}; 可选: {list(ALL_CHANNELS)}")
     db_path = _safe_db_path(req.db_path)
 
-    # 并发守卫（2026-09-28 修复）：同 channel 并发 spawn 会共用同一 JOBDIR，
-    # Scrapy 指纹/断点队列互相覆盖——先全量检查，避免半路 spawn 后才 409
-    busy = [ch for ch in set(channels) if _channel_busy(ch)]
-    if busy:
-        raise HTTPException(
-            409, f"渠道 {sorted(busy)} 已有运行中的 job（共用 JOBDIR 不允许并发），"
-                 f"先等它结束或查 /api/crawl/status")
+    # 并发守卫（2026-09-30 强化）：进程内锁包住 check+spawn——双请求同时过
+    # _channel_busy 会并发 spawn 同 JOBDIR，Scrapy 指纹/断点队列互相覆盖
+    with _BUSY_LOCK:
+        busy = [ch for ch in set(channels) if _channel_busy(ch)]
+        if busy:
+            raise HTTPException(
+                409, f"渠道 {sorted(busy)} 已有运行中的 job（共用 JOBDIR 不允许并发），"
+                     f"先等它结束或查 /api/crawl/status")
 
-    spawned: list[JobInfo] = []
-    skipped: list[dict] = []
-    for ch in channels:
-        seed = _pick_seed(ch)
-        if not seed or not (_CWD / seed).exists():
-            skipped.append({"channel": ch, "reason": f"无种子文件（需先跑 seed {ch}）"})
-            continue
-        # 增量模式不切片种子文件（2026-09-29 修复）：旧实现取前 limit 条，同一
-        # 种子文件反复跑永远轮不到第 limit+1 条（实测：seeds 309 条、limit 200，
-        # 18:19 增量 filtered 200 / 0.042s 结束 / 永远 +0）。全量交给 dupefilter
-        # 跳已爬——指纹查表极廉价，被滤的种子不产生网络请求。
-        limit = (_seed_count(_CWD / seed) if req.mode == "incremental"
-                 else req.limit)
-        job = _spawn(ch, seed, limit, req.max_pages, db_path, req.mode)
-        spawned.append(JobInfo(
-            job_id=job.job_id, channel=job.channel, pid=job.pid,
-            started_at=job.started_at, status=job.status,
-        ))
+        spawned: list[JobInfo] = []
+        skipped: list[dict] = []
+        for ch in channels:
+            seed = _pick_seed(ch)
+            if not seed or not (_CWD / seed).exists():
+                skipped.append({"channel": ch, "reason": f"无种子文件（需先跑 seed {ch}）"})
+                continue
+            # 增量模式不切片种子文件（2026-09-29 修复）：旧实现取前 limit 条，同一
+            # 种子文件反复跑永远轮不到第 limit+1 条（实测：seeds 309 条、limit 200，
+            # 18:19 增量 filtered 200 / 0.042s 结束 / 永远 +0）。全量交给 dupefilter
+            # 跳已爬——指纹查表极廉价，被滤的种子不产生网络请求。
+            limit = (_seed_count(_CWD / seed) if req.mode == "incremental"
+                     else req.limit)
+            job = _spawn(ch, seed, limit, req.max_pages, db_path, req.mode)
+            spawned.append(JobInfo(
+                job_id=job.job_id, channel=job.channel, pid=job.pid,
+                started_at=job.started_at, status=job.status,
+            ))
 
     return {
         "mode": req.mode,
@@ -355,7 +436,9 @@ def get_crawl_status():
     now = _t.time()
     TTL = 3600  # 已退出 job 在 _JOBS_RUNNING 保留 1 小时供前端查看，之后清
     # TTL 清理：已 exited/failed 且 started_at > 1 小时前的全部清出
-    stale = [jid for jid, j in _JOBS_RUNNING.items()
+    # 2026-09-30 修复：迭代前 `list(_JOBS_RUNNING.items())` 快照——并发 pop 触发
+    # `RuntimeError: dictionary changed size during iteration` 导致 API 500
+    stale = [jid for jid, j in list(_JOBS_RUNNING.items())
              if j.status in ("exited", "failed") and (now - j.started_at) > TTL]
     for jid in stale:
         _JOBS_RUNNING.pop(jid, None)

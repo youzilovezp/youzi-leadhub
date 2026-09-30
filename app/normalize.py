@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import re
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit, unquote
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit, unquote
 
 import tldextract
 
@@ -19,7 +19,7 @@ _SEPARATORS = re.compile(r"[\s\-().–—]")
 
 
 def normalize_url(url: str) -> str | None:
-    """小写 host、去 fragment、剥 UTM、统一尾斜杠。非法输入返回 None。"""
+    """小写 host、去 fragment、剥 UTM、统一尾斜杠、路径空格百分号编码。非法输入返回 None。"""
     if not isinstance(url, str) or not url:
         return None
     # 拒 ASCII 控制字符（\x00-\x1f, \x7f）——URL 不该含这些，浏览器/服务器也会拒
@@ -44,6 +44,10 @@ def normalize_url(url: str) -> str | None:
     path = parts.path or "/"
     if path != "/" and path.endswith("/"):
         path = path.rstrip("/")
+    # 路径空格编码（P1 修复 2026-09-30）："/path with space" 与 "/path%20with%20space"
+    # 是同一资源，fingerprint 必须同源——否则 dupefilter 漏判重复请求
+    if " " in path:
+        path = quote(path, safe="/-_.~")
     query = urlencode(
         [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
          if not _UTM_RE.match(k)]
@@ -88,10 +92,22 @@ def normalize_phone(raw: str, imply_plus: bool = False) -> tuple[str, str | None
 
 
 def entity_key(host: str) -> str:
-    """eTLD+1；平台公共后缀（myshopify.com/blogspot.com 在 PSL 私有段）回退完整 host。"""
+    """eTLD+1；平台公共后缀（myshopify.com/blogspot.com 在 PSL 私有段）回退完整 host。
+
+    ponytail：IDN 域名上游有时给 punycode（例え.テスト → xn--r8jz45g.xn--zckzah）
+    有时给 native（例え.テスト）——同一实体不同写法会生成两条 domain 行，sighting 永久分裂。
+    修：先 .encode("idna").decode("ascii").lower() 归一再喂 tldextract。
+    """
     host = (host or "").lower().rstrip(".")
     if not host:
         return host
+    # 端口静默剥除——entity_key("example.com:8080") == "example.com"（不同端口共享预算）
+    host = host.split(":", 1)[0]
+    # IDN → punycode 归一
+    try:
+        host = host.encode("idna").decode("ascii")
+    except UnicodeError:
+        pass  # 非法 IDN 原样返回（实测极少见；tldextract 会自然处理）
     ext = _EXTRACT(host)
     if getattr(ext, "is_private", False):
         return host  # PSL 私有段：注册域是平台本身，实体键必须到 host 粒度

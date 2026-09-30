@@ -10,6 +10,18 @@ def test_normalize_url():
     assert normalize_url("not a url") is None
 
 
+def test_normalize_url_path_space_encoding():
+    """P1 修复（2026-09-30）：路径空格百分号编码——"path with space" 与
+    "path%20with%20space" 必须同源（dupefilter 同 fingerprint）。
+    """
+    a = normalize_url("https://a.com/path with space")
+    b = normalize_url("https://a.com/path%20with%20space")
+    assert a == b, f"空格与编码两种写法应同 fingerprint: {a} vs {b}"
+    assert a is not None and "%20" in a  # 验证编码生效
+    # 安全字符不应编码
+    assert normalize_url("https://a.com/path-1_2.x") == "https://a.com/path-1_2.x"
+
+
 def test_phone_link_layer_imply_plus():
     assert normalize_phone("8613800138000", imply_plus=True) == ("+8613800138000", "CN")
     assert normalize_phone("%2B14155552671", imply_plus=True) == ("+14155552671", "US")
@@ -43,6 +55,24 @@ def test_entity_key():
     # PSL 私有段平台后缀：实体键回退完整 host（报告 3.4 平台后缀例外）
     assert entity_key("shop123.myshopify.com") == "shop123.myshopify.com"
     assert entity_key("blog.blogspot.com") == "blog.blogspot.com"
+
+
+def test_entity_key_idn_normalization():
+    """P1 修复（2026-09-30）：IDN 域名 native / punycode 两种写法归一为同一 key。
+    避免同一实体在不同 seed 渠道写成两条 domain 行、sighting 永久分裂。
+    """
+    assert entity_key("例え.テスト") == entity_key("xn--r8jz45g.xn--zckzah")
+    # 中国 IDN
+    assert entity_key("中国.中国") == entity_key("xn--fiqs8s.xn--fiqs8s")
+
+
+def test_entity_key_strips_port():
+    """P1 修复：端口静默剥离——entity_key("example.com:8080") == "example.com"
+    不同端口（开发/预发/prod 跨 CDN）共享 entity_key 与预算。
+    """
+    assert entity_key("example.com:8080") == "example.com"
+    assert entity_key("example.com:9443") == "example.com"
+    assert entity_key("www.example.com:8443") == "example.com"  # eTLD+1 去 www
 
 
 def test_settings_dedupefilter_class_wired():

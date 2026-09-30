@@ -206,13 +206,13 @@ class TestNormalizeBoundary:
         # 这意味着同一资源可能多个 fingerprint
 
     def test_path_with_spaces(self):
-        """URL 路径含空格 —— 应 urlencode 还是保留？"""
+        """URL 路径含空格 —— 2026-09-30 修复：编码为 %20 与浏览器行为一致。
+        旧实现 urlsplit 原样保留 → 同一资源"/path with space" 与 "/path%20with%20space"
+        fingerprint 分裂，dupefilter 漏判重复请求。
+        """
         u = normalize_url("https://a.com/path with space")
-        # urlsplit 不编码 → 原样保留
-        # 但 Chromium 等会 urlencode 为 %20
-        # normalize_url 没做这一步
-        assert u == "https://a.com/path with space", \
-            f"路径含空格未被编码: {u}"
+        assert u == "https://a.com/path%20with%20space", \
+            f"路径空格应编码为 %20: {u}"
 
     def test_uppercase_host_in_entity_key(self):
         """entity_key 顶级域大写 —— 应小写归一"""

@@ -51,10 +51,15 @@ def _atomic_merge_csv(conn, table: str, key: str, new_values: set[str],
         existing_str = (row[column] if row and row[column] else "") or ""
         existing = set(filter(None, existing_str.split(",")))
         merged = sorted(existing | new_values)
-        conn.execute(
+        cur = conn.execute(
             f"UPDATE {table} SET {column} = ? WHERE entity_key = ?",
             (",".join(merged), key),
         )
+        # 2026-09-30 修复：UPDATE 命中 0 行 = 目标行不存在——以前静默丢值
+        # （upsert_domain 因 SQLITE_BUSY 等回滚 + 后 widget 单独走此路径 → 数据失踪）
+        if cur.rowcount == 0:
+            raise RuntimeError(
+                f"_atomic_merge_csv 目标行不存在: {table}/{column}/{key}")
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")

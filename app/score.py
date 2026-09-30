@@ -17,7 +17,8 @@ _TITLE = re.compile(r"<title[^>]*>(.*?)</title>", re.S | re.I)
 # 英：Shenzhen/Beijing/Shanghai + Co., Ltd/Limited/Technology/Trading/Network
 _CITY_CN = ("深圳|上海|北京|广州|杭州|成都|南京|武汉|西安|苏州|天津|重庆|青岛|厦门|福州|济南|郑州|长沙|合肥|南昌|南宁|昆明|贵阳|海口|兰州|西宁|银川|乌鲁木齐|呼和浩特|沈阳|大连|哈尔滨|长春|石家庄|太原|唐山|保定|邯郸|秦皇岛|邢台|张家口|承德|沧州|廊坊|衡水|大同|阳泉|长治|晋城|朔州|晋中|运城|临汾|吕梁|包头|乌海|赤峰|通辽|鄂尔多斯|呼伦贝尔|巴彦淖尔|乌兰察布|兴安盟|锡林郭勒|阿拉善")
 _INDUSTRY_CN = r"科技|贸易|跨境|网络|电商|实业|信息|通信|电子|智能|数字|文化|传媒|教育|医疗|健康|金融|投资|控股|集团|实业|实业|股份|有限公司|公司"
-_CITY_EN = r"Shenzhen|Shanghai|Beijing|Guangzhou|Hangzhou|Chengdu|China"
+# 2026-09-30 修复：删裸 `China`——"Foo China Trading Co Ltd" 等英文贸易公司误命中出海信号
+_CITY_EN = r"Shenzhen|Shanghai|Beijing|Guangzhou|Hangzhou|Chengdu"
 _CORP_EN = r"Co\.?,?\s*Ltd|Limited|LLC|Inc\.?|Corporation|Corp\.?|Technology|Trading|Network|Holdings|Group"
 _CHINESE_COMPANY_RE = re.compile(
     rf"({_CITY_CN})[一-鿿]*({_INDUSTRY_CN})"
@@ -80,7 +81,10 @@ def page_flags(html: str) -> dict:
     <head>——这两个正则只扫头部切片，385KB 页 15ms → ~7ms。ICP/博彩在页脚
     正文，保持全文。
     """
-    head = html[:4096]
+    # 性能（2026-09-29 → 2026-09-30 扩大）：<html lang> 按规范在文档开头、hreflang <link>
+    # 只在 <head>——扫前 16KB head（覆盖传统企业站巨长 DOCTYPE/注释 preamble）；
+    # 之前 4096 不够，长 head 漏判 lang → 失去 zh_weak +2 分和双轨升格信号。
+    head = html[:16384]
     m = LANG_ATTR.search(head)
     lang = (m.group(1) if m else "").split("-")[0].lower() or None
     t = _TITLE.search(head) or _TITLE.search(html)

@@ -23,14 +23,23 @@ _UA = "youzi-bsp-leadgen/0.1 (BSP golden-set calibration; youzi99013@gmail.com)"
 
 
 def _fetch(url: str) -> str | None:
-    """抓页面文本（2MB 截断 + 10s 超时，与管道同预算）；失败返回 None。"""
-    try:
-        r = httpx.get(url, timeout=10, follow_redirects=True,
-                      headers={"User-Agent": _UA})
-        r.raise_for_status()
-        return r.text[: 2 * 1024 * 1024]
-    except httpx.HTTPError:
-        return None
+    """抓页面文本（2MB 截断 + 8s 超时，对齐爬虫 DOWNLOAD_TIMEOUT=8）。
+
+    2026-09-30 修复：加 1 次重试 + 2s 短退避——CDN/握手抖动一次就被标"抓取失败"误伤
+    真实可达率（与 detect 无关的覆盖损失）。
+    """
+    last: Exception | None = None
+    for attempt in range(2):
+        try:
+            r = httpx.get(url, timeout=8, follow_redirects=True,
+                          headers={"User-Agent": _UA})
+            r.raise_for_status()
+            return r.text[: 2 * 1024 * 1024]
+        except httpx.HTTPError as e:
+            last = e
+            if attempt == 0:
+                time.sleep(2)
+    return None
 
 
 def prelabel(csv_path: Path, cache_dir: Path, sleep: float = 0.5,
