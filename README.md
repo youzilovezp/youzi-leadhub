@@ -47,6 +47,28 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python -m pytest tests/        # 73 项全绿
 ```
 
+## 跨机器部署与数据迁移（2026-09-30）
+
+**语义：代码走 git，数据走快照。** 工程不含任何本机绑定——play 渠道代理自动解析
+（`BSP_PROXY` 显式指定 > 本机 7890 探测 > 直连，海外 VPS 直连即可）。
+
+```bash
+# 旧机器：打包（SQLite 一致性快照，API 运行中执行也安全）
+python -m youzi_bsp backup
+# → data/backup-<时间戳>.tar.gz（线索库 + 种子池 + JOBDIR 增量进度 + 金标准标注）
+
+# 新机器：复活全部状态
+git clone <repo> && cd youzi-leadhub
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+python -m youzi_bsp restore --from backup-<时间戳>.tar.gz   # 先停 API/爬取进程
+.venv/bin/uvicorn youzi_bsp.api:app --host 0.0.0.0 --port 8788   # 必须从仓库根目录启动
+```
+
+恢复后增量爬取语义连续（JOBDIR 的 requests.seen 一起迁移，不会全量重爬）。
+前端：`cd frontend && pnpm i && pnpm build`（8788 托管 dist）或 `pnpm dev`（5173 开发态）。
+
+⚠ 注意：恢复是覆盖式；`docs/` 在 .gitignore 里（金标准 CSV 只活在快照与备份中）。
+
 ## 端到端管道（D1–3 完成 / D6+ 待触发）
 
 ```bash

@@ -193,6 +193,21 @@ class SeedsRequest(BaseModel):
     limit: int = Field(default=800, ge=1, le=5000)
 
 
+def _play_proxy() -> str | None:
+    """play 渠道代理解析（跨机器部署，2026-09-30）：
+    BSP_PROXY 显式指定（空串 = 强制直连）> 本机 127.0.0.1:7890 可达则用 >
+    直连。海外 VPS 部署时没有 clash，自动直连——不再硬绑本机代理。"""
+    explicit = os.environ.get("BSP_PROXY")
+    if explicit is not None:
+        return explicit or None
+    import socket
+    try:
+        with socket.create_connection(("127.0.0.1", 7890), timeout=0.3):
+            return "http://127.0.0.1:7890"
+    except OSError:
+        return None
+
+
 def _spawn_seed(channel: str, countries: str, categories: str,
                 limit: int, out_file: str) -> _Job:
     """后台生成种子并 --append 去重追加（Overpass/play node 慢，不阻塞 API）。
@@ -211,10 +226,10 @@ def _spawn_seed(channel: str, countries: str, categories: str,
         cmd += ["--category", categories]
     log_handle = open(log_file, "a", encoding="utf-8")
     # CN 出口直连 Google Play 超时（docs 3.2）：play 的 node 脚本需要
-    # NODE_USE_ENV_PROXY=1 + 本地代理才走 proxy；默认 7890，BSP_PROXY 可覆盖
+    # NODE_USE_ENV_PROXY=1 + 代理才走 proxy。代理来源 _play_proxy()——
+    # 有就用（含本机 clash 探测），没有（海外 VPS）直连
     env = None
-    if channel == "play":
-        proxy = os.environ.get("BSP_PROXY", "http://127.0.0.1:7890")
+    if channel == "play" and (proxy := _play_proxy()):
         env = {**os.environ, "NODE_USE_ENV_PROXY": "1",
                "HTTPS_PROXY": proxy, "HTTP_PROXY": proxy}
     proc = subprocess.Popen(cmd, cwd=str(_CWD), stdout=log_handle,

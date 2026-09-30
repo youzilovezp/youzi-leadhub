@@ -1,7 +1,0 @@
-# 真实站点：预期命中（历史数据里 jotform/who 为 link 层命中）
-https://www.jotform.com
-https://www.who.int
-# 私网地址：预期被 PrivateNetMiddleware 拦截 → error 留痕
-http://127.0.0.1:8788
-# 不存在域名：预期 DNS 失败 → error 留痕
-http://this-domain-does-not-exist-zz9x.example

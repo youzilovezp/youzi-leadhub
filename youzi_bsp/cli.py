@@ -77,6 +77,16 @@ def main(argv=None) -> None:
                              "链接层 P≥98%%、文本层 FP≤5%%）")
     ge.add_argument("--csv", default="docs/golden-set-sample.csv")
 
+    bk = sub.add_parser("backup",
+                        help="打包数据快照（线索库一致性备份 + 种子池 + 增量进度"
+                             "+ 金标准），跨机器迁移用")
+    bk.add_argument("--out", default=None, help="缺省 data/backup-<时间戳>.tar.gz")
+
+    rs = sub.add_parser("restore",
+                        help="从快照恢复数据（覆盖现有文件；先停 API/爬取进程）")
+    rs.add_argument("--from", dest="from_archive", required=True,
+                    help="backup 生成的 tar.gz 路径")
+
     a = p.parse_args(argv)
     data = Path("data")
 
@@ -168,6 +178,18 @@ def main(argv=None) -> None:
     elif a.cmd == "golden-eval":
         from youzi_bsp import golden
         print(golden.report(golden.evaluate(Path(a.csv))))
+
+    elif a.cmd == "backup":
+        from youzi_bsp import backup
+        out = backup.create_backup(Path(a.out) if a.out else None)
+        print(f"快照已生成: {out}\n迁移：拷到新机器 → python -m youzi_bsp "
+              f"restore --from {out.name}")
+
+    elif a.cmd == "restore":
+        from youzi_bsp import backup
+        n = backup.restore_backup(Path(a.from_archive))
+        print(f"已恢复 {n} 个条目（线索库/种子池/增量进度）。"
+              f"重启 API 后即可继续增量爬取。")
 
 
 if __name__ == "__main__":

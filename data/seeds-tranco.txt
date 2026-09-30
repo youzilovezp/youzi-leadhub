@@ -1,5 +1,0 @@
-https://google.com/
-https://cloudflare.com/
-https://facebook.com/
-https://gstatic.com/
-https://googleapis.com/
