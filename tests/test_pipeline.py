@@ -33,6 +33,76 @@ def _run(tmp_path, times=1):
     return db.connect(tmp_path / "leads.db")
 
 
+def test_cross_domain_redirect_seed_host_gets_domain_row(tmp_path):
+    """2026-10-01 修复（幽灵 unseen）：种子域 a.com 301 → 最终域 b.com 时，
+    旧行为只落 b.com 行——a.com 在池里永被 _unseen_estimate 计成未爬（假可爬：
+    spawn 后指纹已被 dupefilter 消费，0 item 空转、点击 0 增量）。
+    修复：种子域与最终实体不同域时补写一行「尝试过」。
+    """
+    pl = WaStorePipeline(db_path=str(tmp_path / "leads.db"))
+    pl.open_spider(None)
+    pl.process_item({"url": "https://b.com/", "html": "<html><body></body></html>",
+                     "channel": "sample", "seed_host": "a.com"}, None)
+    pl.close_spider(None)
+    conn = db.connect(tmp_path / "leads.db")
+    keys = {r[0] for r in conn.execute("SELECT entity_key FROM domain")}
+    assert keys == {"b.com", "a.com"}, f"种子域未落行: {keys}"
+
+
+def test_final_url_unparseable_still_marks_seed_host(tmp_path):
+    """最终 URL 归一失败（畸形/空）也不能让种子域变成幽灵——种子行照落。"""
+    pl = WaStorePipeline(db_path=str(tmp_path / "leads.db"))
+    pl.open_spider(None)
+    pl.process_item({"url": "https://", "html": "",
+                     "channel": "sample", "seed_host": "ghost.com"}, None)
+    pl.close_spider(None)
+    conn = db.connect(tmp_path / "leads.db")
+    keys = {r[0] for r in conn.execute("SELECT entity_key FROM domain")}
+    assert keys == {"ghost.com"}, f"种子域应落行且不落空键: {keys}"
+
+
+def test_connect_sets_busy_timeout(tmp_path):
+    """2026-10-01 修复：多进程并发写 WAL（爬取子进程 × N + API + enrich）无
+    busy_timeout 时锁等待只有 Python 默认——score_pending 长事务持写锁期间其他
+    进程 process_item 抛 "database is locked" → Scrapy 丢 item → 幽灵 unseen。
+    """
+    conn = db.connect(tmp_path / "t.db")
+    assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 15000
+
+
+def test_score_pending_since_cutoff_only_touches_recent(tmp_path):
+    """2026-10-01 修复：score_pending(since=任务起点)——pending 收尾 + 本轮有新
+    sighting 的老实体重算；其余 scored 终态跳过（旧版每轮 close_spider 全库重扫，
+    长事务持锁丢并发 item）。since=None 保持全量语义（import-osm 离线导入用）。
+    """
+    from app.pipelines import score_pending
+    conn = db.connect(tmp_path / "t.db")
+    db.upsert_domain(conn, "old.com", "sample", None)
+    db.upsert_domain(conn, "new.com", "sample", None)
+    db.upsert_domain(conn, "pending-only.com", "sample", None)
+    db.upsert_phone(conn, "+6281234567", "ID")
+    cutoff = "2026-06-01T00:00:00+00:00"
+    db.upsert_sighting(conn, "old.com", "+6281234567", "https://old.com/", "link")
+    conn.execute("UPDATE sighting SET last_seen='2026-01-01T00:00:00+00:00' "
+                 "WHERE entity_key='old.com'")
+    db.upsert_sighting(conn, "new.com", "+6281234567", "https://new.com/", "link")
+    conn.execute("UPDATE domain SET status='scored' "
+                 "WHERE entity_key IN ('old.com','new.com')")
+    conn.commit()
+
+    score_pending(conn, since=cutoff)
+    rows = {r["entity_key"]: dict(r) for r in conn.execute(
+        "SELECT entity_key, market, status FROM domain")}
+    assert rows["old.com"]["market"] is None, "老 sighting 的 scored 实体不重算"
+    assert rows["new.com"]["market"] == "ID", "本轮新 sighting 的 scored 实体重算 market"
+    assert rows["pending-only.com"]["status"] == "scored", "pending 行照常收尾"
+    # since=None 全量语义不变：old.com 也重算出 market
+    score_pending(conn)
+    rows = {r["entity_key"]: dict(r) for r in conn.execute(
+        "SELECT entity_key, market FROM domain")}
+    assert rows["old.com"]["market"] == "ID"
+
+
 def test_counts_and_scoring(tmp_path):
     conn = _run(tmp_path)
     d = conn.execute("SELECT * FROM domain").fetchall()
@@ -345,7 +415,11 @@ def test_p0_hreflang_zh_dual_track_strong():
 
 def test_malformed_url_skipped(tmp_path):
     """HIGH-LOW fix：畸形 URL（空串/无 host/无 scheme）应被 process_item 安全跳过，
-    不应在 domain 表写入空 entity_key。"""
+    不应在 domain 表写入空 entity_key。
+
+    2026-10-01 幽灵 unseen 修复后的新契约：最终 URL 解析失败时**种子域照落一行**
+    （「尝试过」语义——否则种子永被 _unseen_estimate 计成未爬）；空键仍拒。
+    """
     dbp = str(tmp_path / "leads.db")
     pl = WaStorePipeline(db_path=dbp)
     pl.open_spider(None)
@@ -359,8 +433,8 @@ def test_malformed_url_skipped(tmp_path):
     pl.close_spider(None)
 
     conn = db.connect(dbp)
-    n = conn.execute("SELECT COUNT(*) AS c FROM domain").fetchone()["c"]
-    assert n == 0, f"畸形 URL 必须跳过，但 db 写入了 {n} 条（可能含空 entity_key）"
+    keys = [r[0] for r in conn.execute("SELECT entity_key FROM domain")]
+    assert keys == ["x.com"], f"只应落种子域一行（无空键），got {keys}"
 
 
 def test_widget_email_atomic_merge(tmp_path):

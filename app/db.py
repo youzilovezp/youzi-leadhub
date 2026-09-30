@@ -56,6 +56,10 @@ def connect(path: str | Path, *, check_same_thread: bool = True) -> sqlite3.Conn
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    # 2026-10-01 修复：多进程并发写 WAL（爬取子进程 × N + API + enrich）默认锁
+    # 等待仅 5s——score_pending 长事务持写锁期间其他进程直接抛 "database is
+    # locked" 丢 item（喂出幽灵 unseen）。15s 让写者排队而非失败。
+    conn.execute("PRAGMA busy_timeout=15000")
     conn.executescript(SCHEMA)
     _migrate(conn)
     return conn

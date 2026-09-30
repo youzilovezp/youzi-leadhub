@@ -336,6 +336,39 @@ def test_post_crawl_incremental_uses_all_candidate_seeds(monkeypatch, tmp_path):
           and len(seed_file.read_text().split()) == 100)
 
 
+def test_channel_busy_db_fallback_for_restart_orphans(monkeypatch, tmp_path):
+    """2026-10-01 P1 修复：API 重启后内存 _JOBS_RUNNING 清空，孤儿爬取子进程
+    （start_new_session 脱离进程组）仍活着、job 表仍是 running——旧 _channel_busy
+    只扫内存 → 判不忙 → 再 spawn 同 _inc JOBDIR，双进程互毁指纹/队列。
+    修复：内存判不忙后兜底查 job 表 running 行 + pid 活性。
+    """
+    import subprocess
+    import sys
+    from app import db as _dbm
+    (tmp_path / "data").mkdir(exist_ok=True)
+    db_path = tmp_path / "data" / "leads.db"
+    # 真活进程当"孤儿爬取子进程"（本测试进程外、脱离进程组语义）
+    orphan = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    conn = _dbm.connect(db_path)
+    try:
+        _dbm.insert_job(conn, job_id="inc-play", kind="crawl", channel="play",
+                        pid=orphan.pid, started_at=1.0)
+    finally:
+        conn.close()
+    monkeypatch.setattr(crawl_api, "_CWD", tmp_path)
+    try:
+        check("活孤儿 running 行 → busy（DB 兜底拦住重启窗口双爬）",
+              crawl_api._channel_busy("play") is True)
+        check("无 running 行的其他渠道 → 不 busy",
+              crawl_api._channel_busy("osm") is False)
+    finally:
+        orphan.kill()
+        orphan.wait()
+    # 孤儿死后：pid 已死 → 不 busy（该行留给 reaper 的 _reap_lost_jobs 收割）
+    check("孤儿退出后 → 不 busy（不永久卡死渠道）",
+          crawl_api._channel_busy("play") is False)
+
+
 def test_channel_busy_distinguishes_kill_vs_crash(monkeypatch):
     """2026-09-30 修复：_channel_busy 区分 exit code——rc==0（exited）/
     rc<0（killed，被信号）/ rc>0（failed，程序崩溃）。前端 StatusPill 依此显示
@@ -625,6 +658,142 @@ def test_post_crawl_smart_spawns_recrawl(monkeypatch, tmp_path):
     check("re-crawl 用 spawn 中 attempts 最大的渠道（play）",
           full_modes[0][0] == "play" if full_modes else False,
           f"got {full_modes}")
+
+
+def test_post_crawl_smart_all_cooling_falls_back_to_full_recrawl(monkeypatch, tmp_path):
+    """2026-10-01 P0-2 修复：全冷却窗口点击 0 任务假承诺。
+
+    smart 故意选冷却渠道「给恢复机会」（ok or [ranked[0]]），主循环又无条件按
+    冷却 skip → spawned=[] 且 seeded=[]，旧代码 total=0 且无任何后台任务（前端
+    却提示"本批进行中"）。修复：0-spawn 且 0-seed 时兜底走 full 重访——该路径
+    不查冷却、能产首 sighting，保证「点击→必有任务」闭环。
+    """
+    from datetime import datetime, timedelta, timezone
+    (tmp_path / "data").mkdir()
+    seed = tmp_path / "seeds-play.txt"
+    seed.write_text("\n".join(f"https://a{i}.com/" for i in range(300)))
+
+    future = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+    spawned_modes: list[tuple[str, str]] = []
+
+    def fake_spawn(channel, *a, **kw):
+        mode = a[4] if len(a) > 4 else kw.get("mode", "incremental")
+        spawned_modes.append((channel, mode))
+        return crawl_api._Job(job_id=f"{mode}-{channel}", channel=channel, pid=1,
+                              started_at=0.0, status="running")  # type: ignore[arg-type]
+
+    monkeypatch.setattr(crawl_api, "_CWD", tmp_path)
+    monkeypatch.setattr(crawl_api, "_seed_candidates",
+                        lambda ch: [seed] if ch == "play" else [])
+    monkeypatch.setattr(crawl_api, "_smart_expand_scene", lambda seed_channels: [])
+    monkeypatch.setattr(crawl_api, "_unseen_estimate", lambda ch: 50000)
+    monkeypatch.setattr(crawl_api, "_spawn", fake_spawn)
+    # 主循环冷却判定与 _pick_recrawl_target 共用：attempts 100（≥50 可重访）
+    # + backoff_until 未来 5 分钟（主循环 skip 的根因）
+    monkeypatch.setattr(crawl_api._db, "get_crawl_stats",
+                        lambda conn, ch: {"attempts": 100, "hits": 20,
+                                          "backoff_until": future})
+
+    r = crawl_api.post_crawl(crawl_api.CrawlRequest(channels=["play"], mode="smart"))
+    check("全冷却窗口 smart 兜底 full 重访（不再 0 任务）",
+          ("play", "full") in spawned_modes, f"got {spawned_modes}")
+    check("响应 total ≥ 1", r["total"] >= 1, f"got {r['total']}")
+    # 主循环的冷却 skip 仍要生效（不允许 incremental 走 _inc JOBDIR 硬闯冷却）
+    check("冷却渠道不被 incremental 硬爬",
+          ("play", "incremental") not in spawned_modes, f"got {spawned_modes}")
+
+
+def test_post_crawl_smart_recrawl_uses_ranked_seed(monkeypatch, tmp_path):
+    """2026-10-01 修复：smart「必重访」吃原始种子文件前 N 行（每次同一批 URL
+    反复重访）→ 改走 L1 排序（高历史产出优先），文件=.seed-ranked-<ch>.txt。"""
+    from app import db as _dbm
+    (tmp_path / "data").mkdir()
+    seed = tmp_path / "seeds-play.txt"
+    seed.write_text("\n".join(f"https://a{i}.com/" for i in range(500)))
+
+    conn = _dbm.connect(tmp_path / "data" / "leads.db")
+    try:
+        # a499.com 历史高分 → 排序后应排重访名单最前
+        _dbm.upsert_domain(conn, "a499.com", "play", None)
+        conn.execute("UPDATE domain SET score=10 WHERE entity_key='a499.com'")
+        conn.commit()
+    finally:
+        conn.close()
+
+    def fake_spawn(channel, *a, **kw):
+        mode = a[4] if len(a) > 4 else kw.get("mode", "incremental")
+        return crawl_api._Job(job_id=f"{mode}-{channel}", channel=channel, pid=1,
+                              started_at=0.0, status="running")  # type: ignore[arg-type]
+
+    monkeypatch.setattr(crawl_api, "_CWD", tmp_path)
+    monkeypatch.setattr(crawl_api, "_seed_candidates",
+                        lambda ch: [seed] if ch == "play" else [])
+    monkeypatch.setattr(crawl_api, "_smart_expand_scene", lambda seed_channels: [])
+    monkeypatch.setattr(crawl_api, "_unseen_estimate", lambda ch: 50000)
+    monkeypatch.setattr(crawl_api._db, "get_crawl_stats",
+                        lambda conn, ch: {"attempts": 100, "hits": 20})
+    monkeypatch.setattr(crawl_api, "_spawn", fake_spawn)
+
+    crawl_api.post_crawl(crawl_api.CrawlRequest(channels=["play"], mode="smart"))
+    ranked = tmp_path / "data" / ".seed-ranked-play.txt"
+    check("重访走排序文件", ranked.exists(), "文件未生成")
+    urls = ranked.read_text().split()
+    # incremental(limit=500) 先写、full 重访(limit=100) 后写覆盖 → 100 行
+    check("重访名单截断到 rc_limit=100", len(urls) == 100, f"got {len(urls)}")
+    check("高历史产出域排最前", urls[0] == "https://a499.com/", f"got {urls[0]}")
+
+
+def test_post_crawl_smart_recrawl_time_gate(monkeypatch, tmp_path):
+    """2026-10-01 修复：smart 每次点击都 full 重访（无频控）→ 6h 时间闸。
+    6h 内有 full 重访记录 → 不再重访；超过 6h → 放行。"""
+    import time as _time
+    from app import db as _dbm
+    (tmp_path / "data").mkdir()
+    seed = tmp_path / "seeds-play.txt"
+    seed.write_text("\n".join(f"https://a{i}.com/" for i in range(500)))
+
+    def _mark_full_finished(hours_ago: float):
+        conn = _dbm.connect(tmp_path / "data" / "leads.db")
+        try:
+            _dbm.insert_job(conn, job_id="full-play-x", kind="crawl", channel="play",
+                            pid=999, started_at=1.0)
+            _dbm.finish_job(conn, "full-play-x", "exited", 0)
+            conn.execute("UPDATE job SET finished_at=? WHERE job_id='full-play-x'",
+                         (_time.time() - hours_ago * 3600,))
+            conn.commit()
+        finally:
+            conn.close()
+
+    spawned_modes: list[tuple[str, str]] = []
+
+    def fake_spawn(channel, *a, **kw):
+        mode = a[4] if len(a) > 4 else kw.get("mode", "incremental")
+        spawned_modes.append((channel, mode))
+        return crawl_api._Job(job_id=f"{mode}-{channel}", channel=channel, pid=1,
+                              started_at=0.0, status="running")  # type: ignore[arg-type]
+
+    monkeypatch.setattr(crawl_api, "_CWD", tmp_path)
+    monkeypatch.setattr(crawl_api, "_seed_candidates",
+                        lambda ch: [seed] if ch == "play" else [])
+    monkeypatch.setattr(crawl_api, "_smart_expand_scene", lambda seed_channels: [])
+    monkeypatch.setattr(crawl_api, "_unseen_estimate", lambda ch: 50000)
+    monkeypatch.setattr(crawl_api._db, "get_crawl_stats",
+                        lambda conn, ch: {"attempts": 100, "hits": 20})
+    monkeypatch.setattr(crawl_api, "_spawn", fake_spawn)
+
+    _mark_full_finished(1)   # 1h 前刚 full 重访过
+    crawl_api.post_crawl(crawl_api.CrawlRequest(channels=["play"], mode="smart"))
+    check("6h 内不重复 full 重访",
+          ("play", "full") not in spawned_modes, f"got {spawned_modes}")
+    check("incremental 照常（闸只挡重访）",
+          ("play", "incremental") in spawned_modes, f"got {spawned_modes}")
+
+    spawned_modes.clear()
+    crawl_api._JOBS_RUNNING.clear()
+    _mark_full_finished(7)   # 覆盖同一 job_id 行，改为 7h 前
+    crawl_api.post_crawl(crawl_api.CrawlRequest(channels=["play"], mode="smart"))
+    check("超过 6h 放行 full 重访",
+          ("play", "full") in spawned_modes, f"got {spawned_modes}")
 
 
 def test_post_crawl_smart_no_recrawl_when_attempts_low(monkeypatch, tmp_path):

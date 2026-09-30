@@ -188,8 +188,15 @@ def _seed_count(path: Path) -> int:
 
 
 def _channel_busy(channel: str) -> bool:
-    """该渠道是否仍有活着的 job（先收割已退出进程的真实状态再判）。"""
-    for j in _JOBS_RUNNING.values():
+    """该渠道是否仍有活着的 job（先收割已退出进程的真实状态再判）。
+
+    2026-10-01 修复（重启窗口双爬）：内存判不忙后兜底查 job 表——API 重启后
+    _JOBS_RUNNING 清空，但孤儿爬取子进程（start_new_session 脱离进程组）仍活
+    且 DB 行仍 running。不兜底会再 spawn 同 _inc JOBDIR，双进程互毁指纹/队列
+    （正是 _BUSY_LOCK 注释要防的事故）。pid 已死的行不挡（留给 reaper 收割）。
+    """
+    import os as _os
+    for j in list(_JOBS_RUNNING.values()):   # 拷贝：reaper 并发插入防 dict 变更异常
         if j.channel != channel:
             continue
         if j.proc is not None:
@@ -198,6 +205,26 @@ def _channel_busy(channel: str) -> bool:
                 _finalize(j, rc)   # POSIX: rc<0 = 信号杀死；0 正常；>0 崩溃
                 continue
         if j.status in ("created", "running"):
+            return True
+    try:
+        conn = _db.connect(str(_CWD / "data" / "leads.db"))
+        try:
+            rows = conn.execute(
+                "SELECT job_id, pid FROM job WHERE status='running' AND channel=?",
+                (channel,)).fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        return False
+    for r in rows:
+        if r["job_id"] in _JOBS_RUNNING:
+            continue               # 有内存句柄的已由上面处理过
+        try:
+            _os.kill(r["pid"], 0)
+            return True            # 活孤儿进程仍占着该渠道
+        except (ProcessLookupError, TypeError):
+            continue               # pid 已死 → 不挡，_reap_lost_jobs 会收割
+        except PermissionError:
             return True
     return False
 
@@ -566,21 +593,75 @@ def post_seeds(req: SeedsRequest):
 _SMART_ROTATION = _CWD / "data" / ".smart-rotation"
 
 
-def _pick_recrawl_target(spawned: list[JobInfo]) -> str | None:
+# smart「必重访」最小间隔：同渠道 6h 内不重复 full 重访（防每次点击反复重访
+# 同一批 URL——attempts/errors 膨胀人为压低 hit_rate，ROI 信号自毁）
+RECRAWL_MIN_INTERVAL_S = 6 * 3600
+
+
+def _full_recrawl_due(channel: str) -> bool:
+    """距上次 full 重访 ≥ RECRAWL_MIN_INTERVAL_S（job 表真值；无记录=到期）。"""
+    try:
+        conn = _db.connect(str(_CWD / "data" / "leads.db"))
+        try:
+            row = conn.execute(
+                "SELECT MAX(finished_at) AS t FROM job "
+                "WHERE kind='crawl' AND channel=? AND job_id LIKE 'full-%'",
+                (channel,)).fetchone()
+        finally:
+            conn.close()
+    except Exception:
+        return True
+    if not row or row["t"] is None:
+        return True
+    return (time.time() - float(row["t"])) >= RECRAWL_MIN_INTERVAL_S
+
+
+def _write_ranked_seed(ch: str, cands: list[Path], limit: int) -> str:
+    """读全部候选种子文件 → L1 历史产出排序 → 覆盖写 .seed-ranked-<ch>.txt。
+
+    固定文件名：同渠道并发已被 409 守卫挡住，覆盖写不互踩且不堆积临时文件。
+    2026-10-01：smart「必重访」复用同一排序——旧实现重访吃原始种子文件前 N 行，
+    每次都是同一批 URL，新挂 wa.me 的高产域永远轮不到。
+    """
+    all_urls: list[str] = []
+    for cand in cands:
+        with open(cand, encoding="utf-8") as fh:
+            for line in fh:
+                raw = line.strip()
+                if not raw or raw.startswith("#"):
+                    continue
+                url_part = raw.split("\t", 1)[0]
+                u = normalize_url(url_part if "://" in url_part
+                                  else f"https://{url_part}")
+                if u:
+                    all_urls.append(u)
+    rank_conn = _db.connect(str(_CWD / "data" / "leads.db"))
+    try:
+        ranked = _sc.rank_seeds_by_yield(rank_conn, all_urls)
+    finally:
+        rank_conn.close()
+    out = _CWD / "data" / f".seed-ranked-{ch}.txt"
+    with open(out, "w", encoding="utf-8") as fh:
+        fh.writelines(u + "\n" for u in ranked[:limit])
+    return str(out)
+
+
+def _pick_recrawl_target(channels: list[str]) -> str | None:
     """2026-10-01：smart 模式「必重访」选 channel。
 
-    选刚 spawn 的渠道里 attempts 最大的（已知实体最多 → 重访找到新挂 wa.me
-    的概率最高）。如果没有 spawned，返回 None。
+    选候选渠道里 attempts 最大的（已知实体最多 → 重访找到新挂 wa.me 的概率
+    最高）；attempts < 50（渠道刚起步）返回 None。
+    候选 = 本次 spawn 的渠道；0-spawn 且 0-seed 时 = free 渠道（全冷却窗口
+    兜底——主循环把冷却渠道 skip 光时，full 重访是「点击→必有任务」的最后出口）。
     """
-    if not spawned:
+    if not channels:
         return None
     from app import db as _db
     conn = _db.connect(str(_CWD / "data" / "leads.db"))
     try:
         best_ch = None
         best_attempts = -1
-        for j in spawned:
-            ch = j.channel
+        for ch in channels:
             stats = _db.get_crawl_stats(conn, ch) or {}
             attempts = stats.get("attempts", 0) or 0
             if attempts > best_attempts:
@@ -685,6 +766,7 @@ def post_crawl(req: CrawlRequest):
     channels = list(dict.fromkeys(
         req.channels or [c for c in ALL_CHANNELS if c != "sample"]))
     seeded: list[JobInfo] = []   # smart 模式：本次触发的补种任务（响应回传数量）
+    free: list[str] = []         # smart 预决策的空闲渠道（下方 recrawl 兜底复用）
 
     # 校验
     invalid = [c for c in channels if c not in ALL_CHANNELS]
@@ -771,50 +853,17 @@ def post_crawl(req: CrawlRequest):
             # 选最大文件作 fallback（Scrapy 内部 dupefilter 共享 JOBDIR——重复 URL 跨文件自动跳过）
             seed_path = max(candidates, key=lambda p: p.stat().st_size)
             # 2026-09-30 L1 per-seed scoring：按历史 yield_score 排序，高分优先爬
-            # 同 crawl budget 下优先验证「已知有钱」的域——这能让销售更快看到新 WA。
-            # 2026-09-30 修复②：读**全部**候选文件（旧代码只读最大文件——第二候选的
-            # URL 在增量模式从未被喂给爬虫，与 limit 汇总所有候选的意图相反）
-            try:
-                all_urls = []
-                for cand in candidates:
-                    with open(cand, encoding="utf-8") as fh:
-                        for line in fh:
-                            raw = line.strip()
-                            if not raw or raw.startswith("#"):
-                                continue
-                            # tab 分隔 URL<TAB>dev_name（dev_name 忽略）
-                            url_part = raw.split("\t", 1)[0]
-                            if "://" in url_part:
-                                u = normalize_url(url_part)
-                            else:
-                                u = normalize_url(f"https://{url_part}")
-                            if u:
-                                all_urls.append(u)
-                with _db.connect(str(_CWD / "data" / "leads.db")) as rank_conn:
-                    ranked_urls = _sc.rank_seeds_by_yield(rank_conn, all_urls)
-                # 用排序后的 URL 写临时文件（避免覆盖原 seed 文件）
-                if req.mode in ("incremental", "smart"):
-                    limit = sum(_seed_count(c) for c in candidates)
-                else:
-                    limit = req.limit
-                ranked_urls = ranked_urls[:limit]
-                # 2026-09-30 修复：旧代码这里写 {channel}（未定义）→ 每次 NameError 静默
-                # 回退未排序种子文件，L1 按历史产出排序从未生效。
-                # 固定文件名（非时间戳）：同渠道并发已被 409 守卫挡住，覆盖写不会
-                # 互踩，且避免每次爬取堆积一个临时文件
-                ranked_seed_file = _CWD / "data" / f".seed-ranked-{ch}.txt"
-                with open(ranked_seed_file, "w", encoding="utf-8") as out:
-                    for u in ranked_urls:
-                        out.write(u + "\n")
-                seed_file = str(ranked_seed_file)
-            except Exception:
-                # 排序失败 → fallback 到原文件
-                seed_file = str(seed_path)
+            # 同 crawl budget 下优先验证「已知有钱」的域。读全部候选文件（增量
+            # 模式 limit=全部候选行数之和，已被爬过的交给 dupefilter 跳过）。
             if req.mode in ("incremental", "smart"):
-                # 全量交给 dupefilter：所有候选文件总行数（已被爬过的会被 dupefilter 跳过）
                 limit = sum(_seed_count(c) for c in candidates)
             else:
                 limit = req.limit
+            try:
+                seed_file = _write_ranked_seed(ch, candidates, limit)
+            except Exception:
+                # 排序失败 → fallback 到原文件
+                seed_file = str(seed_path)
             target = _pick_seed(ch) or f"data/seeds-{ch}.txt"
             # 2026-09-30 L3 per-channel AutoThrottle：按 ROI 动态设并发/延迟
             # 高命中快爬、低命中慢爬（保守用预算）
@@ -833,12 +882,18 @@ def post_crawl(req: CrawlRequest):
         # 重爬一次已知实体，找"上次爬时漏掉 / 之后新加"的 wa.me 链接。
         # 限制 200 URL（够覆盖常见 WA 高产域，避免长跑）。
         if req.mode == "smart":
-            recrawl_ch = _pick_recrawl_target(spawned)
-            if recrawl_ch is not None:
+            # 2026-10-01 P0-2 修复：候选优先取本次 spawn 的渠道；0-spawn 且 0-seed
+            #（典型=全冷却窗口被主循环 skip 光）→ 兜底用 free 渠道。full 重访不查
+            # 冷却且用独立 JOBDIR——这是「点击→必有任务」闭环的最后出口。
+            recrawl_candidates = ([j.channel for j in spawned]
+                                  if spawned else ([] if seeded else free))
+            recrawl_ch = _pick_recrawl_target(recrawl_candidates)
+            # 2026-10-01 时间闸：同渠道 6h 内不重复 full 重访（旧实现每次点击都
+            # 重访同一批 200 URL——attempts 膨胀自毁 ROI 信号 + JOBDIR 无限堆积）
+            if recrawl_ch is not None and _full_recrawl_due(recrawl_ch):
                 rc = recrawl_ch
                 rc_cands = _seed_candidates(rc)
                 if rc_cands:
-                    rc_seed_path = max(rc_cands, key=lambda p: p.stat().st_size)
                     rc_pool = sum(_seed_count(c) for c in rc_cands)
                     rc_limit = min(200, max(50, rc_pool // 5))
                     rc_conn = _db.connect(str(_CWD / "data" / "leads.db"))
@@ -847,7 +902,14 @@ def post_crawl(req: CrawlRequest):
                     finally:
                         rc_conn.close()
                     rc_throttle = _sc.compute_throttle(rc, rc_stats)
-                    rc_job = _spawn(rc, str(rc_seed_path), rc_limit, 2, db_path,
+                    # 2026-10-01：重访也走 L1 排序（旧实现吃原始文件前 N 行，
+                    # 每次同一批 URL——新挂 wa.me 的高产域永远轮不到）
+                    try:
+                        rc_seed_file = _write_ranked_seed(rc, rc_cands, rc_limit)
+                    except Exception:
+                        rc_seed_file = str(max(rc_cands,
+                                               key=lambda p: p.stat().st_size))
+                    rc_job = _spawn(rc, rc_seed_file, rc_limit, 2, db_path,
                                     "full", throttle=rc_throttle)
                     spawned.append(JobInfo(
                         job_id=rc_job.job_id, channel=rc, pid=rc_job.pid,

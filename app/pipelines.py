@@ -66,8 +66,13 @@ def _atomic_merge_csv(conn, table: str, key: str, new_values: set[str],
         raise
 
 
-def score_pending(conn: sqlite3.Connection) -> None:
+def score_pending(conn: sqlite3.Connection, since: str | None = None) -> None:
     """DB 派生打分：pending/scored（含历史遗留 pending）统一重算，幂等。
+
+    since（ISO 时间戳）= 本次爬取任务起点：额外纳入 last_seen ≥ since 的实体
+    （本轮重访拿到新号码的老实体要重算 market/score），其余 scored 终态跳过
+    ——旧版每轮 close_spider 全库重扫，长事务持写锁期间并发进程丢 item
+    （2026-10-01 修复）。since=None 保持全量语义（import-osm 离线导入用）。
 
     close_spider 与 import-osm 共用（2026-09-28 P1 修复）：导入渠道不再自行算分
     ——旧路径用 {"lang": None} 空 flags 直接 UPDATE，会把已爬取域持久化的
@@ -78,12 +83,20 @@ def score_pending(conn: sqlite3.Connection) -> None:
             """SELECT s.entity_key, p.country FROM sighting s
                JOIN phone p ON p.e164 = s.e164"""):
         countries.setdefault(entity, []).append(country)
+    sql = """SELECT entity_key, lang, icp, hreflang_zh, title_zh, gambling,
+                    widget, developer_name
+             FROM domain WHERE status IN ('pending', 'scored')"""
+    params: tuple = ()
+    if since is not None:
+        # pending 照常收尾；scored 仅在本轮拿到新 sighting（last_seen ≥ since）时重算
+        sql = """SELECT entity_key, lang, icp, hreflang_zh, title_zh, gambling,
+                        widget, developer_name
+                 FROM domain WHERE status='pending'
+                    OR (status='scored' AND entity_key IN
+                        (SELECT entity_key FROM sighting WHERE last_seen >= ?))"""
+        params = (since,)
     # 先物化再写：SELECT 游标扫描期间 UPDATE 同表属未定义行为（可能跳行）
-    for d in conn.execute(
-            """SELECT entity_key, lang, icp, hreflang_zh, title_zh, gambling,
-                      widget, developer_name
-               FROM domain WHERE status IN ('pending', 'scored')"""
-    ).fetchall():
+    for d in conn.execute(sql, params).fetchall():
         widget = d["widget"] or ""
         fl = {"lang": d["lang"], "icp": d["icp"],
               "hreflang_zh": d["hreflang_zh"], "title_zh": d["title_zh"],
@@ -113,20 +126,32 @@ class WaStorePipeline:
 
     def open_spider(self, spider):
         self.conn = db.connect(self.db_path)
+        # 任务起点：close_spider 只重算 pending + 本轮有新 sighting 的实体
+        self._t0 = db.now()
 
     def process_item(self, item, spider):
         url = normalize_url(item["url"])
-        # 空 / 畸形 URL 直接跳过——entity_key("") 会写入空键污染 DB（G1/G2 bug）
-        if not url:
-            return item
-        host = (urlsplit(url).hostname or "").lower()
-        key = entity_key(host)
-        if not key:                               # 主机名解析失败也跳过
-            return item
+        host = (urlsplit(url).hostname or "").lower() if url else ""
+        key = entity_key(host) if host else ""
         # developer_name 来自种子渠道（play = 开发者主体名；spec 3.5 P0 第 1 强信号）
         dev_name = (item.get("developer_name")
                      or (spider._dev_names.get(url, "") if spider else "")
                      or "").strip() or None
+        # 2026-10-01 修复（幽灵 unseen）：种子域与最终域不同（跨域重定向）或最终
+        # URL 解析失败时，种子域也要落一行「尝试过」——否则 _unseen_estimate 永远
+        # 把它计成未爬（假可爬：指纹已被 dupefilter 消费，spawn 后 0 item 空转）。
+        seed_host = (item.get("seed_host") or "").strip().lower()
+        seed_key = ""
+        if seed_host:
+            sh = urlsplit(seed_host if "://" in seed_host
+                          else f"https://{seed_host}").hostname or seed_host
+            seed_key = entity_key(sh) if sh else ""
+        if seed_key and seed_key != key:
+            db.upsert_domain(self.conn, seed_key, item.get("channel", "sample"),
+                             None, dev_name)
+        # 空 / 畸形 URL 直接跳过——entity_key("") 会写入空键污染 DB（G1/G2 bug）
+        if not url or not key:                    # 主机名解析失败也跳过
+            return item
         db.upsert_domain(self.conn, key, item.get("channel", "sample"),
                          item.get("seed_host"), dev_name)
 
@@ -208,7 +233,8 @@ class WaStorePipeline:
 
     def close_spider(self, spider):
         """打分完全由 DB 派生（score_pending）：幂等；error 行不碰——失败留痕
-        不能被收尾打分覆盖。"""
-        score_pending(self.conn)
+        不能被收尾打分覆盖。since=任务起点：老 scored 实体除非本轮拿到新
+        sighting 否则不重算（防全库长事务持锁）。"""
+        score_pending(self.conn, since=getattr(self, "_t0", None))
         self.conn.commit()
         self.conn.close()
