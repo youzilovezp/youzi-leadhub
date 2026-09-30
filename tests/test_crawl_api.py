@@ -483,3 +483,44 @@ def test_post_crawl_smart_all_busy_idempotent_200(monkeypatch):
     out = crawl_api.post_crawl(crawl_api.CrawlRequest(mode="smart"))
     assert out["total"] == 0 and out["spawned"] == []
     assert len(out["skipped"]) == 3 and "进行中" in out["hint"]
+
+
+def test_post_crawl_smart_starved_seeds_crawlable_crawls(monkeypatch, tmp_path):
+    """2026-09-30 审计：smart 模式增量闭环决策。
+
+    池尽渠道（unseen 估计 < 100）→ 转补种不空爬；池未尽渠道 → 照爬；
+    请求内渠道去重（["play","play"] 不允许同 JOBDIR 双 spawn）。
+    """
+    from app import crawl_api
+    (tmp_path / "data").mkdir()
+    seed = tmp_path / "seeds-play.txt"
+    seed.write_text("https://a1.com/\nhttps://a2.com/\n")
+
+    expand_calls: list[set] = []
+    crawl_calls: list[str] = []
+
+    def fake_expand(seed_channels):
+        expand_calls.append(set(seed_channels))
+        return [crawl_api.JobInfo(job_id="seed-osm-x", channel="osm", pid=2,
+                                  started_at=0.0, status="running")]  # type: ignore[arg-type]
+
+    def fake_spawn(channel, *a, **kw):
+        crawl_calls.append(channel)
+        return crawl_api._Job(job_id=f"inc-{channel}", channel=channel, pid=1,
+                              started_at=0.0, status="running")  # type: ignore[arg-type]
+
+    monkeypatch.setattr(crawl_api, "_CWD", tmp_path)
+    monkeypatch.setattr(crawl_api, "_unseen_estimate",
+                        lambda ch: 5 if ch == "osm" else 500)
+    monkeypatch.setattr(crawl_api, "_smart_expand_scene", fake_expand)
+    monkeypatch.setattr(crawl_api, "_spawn", fake_spawn)
+    monkeypatch.setattr(crawl_api, "_seed_candidates",
+                        lambda ch: [seed] if ch == "play" else [])
+
+    r = crawl_api.post_crawl(crawl_api.CrawlRequest(
+        channels=["play", "play", "osm"], mode="smart"))
+
+    check("池尽渠道 osm → 转补种", expand_calls == [{"osm"}], f"got {expand_calls}")
+    check("池未尽渠道 play → 爬取且去重（play 传了两次只爬一次）",
+          crawl_calls == ["play"], f"got {crawl_calls}")
+    check("响应回传补种数 seeded=1", r.get("seeded") == 1, f"got {r.get('seeded')}")
