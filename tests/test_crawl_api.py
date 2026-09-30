@@ -573,6 +573,32 @@ def test_smart_expand_scene_backoff_on_seed_streak(tmp_path, monkeypatch):
     assert "myshopify" in spawn_calls
 
 
+def test_seed_backoff_ttl_recovers(tmp_path, monkeypatch):
+    """2026-10-01 修复：补种 streak 剔除加 30min TTL——旧逻辑 streak≥2 永久
+    静默剔除（Overpass 间歇故障后渠道永不自愈，无 skipped 解释）。"""
+    import time as _t
+    from app import db as _dbm
+    (tmp_path / "data").mkdir(exist_ok=True)
+    conn = _dbm.connect(tmp_path / "data" / "leads.db")
+    try:
+        for i in range(2):
+            _dbm.insert_job(conn, job_id=f"seed-osm-{i}", kind="seed",
+                            channel="osm", pid=20 + i, started_at=200.0 + i)
+            _dbm.finish_job(conn, f"seed-osm-{i}", "failed", 1)
+    finally:
+        conn.close()
+    monkeypatch.setattr(crawl_api, "_CWD", tmp_path)
+    check("刚失败 streak=2 → 退避中", crawl_api._seed_backing_off("osm", {"osm": 2}) is True)
+    conn = _dbm.connect(tmp_path / "data" / "leads.db")
+    conn.execute("UPDATE job SET finished_at=? WHERE kind='seed'",
+                 (_t.time() - 31 * 60,))
+    conn.commit()
+    conn.close()
+    check("31min 前失败 → 放行重试（TTL 自愈）",
+          crawl_api._seed_backing_off("osm", {"osm": 2}) is False)
+    check("streak<2 → 不退避", crawl_api._seed_backing_off("osm", {"osm": 1}) is False)
+
+
 def test_post_crawl_smart_all_busy_idempotent_200(monkeypatch):
     """Q14 幂等合并：smart 全忙 → 200 + hint（点正在跑的批次不是错误）。"""
     crawl_api._JOBS_RUNNING["inc-play"] = _fake_job("play")

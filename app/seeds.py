@@ -330,15 +330,36 @@ _ID_BBOXES = [(-6.0, 95.0, 6.0, 106.0),      # 苏门答腊
 
 
 def osm(countries: str, limit: int, out: Path) -> Path:
-    """OSM Overpass 渠道：本地商家（shop/餐饮/咖啡馆）带 website 标签 → 种子。
+    """OSM Overpass 渠道：本地商家（shop/餐饮/咖啡馆/住宿/药房…）带 website 标签 → 种子。
 
     leadhub 遗产复活：曾产出 1208 线索 / 72 条 wa.me 的被砍通道（leadhub 诊断
     R1——唯一规模验证过的路线）。OSM 商家天然是"本地 SMB 挂 WA 迎客"人群。
     countries: ISO3166-1 代码逗号分隔（MY,TH,PH,ID…）；limit 为总目标数（按国均摊）。
+
+    2026-10-01 燃料扩容：①amenity 联合 +hotel/guest_house/pharmacy/fuel/bakery/
+    hairdresser/car_repair（WA 重度 SMB 垂直；`out tags N` 无分页，同参重查只回
+    同一批头部——扩联合是同参提产的唯一免费手段）；②host 级去重（实测 96 URL
+    仅 68 独立 host，familymart/kfc 连锁同 host 十几条霸位）。
+    # ponytail: 同参新鲜度天花板仍在头部 N 条——突破需 bbox 细分轮换，渠道再加码时做
     """
+    from app.normalize import entity_key
+
     codes = [c.strip().upper() for c in countries.split(",") if c.strip()]
     per = max(limit // max(len(codes), 1), 50)
     urls: list[str] = []
+    seen_hosts: set[str] = set()
+
+    def _add(ws: list[str]) -> None:
+        for w in ws:
+            host = (urlsplit(w).hostname or "").lower()
+            key = entity_key(host) if host else ""
+            if not key or key in seen_hosts:
+                continue
+            seen_hosts.add(key)
+            urls.append(w)
+
+    _AMENITY = ("restaurant|cafe|fast_food|hotel|guest_house|pharmacy|fuel|"
+                "bakery|hairdresser|car_repair")
     for code in codes:
         # ["website"] 标签存在性过滤：只取有官网的商家（实测无过滤时仅 ~18% 带 website）
         # 印尼走 bbox 分片（area 查询必 504），片间均摊配额
@@ -346,15 +367,15 @@ def osm(countries: str, limit: int, out: Path) -> Path:
             for bbox in _ID_BBOXES:
                 q = (f'[out:json][timeout:180];'
                      f'(nwr["shop"]["website"]{bbox};'
-                     f'nwr["amenity"~"^(restaurant|cafe|fast_food)$"]["website"]{bbox};);'
+                     f'nwr["amenity"~"^({_AMENITY})$"]["website"]{bbox};);'
                      f'out tags {max(per // len(_ID_BBOXES), 50)};')
-                urls.extend(_osm_query(q))
+                _add(_osm_query(q))
         else:
             q = (f'[out:json][timeout:180];area["ISO3166-1"="{code}"]->.a;'
                  f'(nwr["shop"]["website"](area.a);'
-                 f'nwr["amenity"~"^(restaurant|cafe|fast_food)$"]["website"](area.a););'
+                 f'nwr["amenity"~"^({_AMENITY})$"]["website"](area.a););'
                  f'out tags {per};')
-            urls.extend(_osm_query(q))
+            _add(_osm_query(q))
     return _write(out, urls)
 
 

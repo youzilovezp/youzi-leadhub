@@ -745,6 +745,37 @@ class TestSeedsBoundary:
             "https://shop.example.com/\tShopA Pte Ltd",   # 同 host 只留第一条
         ], lines
 
+    def test_seeds_osm_host_dedup_and_amenity_expansion(self):
+        """2026-10-01 修复：①osm 种子 host 级去重（实测 96 URL 仅 68 独立 host，
+        familymart/kfc 连锁同 host 十几条霸位）；②amenity 联合扩容（+hotel/
+        pharmacy 等 WA 重度 SMB 垂直——`out tags N` 无分页，扩联合是同参提产
+        的唯一免费手段）。"""
+        from unittest.mock import patch
+        from app.seeds import osm
+
+        captured = []
+
+        def fake_overpass(q):
+            captured.append(q)
+            return {"elements": [
+                {"tags": {"website": "https://www.familymart.com.sg/"}},
+                {"tags": {"website": "https://familymart.com.sg/stores"}},
+                {"tags": {"website": "https://warung-budi.example.id/"}},
+                {"tags": {"website": "not-a-url"}},
+            ]}
+
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "seeds-osm.txt"
+            with patch("app.seeds.overpass_post", side_effect=fake_overpass):
+                osm("SG", 100, out)
+            lines = out.read_text(encoding="utf-8").splitlines()
+
+        assert lines == ["https://www.familymart.com.sg/",
+                         "https://warung-budi.example.id/"], lines
+        assert "hotel" in captured[0] and "pharmacy" in captured[0], \
+            "amenity 联合未扩容"
+
     def test_seeds_tranco_no_retry_on_failure(self):
         """seeds.tranco 无重试 —— 网络抖动就死"""
         # 当前：httpx.get(...).raise_for_status() → 网络错就抛

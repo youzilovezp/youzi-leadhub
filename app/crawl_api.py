@@ -679,6 +679,31 @@ def _pick_recrawl_target(channels: list[str]) -> str | None:
         conn.close()
 
 
+# 补种退避 TTL：streak≥2 且最近一次失败在 30min 内才剔除——过 TTL 自动放行
+# 重试（旧逻辑永久静默剔除：Overpass 间歇故障后渠道永不自愈，也无 skipped 解释）
+_SEED_BACKOFF_TTL_S = 30 * 60
+
+
+def _seed_backing_off(channel: str, streaks: dict[str, int]) -> bool:
+    """该渠道补种是否处于失败退避中（streak 门槛 + 时间窗双条件）。"""
+    if streaks.get(channel, 0) < 2:
+        return False
+    try:
+        conn = _db.connect(str(_CWD / "data" / "leads.db"))
+        try:
+            row = conn.execute(
+                "SELECT MAX(finished_at) AS t FROM job "
+                "WHERE kind='seed' AND channel=? AND status='failed'",
+                (channel,)).fetchone()
+        finally:
+            conn.close()
+    except Exception:
+        return False
+    if not row or row["t"] is None:
+        return False
+    return (time.time() - float(row["t"])) < _SEED_BACKOFF_TTL_S
+
+
 def _smart_expand_scene(seed_channels: set[str]) -> list[JobInfo]:
     """smart 模式自带的「挖新人群」：给**池尽**渠道补种。
 
@@ -695,7 +720,8 @@ def _smart_expand_scene(seed_channels: set[str]) -> list[JobInfo]:
     if any(j.job_id.startswith("seed-") and j.status in ("created", "running")
            for j in list(_JOBS_RUNNING.values())):
         return []
-    # 失败 streak 过滤：避免在已经证明坏掉的渠道上无限 spawn
+    # 失败 streak 过滤（2026-10-01 加 TTL）：连续失败 ≥2 且最近一次失败在
+    # 30min 内才剔除——过 TTL 放行重试，渠道不再被永久静默剔除
     try:
         conn = _db.connect(str(_CWD / "data" / "leads.db"))
         try:
@@ -704,7 +730,8 @@ def _smart_expand_scene(seed_channels: set[str]) -> list[JobInfo]:
             conn.close()
     except Exception:
         fail_streaks = {}
-    seed_channels = {c for c in seed_channels if fail_streaks.get(c, 0) < 2}
+    seed_channels = {c for c in seed_channels
+                     if not _seed_backing_off(c, fail_streaks)}
     if not seed_channels:
         return []
     from app.seeds_scenes import SCENES
@@ -776,6 +803,7 @@ def post_crawl(req: CrawlRequest):
         req.channels or [c for c in ALL_CHANNELS if c != "sample"]))
     seeded: list[JobInfo] = []   # smart 模式：本次触发的补种任务（响应回传数量）
     free: list[str] = []         # smart 预决策的空闲渠道（下方 recrawl 兜底复用）
+    starved: set[str] = set()    # smart 预决策的池尽渠道
 
     # 校验
     invalid = [c for c in channels if c not in ALL_CHANNELS]
@@ -832,6 +860,10 @@ def post_crawl(req: CrawlRequest):
 
         spawned: list[JobInfo] = []
         skipped: list[dict] = []
+        # 2026-10-01：补种被暂缓不再静默——streak 退避/任务忙时写明原因
+        if req.mode == "smart" and starved and not seeded:
+            skipped.append({"channel": ",".join(sorted(starved)),
+                            "reason": "补种暂缓（已有补种在跑或渠道失败退避中，30 分钟自动重试）"})
         targets: list[str] = []
         for ch in channels:
             # 2026-09-30 修复：incremental 模式汇总所有候选种子文件行数（与 /api/seeds 一致），
