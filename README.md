@@ -233,7 +233,7 @@ sighting(entity_key, e164, url, layer, first_seen, last_seen)   -- 多对多，�
 - [ ] Common Crawl WAT 全量回填（触发后走）
 - [ ] 分级重访调度：P0 周级 / 长尾月级（高分池 ≥5000 时启动）
 - [ ] 号码集合变化 = 新挂线索流（特征 diff）
-- [ ] 付费富化填实：Hunter / Snov / Apollo / BuiltWith / Clearbit 五个 Adapter 已留位，接入时零业务代码改动
+- [x] 付费富化（可选增强，默认关闭）：Hunter 已实装（`YOUZI_HUNTER_API_KEY` + `POST /api/crawler/enrich/{entity}`，幂等防重复计费）；其余 provider 实装时再注册进 `PROVIDERS`（不留纸面 stub）
 
 ---
 

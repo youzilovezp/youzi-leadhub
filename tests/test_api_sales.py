@@ -227,6 +227,51 @@ def test_export_csv_excludes_gambling_by_default(fresh_db):
     assert n2 == 2
 
 
+def test_enrich_registry_only_real_providers():
+    """2026-10-01：BuiltWith/Snov/Apollo/Clearbit 是纸面宣称（抽象方法未实现、
+    不可实例化，TypeError 被 run_enrichment 吞成空 dict——配 key 也静默无效）。
+    注册表只留实装过的 provider，未实装的不许注册。"""
+    from app.enrich import PROVIDERS
+    assert set(PROVIDERS) == {"hunter"}
+
+
+def test_hunter_provider_does_not_emit_garbage_tech(fresh_db, monkeypatch):
+    """2026-10-01 修复：旧代码把 Hunter 的 pattern（"{first}.{last}" 邮箱格式
+    字符串）按字符迭代 join 成乱码写进 tech_signals；且 Hunter domain-search
+    根本不返回技术栈——tech 相关输出应不存在。"""
+    from unittest.mock import MagicMock, patch
+    from app.enrich import HunterProvider
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.json.return_value = {"data": {
+        "pattern": "{first}.{last}",
+        "emails": [{"value": "info@x.com", "confidence": 90}]}}
+    monkeypatch.setenv("YOUZI_HUNTER_API_KEY", "test-key")
+    with patch("httpx.get", return_value=resp):
+        delta = HunterProvider().enrich("x.com", {})
+    assert delta == {"contact_email": "info@x.com"}, delta
+
+
+def test_enrich_endpoint_idempotent_when_done(fresh_db, monkeypatch):
+    """2026-10-01：已富化（enrichment_status='done'）实体默认跳过——重复 POST
+    重复消耗付费配额；?force=1 显式重跑。"""
+    from app.enrich import HunterProvider
+    conn, dbp = fresh_db
+    dbm.upsert_domain(conn, "done.com", "play", None)
+    conn.execute("UPDATE domain SET enrichment_status='done' WHERE entity_key='done.com'")
+    conn.commit()
+    called = []
+    monkeypatch.setattr(HunterProvider, "enrich",
+                        lambda self, e, c: called.append(e) or {"contact_email": "a@b.c"})
+    client = TestClient(api_mod.app)
+    r = client.post("/api/crawler/enrich/done.com?provider=hunter")
+    assert r.status_code == 200 and r.json()["updated"] is False
+    assert called == [], "已 done 的实体不应再调付费 API"
+    r2 = client.post("/api/crawler/enrich/done.com?provider=hunter&force=true")
+    assert r2.status_code == 200 and r2.json()["updated"] is True
+    assert called == ["done.com"]
+
+
 def test_enrich_endpoint_requires_known_provider(fresh_db):
     """未知 provider → 400（不能让用户随便填）。"""
     conn, dbp = fresh_db

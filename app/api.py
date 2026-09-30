@@ -256,13 +256,15 @@ def auto_expand_seed(channel: str, country: str = "", limit: int = 500):
 
 
 @app.post("/api/crawler/enrich/{entity}")
-def enrich_lead(entity: str, provider: str = "hunter"):
-    """2026-10-01：付费富化端点——按 provider 调对应 Adapter，回填 domain 行。
+def enrich_lead(entity: str, provider: str = "hunter", force: bool = False):
+    """2026-10-01：付费富化端点（可选增强，默认关闭）——按 provider 调对应
+    Adapter，回填 domain 行。手动触发、每次恰 1 次 API 调用、无自动路径。
 
-    需在环境变量里设对应 KEY：
-    - hunter     → YOUZI_HUNTER_API_KEY
-    - builtwith  → YOUZI_BUILTWITH_API_KEY
-    没设 KEY 返回空 dict（不报错——CLI / 调用方可降级）。
+    实装 provider：hunter（需 `YOUZI_HUNTER_API_KEY`，未设→200 空 delta 零网络）。
+    BuiltWith 等其余 provider 实装后再注册（PROVIDERS 是唯一事实源）。
+
+    幂等守卫（2026-10-01）：enrichment_status='done' 的实体默认跳过（重复
+    POST 重复消耗付费配额）；?force=true 显式重跑。
 
     例：`curl -X POST localhost:8788/api/crawler/enrich/example.com?provider=hunter`
     """
@@ -277,13 +279,18 @@ def enrich_lead(entity: str, provider: str = "hunter"):
         ).fetchone()
         if row is None:
             raise HTTPException(404, f"entity not found: {entity}")
+        if row["enrichment_status"] == "done" and not force:
+            return {"entity": entity, "provider": provider, "delta": {},
+                    "updated": False, "skipped": "already_enriched"}
         ctx = dict(row)
         delta = run_enrichment(provider, entity, ctx)
         if delta:
             cols = ["enrichment_status='done'", "enriched_at=?",
-                    "contact_email=COALESCE(?, contact_email)",
-                    "tech_signals=COALESCE(?, tech_signals)"]
-            params = [_db.now(), delta.get("contact_email"), delta.get("tech_signals")]
+                    "contact_email=COALESCE(?, contact_email)"]
+            params = [_db.now(), delta.get("contact_email")]
+            if "tech_signals" in delta:
+                cols.append("tech_signals=COALESCE(?, tech_signals)")
+                params.append(delta.get("tech_signals"))
             conn.execute(
                 f"UPDATE domain SET {', '.join(cols)} WHERE entity_key=?",
                 (*params, entity))
