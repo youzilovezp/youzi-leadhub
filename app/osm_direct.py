@@ -17,6 +17,19 @@ from app.seeds import overpass_post
 # 电话来源标签优先级：contact:whatsapp 语义最强（明确是 WA 号）
 _PHONE_TAGS = ("contact:whatsapp", "contact:mobile", "phone", "contact:phone")
 
+# 平台根 blocklist（2026-10-01 巡检）：website 标签指向这些时，entity_key 会塌到平台根
+# ——PSL 不认 *.google.com / *.facebook.com / *.wordpress.com 等为私有后缀，但 OSM 商家
+# 普遍把社交/托管主页当 website，N 个不相关商家会被压成同一 entity_key（google.com 收 157
+# 条 sighting），没有可再触达的真实域，留着也是废数据。myshopify.com / blogspot.com 已被
+# PSL 私有段正确处理，无需重复。
+_PLATFORM_HOSTS = frozenset({
+    "google.com", "facebook.com", "instagram.com", "youtube.com",
+    "twitter.com", "linkedin.com", "wordpress.com", "weebly.com",
+    "wix.com", "tumblr.com", "medium.com", "pinterest.com",
+    "reddit.com", "tiktok.com", "github.com", "gitlab.com",
+    "squarespace.com", "fb.me", "business.site",
+})
+
 
 def _wa_number(raw: str) -> str:
     """contact:whatsapp 可能是 wa.me 链接、api send 链接或裸号码——统一剥出号码串。"""
@@ -34,7 +47,8 @@ def _wa_number(raw: str) -> str:
 
 def elements_to_rows(elements: list[dict]) -> list[dict]:
     """纯变换：Overpass elements → [{entity, e164, country, osm_url, market}]。
-    仅保留有 website 且任一电话标签通过 E164 校验的元素。"""
+    仅保留有 website 且任一电话标签通过 E164 校验的元素；website 落在平台根 blocklist
+    上时跳过（见 _PLATFORM_HOSTS 注释）。"""
     rows: list[dict] = []
     for el in elements:
         tags = el.get("tags", {})
@@ -51,8 +65,11 @@ def elements_to_rows(elements: list[dict]) -> list[dict]:
         if not ph:
             continue
         e164, country = ph
+        ek = entity_key(host)
+        if ek in _PLATFORM_HOSTS:        # 平台根塌域，跳过（见模块顶部注释）
+            continue
         rows.append({
-            "entity": entity_key(host),
+            "entity": ek,
             "e164": e164,
             "country": country,
             "osm_url": f"https://www.openstreetmap.org/{el.get('type')}/{el.get('id')}",

@@ -106,7 +106,7 @@ def main():
         print(f"\n=== CSV 导出: {n} 条 ===")
         with open(csvp) as fh:
             for row in csv.DictReader(fh):
-                print(f"  {row['entity']:<22} p0={row['p0']} market={row['market']} "
+                print(f"  {row['entity']:<22} channel={row['channel']} market={row['market']} "
                       f"phones={row['phones']}")
 
         # 4. 5 个新列必须存在

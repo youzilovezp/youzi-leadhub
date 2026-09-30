@@ -41,12 +41,6 @@ import {
 } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import {
-  Tabs,
-  TabsContent,
-  TabsList,
-  TabsTrigger,
-} from '@/components/ui/tabs'
-import {
   Table,
   TableBody,
   TableCell,
@@ -91,7 +85,7 @@ type CrawlJob = {
   log: string | null
 }
 
-const PAGE_SIZE = 24
+const PAGE_SIZE = 25
 
 /* WhatsApp 品牌标（FA5 brands 轮廓，官方绿 #25D366） */
 function WhatsAppIcon({ className }: { className?: string }) {
@@ -215,7 +209,7 @@ function usePanelData() {
     setLoading(true)
     setError(false)
 
-    const qs = new URLSearchParams({ limit: '500' })
+    const qs = new URLSearchParams({ limit: '2000' })
     if (channel !== 'all') qs.set('channel', channel)
     if (marketGroup !== 'all') qs.set('market_group', marketGroup)
 
@@ -312,11 +306,9 @@ async function exportCsv(opts: { channel?: string; marketGroup?: string }) {
   const r = await fetch(`/api/leads?${qs}&limit=2000`)
   if (!r.ok) throw new Error(`${r.status}`)
   const leads = await r.json()
-  const headerRow = ['entity', 'channel', 'market', 'market_group', 'lang', 'p0', 'score',
-                     'developer_name', 'widget', 'phones']
+  const headerRow = ['entity', 'channel', 'market', 'phones']
   const rows = leads.map((l: Lead) => [
-    l.entity, l.channel, l.market ?? '', l.market_group ?? '', l.lang ?? '',
-    l.p0 ? '1' : '0', l.score, l.developer_name ?? '', l.widget ?? '', l.phones,
+    l.entity, l.channel, l.market ?? '', l.phones,
   ])
   const csv = '\uFEFF' + [headerRow, ...rows].map((r) => r.map((c: string) =>
     /[",\n]/.test(String(c)) ? `"${String(c).replace(/"/g, '""')}"` : c).join(',')
@@ -605,8 +597,12 @@ function LeadsTable({
               <X className="size-3.5" /> 清筛选 ({filterCount})
             </Button>
           )}
-          {/* HIGH-5 修复：导出按钮从数据 Tab 移除——用户对"导出"是目的性行为，
-              独立 Tab 才是它的正确归属（避免两处入口行为重复）。*/}
+          <ExportButton
+            disabled={!leads?.length}
+            leads={leads}
+            channel={channel}
+            marketGroup={marketGroup}
+          />
         </div>
       </div>
 
@@ -819,28 +815,27 @@ function EmptyLeads({ hasFilter, onClear }: { hasFilter: boolean; onClear: () =>
 }
 
 /* ============================================================
- * Tab 3：导出
+ * 线索页工具栏：导出按钮（始终跟随当前渠道/市场筛选）
  * ============================================================ */
-function ExportPanel({
-  stats, leads, channelFilter, marketGroupFilter,
-  setChannelFilter, setMarketGroupFilter,
+function ExportButton({
+  disabled, leads, channel, marketGroup,
 }: {
-  stats: Stat[] | null
+  disabled: boolean
   leads: Lead[] | null
-  channelFilter: string
-  marketGroupFilter: string
-  setChannelFilter: (v: string) => void
-  setMarketGroupFilter: (v: string) => void
+  channel: string
+  marketGroup: string
 }) {
   const [busy, setBusy] = useState(false)
+  const total = leads?.length ?? 0
+  const p0Count = useMemo(
+    () => (leads ?? []).filter((l) => l.p0).length,
+    [leads]
+  )
 
-  const handleExport = async () => {
+  const handle = async () => {
     setBusy(true)
     try {
-      await exportCsv({
-        channel: channelFilter,
-        marketGroup: marketGroupFilter,
-      })
+      await exportCsv({ channel, marketGroup })
     } catch (e) {
       alert(`导出失败：${(e as Error).message}`)
     } finally {
@@ -848,134 +843,18 @@ function ExportPanel({
     }
   }
 
-  const summary = stats ?? []
-  /* 只统计真实会进 CSV 的（leads 即有号码线索），不展示与导出无关的"域"总数 */
-  const p0Count = useMemo(() => (leads ?? []).filter((l) => l.p0).length, [leads])
-  const hasFilter = channelFilter !== 'all' || marketGroupFilter !== 'all'
-
   return (
-    <div className="overflow-hidden rounded-xl border border-border/70 bg-card">
-      {/* 工具栏：筛选 + 计数 + 导出操作一行完成（data-table toolbar 模式） */}
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/60 bg-muted/30 px-4 py-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <Select value={channelFilter} onValueChange={setChannelFilter}>
-            <SelectTrigger
-              aria-label="按渠道筛选"
-              className="w-36 rounded-lg bg-background shadow-none transition-colors hover:border-ring/50 data-[size=default]:h-9 dark:bg-input/30 dark:hover:border-ring/50"
-            >
-              <Globe className="size-3.5 text-muted-foreground" />
-              <SelectValue placeholder="渠道" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">全部渠道</SelectItem>
-              {summary.map((s) => (
-                <SelectItem key={s.channel} value={s.channel}>{channelName(s.channel)}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <Select value={marketGroupFilter} onValueChange={setMarketGroupFilter}>
-            <SelectTrigger
-              aria-label="按市场分组筛选"
-              className="w-36 rounded-lg bg-background shadow-none transition-colors hover:border-ring/50 data-[size=default]:h-9 dark:bg-input/30 dark:hover:border-ring/50"
-            >
-              <MapPin className="size-3.5 text-muted-foreground" />
-              <SelectValue placeholder="市场分组" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">全部市场</SelectItem>
-              {MARKET_GROUPS.map((g) => (
-                <SelectItem key={g} value={g}>{g}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          {hasFilter && (
-            <Button variant="ghost" onClick={() => {
-              setChannelFilter('all'); setMarketGroupFilter('all')
-            }}>
-              <X className="size-4" /> 清筛选
-            </Button>
-          )}
-        </div>
-        <div className="flex items-center gap-3">
-          {leads !== null && (
-            <p className="text-xs tabular-nums text-muted-foreground">
-              将导出 <span className="font-semibold text-foreground">{leads.length}{leads.length >= 500 ? '+' : ''}</span> 条 · 高优 {p0Count}
-            </p>
-          )}
-          <Button onClick={handleExport} disabled={busy}>
-            {busy ? (<><Loader2 className="size-4 animate-spin" /> 打包中…</>)
-                  : (<><Download className="size-4" /> 导出 CSV</>)}
-          </Button>
-        </div>
-      </div>
-        {leads === null ? (
-          <Skeleton className="h-40 w-full rounded-none" />
-        ) : leads.length === 0 ? (
-          <p className="px-4 py-8 text-center text-sm text-muted-foreground">
-            当前筛选条件下暂无线索，调整上方筛选或先「智能爬取」获取数据
-          </p>
-        ) : (
-          <Table>
-            <TableHeader>
-              <TableRow className="border-b border-border/60 bg-muted/30 hover:bg-transparent">
-                <TableHead className="text-left font-medium">企业</TableHead>
-                <TableHead className="text-left font-medium">渠道</TableHead>
-                <TableHead className="text-left font-medium">市场</TableHead>
-                <TableHead className="text-right font-medium">分数</TableHead>
-                <TableHead className="text-left font-medium">电话</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {leads.slice(0, 20).map((l) => {
-                const Style = channelStyle(l.channel)
-                const phones = l.phones.split(',')
-                return (
-                  <TableRow key={l.entity} className="group">
-                    <TableCell className="py-2.5">
-                      <div className="flex items-center gap-1.5">
-                        <a
-                          href={entityUrl(l.entity)}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="font-medium transition-colors hover:text-primary hover:underline"
-                        >
-                          {l.entity}
-                        </a>
-                        {l.p0 ? <P0Badge active /> : null}
-                      </div>
-                      {l.developer_name && (
-                        <p className="text-[11px] text-muted-foreground">{l.developer_name}</p>
-                      )}
-                    </TableCell>
-                    <TableCell className="py-2.5">
-                      <span className={cn('inline-flex items-center rounded-md px-1.5 py-0.5 text-xs', Style.chip)}>
-                        {channelName(l.channel)}
-                      </span>
-                    </TableCell>
-                    <TableCell className="py-2.5 text-xs text-muted-foreground">
-                      {l.market ? marketName(l.market) : '—'}
-                    </TableCell>
-                    <TableCell className="py-2.5 text-right">
-                      <ScorePill score={l.score} />
-                    </TableCell>
-                    <TableCell className="py-2.5 font-mono text-xs tabular-nums">
-                      {phones[0]}
-                      {phones.length > 1 && (
-                        <span className="ml-1 text-muted-foreground">+{phones.length - 1}</span>
-                      )}
-                    </TableCell>
-                  </TableRow>
-                )
-              })}
-            </TableBody>
-          </Table>
-        )}
-        {leads !== null && leads.length > 20 && (
-          <p className="border-t border-border/60 bg-muted/20 px-4 py-2 text-center text-xs text-muted-foreground">
-            仅预览前 20 条，导出包含全部 {leads.length}{leads.length >= 500 ? '+' : ''} 条
-          </p>
-        )}
-      </div>
+    <div className="flex items-center gap-3">
+      {total > 0 && (
+        <p className="text-xs tabular-nums text-muted-foreground">
+          将导出 <span className="font-semibold text-foreground">{total}</span> 条 · 高优 {p0Count}
+        </p>
+      )}
+      <Button onClick={handle} disabled={disabled || busy}>
+        {busy ? (<><Loader2 className="size-4 animate-spin" /> 打包中…</>)
+              : (<><Download className="size-4" /> 导出 CSV</>)}
+      </Button>
+    </div>
   )
 }
 
@@ -989,24 +868,6 @@ export default function App() {
     search, setSearch, refresh,
   } = usePanelData()
   const { jobs, health } = useCrawlStatus()
-  const [tab, setTab] = useState<'data' | 'export'>(() => {
-    const h = window.location.hash.replace('#', '')
-    return h === 'export' ? h : 'data'
-  })
-
-  /* URL hash 双向：Tab 切换 → 更新 hash（便于分享 + 后退） */
-  useEffect(() => {
-    window.history.replaceState(null, '', `#${tab}`)
-  }, [tab])
-
-  useEffect(() => {
-    const onHash = () => {
-      const h = window.location.hash.replace('#', '')
-      if (h === 'export' || h === 'data') setTab(h)
-    }
-    window.addEventListener('hashchange', onHash)
-    return () => window.removeEventListener('hashchange', onHash)
-  }, [])
 
   const runningCount = jobs.filter((j) => j.status === 'running').length
 
@@ -1075,8 +936,15 @@ export default function App() {
       {/* 顶栏 */}
       <header className="sticky top-0 z-40 border-b border-border/60 bg-background/85 backdrop-blur-md">
         <div className="mx-auto flex h-14 max-w-7xl items-center justify-between gap-4 px-5 md:px-8 md:h-16">
-          <div className="flex min-w-0 items-center gap-3">
+          <div className="flex min-w-0 items-center gap-2.5">
             <Logo size={40} className="shrink-0" />
+            <span
+              className="select-none bg-gradient-to-b from-foreground to-foreground/65 bg-clip-text text-transparent
+                         font-semibold text-[17px] leading-none tracking-[-0.025em]"
+              style={{ fontFeatureSettings: '"ss01","cv11"' }}
+            >
+              youzi
+            </span>
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <Button
@@ -1132,60 +1000,36 @@ export default function App() {
         )}
 
         {/* Tab 导航 */}
-        <Tabs value={tab} onValueChange={(v) => setTab(v as typeof tab)}>
-          <TabsList>
-            <TabsTrigger value="data" className="gap-1.5">
-              <Globe className="size-3.5" /> 所有线索
-            </TabsTrigger>
-            <TabsTrigger value="export" className="gap-1.5">
-              <Download className="size-3.5" /> 导出
-            </TabsTrigger>
-          </TabsList>
-
-          {/* ===== Tab 1：数据 ===== */}
-          <TabsContent value="data" className="space-y-8">
-            <section aria-labelledby="stats-heading" className="space-y-3">
-              <div className="flex items-baseline justify-between">
-                <h2 id="stats-heading" className="text-sm font-medium text-muted-foreground">
-                  渠道命中率
-                </h2>
-                <p className="text-[11px] text-muted-foreground">
-                  点击渠道卡 → 下方线索筛选到该渠道
-                </p>
-              </div>
-              <StatsCards
-                stats={stats} loading={loading} error={error}
-                onRetry={refresh}
-                activeChannel={channel}
-                onChannelClick={onChannelClick}
-                avgRate={avgRate}
-              />
-            </section>
-
-            <LeadsTable
-              leads={leads} loading={loading} error={error}
+        <div className="space-y-8">
+          <section aria-labelledby="stats-heading" className="space-y-3">
+            <div className="flex items-baseline justify-between">
+              <h2 id="stats-heading" className="text-sm font-medium text-muted-foreground">
+                渠道命中率
+              </h2>
+              <p className="text-[11px] text-muted-foreground">
+                点击渠道卡 → 下方线索筛选到该渠道
+              </p>
+            </div>
+            <StatsCards
+              stats={stats} loading={loading} error={error}
               onRetry={refresh}
-              channel={channel}
-              marketGroup={marketGroup}
-              channelFilter={channel} setChannelFilter={setChannel}
-              marketGroupFilter={marketGroup} setMarketGroupFilter={setMarketGroup}
-               search={search} setSearch={setSearch}
-               stats={stats}
-             />
-           </TabsContent>
-
-          {/* ===== Tab 3：导出 ===== */}
-          <TabsContent value="export">
-            <ExportPanel
-              stats={stats}
-              leads={leads}
-              channelFilter={channel}
-              marketGroupFilter={marketGroup}
-              setChannelFilter={setChannel}
-              setMarketGroupFilter={setMarketGroup}
+              activeChannel={channel}
+              onChannelClick={onChannelClick}
+              avgRate={avgRate}
             />
-          </TabsContent>
-        </Tabs>
+          </section>
+
+          <LeadsTable
+            leads={leads} loading={loading} error={error}
+            onRetry={refresh}
+            channel={channel}
+            marketGroup={marketGroup}
+            channelFilter={channel} setChannelFilter={setChannel}
+            marketGroupFilter={marketGroup} setMarketGroupFilter={setMarketGroup}
+            search={search} setSearch={setSearch}
+            stats={stats}
+          />
+        </div>
       </main>
     </div>
   )

@@ -493,6 +493,39 @@ class TestDbBoundary:
             assert mode.lower() == "wal"
 
 
+    def test_seed_fail_streaks_ignores_older_success(self):
+        """2026-10-01 修复：seed_fail_streaks 必须按时间顺序数连续失败——
+        更老的成功不能重置更新的失败 streak（之前实现 `streaks[ch] = 0` 在循环
+        里被更早的 exited 复位，导致智能爬取的 streak 永远 ≤ 最近成功之后的失败数，
+        OSM streak=8 退避永不生效）。
+
+        验证：5 条新 failed → 1 条新 killed → 1 条旧 exited → streak 应 = 6
+        （不被旧 exited 重置）
+        """
+        import tempfile
+        from app import db as _db
+        with tempfile.TemporaryDirectory() as td:
+            conn = _db.connect(Path(td) / "t.db")
+            # 时间序列（started_at 单调递增）：exited 老 → 5 failed 新 → 1 killed 最新
+            old_success = 100.0
+            new_fails = [200.0, 201.0, 202.0, 203.0, 204.0]
+            new_kill = 205.0
+            _db.insert_job(conn, job_id="old-ok", kind="seed", channel="osm",
+                           pid=1, started_at=old_success)
+            _db.finish_job(conn, "old-ok", "exited", 0)
+            for i, ts in enumerate(new_fails):
+                _db.insert_job(conn, job_id=f"f-{i}", kind="seed", channel="osm",
+                               pid=10+i, started_at=ts)
+                _db.finish_job(conn, f"f-{i}", "failed", 1)
+            _db.insert_job(conn, job_id="k-new", kind="seed", channel="osm",
+                           pid=20, started_at=new_kill)
+            _db.finish_job(conn, "k-new", "killed", -9)
+            # window=2 应能拿到 osm（5 failed + 1 killed = 6 ≥ 2）
+            streaks = _db.seed_fail_streaks(conn, window=2)
+            assert streaks.get("osm") == 6, \
+                f"streak 被旧成功重置了: got {streaks.get('osm')}"
+
+
 class TestSpiderBoundary:
 
     def test_spider_start_requests_compat_path(self):
@@ -685,6 +718,91 @@ class TestSeedsBoundary:
         # 印尼跨 95°E 到 141°E → 46 度
         assert min_lon <= 96 and max_lon >= 140, \
             f"bbox 经度未覆盖全印尼: {min_lon}-{max_lon}"
+
+    def test_overpass_post_respects_deadline(self):
+        """2026-10-01 修复：overpass_post 必须有总 deadline——避免 3 端点 × 2 重试
+        × 60s timeout = 6 分钟/单 query 卡死。智能爬取 OSM seed 永远"爬取中"
+        根因（实测 Indonesia 4 bbox × 5 国 = 8 query × 6 min = 48 min 挂死）。
+
+        验证：模拟全部 timeout，函数必须在 deadline_s 内抛异常（不死等）。
+        """
+        import time
+        import httpx
+        from unittest.mock import patch
+        from app.seeds import overpass_post
+
+        def fake_post(endpoint, *args, **kwargs):
+            # 真实超时模拟：sleep 整个 timeout 再抛（避免 mock 让测试瞬完）
+            t = kwargs.get("timeout", 60)
+            time.sleep(t)
+            raise httpx.ReadTimeout("read timed out",
+                                    request=httpx.Request("POST", endpoint))
+
+        with patch("httpx.post", side_effect=fake_post):
+            start = time.monotonic()
+            try:
+                overpass_post("[out:json];out 0;", deadline_s=5)
+                assert False, "should have raised"
+            except (httpx.HTTPError, RuntimeError):
+                elapsed = time.monotonic() - start
+                # deadline=5s 上限；3 端点 × 2 重试 × 20s 物理上 = 120s，
+                # 但 deadline 必须在 ~5s 处切断
+                assert elapsed < 7, f"deadline 未生效：elapsed={elapsed:.2f}s"
+                assert elapsed >= 5, f"过早终止：elapsed={elapsed:.2f}s"
+
+    def test_myshopify_seed_filters_random_hashes(self):
+        """2026-10-01 修复：myshopify 渠道 86% 是 Shopify 默认 random hash 子域
+        （XXX-NN 模式，test/abandoned 店），命中率 0.57%。过滤保留"像真名"的子域
+        ——含 ≥4 字母段 / 长度 ≥12 / 纯字母 ≤5 字符。
+
+        验证：mock CDX 返回 random hash + 真名混合种子，输出文件必须只剩真名。
+        """
+        from app.seeds import myshopify
+        from unittest.mock import patch, MagicMock
+        import tempfile
+        from pathlib import Path
+
+        cdx_records = [
+            '{"url": "https://000de8-2.myshopify.com/"}',
+            '{"url": "https://0171d6-3.myshopify.com/"}',
+            '{"url": "https://2fb486-ea.myshopify.com/"}',
+            '{"url": "https://007airsoft.myshopify.com/"}',   # 含 "airsoft"
+            '{"url": "https://fashion-brand.myshopify.com/"}', # 双段都有字母
+            '{"url": "https://longerbrandname.myshopify.com/"}', # 长度 ≥12
+            '{"url": "https://myshopify.com/robots.txt"}',
+        ]
+
+        def fake_request(endpoint, *a, **k):
+            r = MagicMock()
+            r.status_code = 200
+            if "collinfo" in endpoint:
+                r.json.return_value = [{"id": "CC-MAIN-test"}]
+                r.text = ""
+            elif "limit=1" in endpoint:
+                # CDX probe 调用 — 模拟新加的 3 次重试：第一次返回 502 模拟 CDX 抖动
+                # 这里我们让 probe 直接 200（避免 _probe 内部循环 break 后还是走不通）
+                r.text = ""
+            else:
+                # CDX 主查询
+                r.text = "\n".join(cdx_records)
+            return r
+
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "seeds-test.txt"
+            # httpx.Client(...) 是个 context manager：patch 整个 Client 类，
+            # fake_request 作为 get(...) 的 side_effect
+            with patch("httpx.Client") as fake_client_cls:
+                fake_client = MagicMock()
+                fake_client.get.side_effect = fake_request
+                fake_client_cls.return_value.__enter__.return_value = fake_client
+                myshopify(limit=100, out=out)
+            lines = out.read_text().splitlines()
+            hosts = sorted({l.replace("https://", "").rstrip("/") for l in lines if l})
+            assert not any(h.startswith(("000de8", "0171d6", "2fb486")) for h in hosts), \
+                f"残留 random hash: {hosts}"
+            assert any("007airsoft" in h or "fashion-brand" in h
+                       or "longerbrandname" in h for h in hosts), \
+                f"应该保留但缺失: {hosts}"
 
 
 # =========================================================================

@@ -161,9 +161,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
 def insert_job(conn: sqlite3.Connection, *, job_id: str, kind: str, channel: str,
                pid: int, started_at: float, chained: bool = False,
                log: str | None = None) -> None:
+    # ponytail: 老 DB job.job_id 是 PRIMARY KEY——incremental 重跑 inc-<channel>
+    # 复用 job_id 会撞 UNIQUE 被静默吞掉，新 spawn 永远落不到表。
+    # INSERT OR REPLACE（upsert）同一 job_id 旧行覆盖：reaper 的 finish_job
+    # WHERE status='running' 才能正确收尾。
     conn.execute(
-        "INSERT INTO job(job_id, kind, channel, status, pid, started_at, chained, log) "
-        "VALUES(?, ?, ?, 'running', ?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO job(job_id, kind, channel, status, pid, started_at, "
+        "chained, log) VALUES(?, ?, ?, 'running', ?, ?, ?, ?)",
         (job_id, kind, channel, pid, started_at, int(chained), log))
     conn.commit()
 
@@ -219,19 +223,31 @@ def list_jobs(conn: sqlite3.Connection, limit: int = 100) -> list[dict]:
 def seed_fail_streaks(conn: sqlite3.Connection, window: int = 3) -> dict[str, int]:
     """每 channel 最近 seed 任务的连续失败次数（health 冒头依据）。
 
-    连续 window 次全失败 → streak≥window（前端横幅）；任何一次成功 → 0。
+    连续 window 次全失败 → streak≥window（前端横幅）；遇到一次成功 → 截断（更
+    早的失败不再纳入 streak）。
+
+    2026-10-01 修复：之前实现 `streaks[ch] = 0` 在循环里只重置计数器但不 break——
+    实际"按时间倒序遍历"会把更早的成功当成"插在中间的截断"，但更早的失败又
+    被加回去，导致 streak 永远 ≤ 最近成功之后的失败数。智能爬取拿到的 OSM
+    streak 实际上是 0（被几小时前的旧成功重置），退避永远不生效。
+    现在：见到成功只把"该 channel 标记为已截断"，不再重置；后续更早的失败
+    被跳过；最终 streak = 最近一次成功之后的连续失败数（无上限）。
     """
     streaks: dict[str, int] = {}
+    seen_exit: set[str] = set()      # 该 channel 已经见过成功 → 停止累加更早失败
     rows = conn.execute(
         "SELECT channel, status FROM job WHERE kind='seed' "
         "ORDER BY started_at DESC LIMIT 200").fetchall()
     for r in rows:
         ch, st = r["channel"], r["status"]
-        if st == "running":           # 进行中的不算成败
+        if st == "running":
             continue
         if st == "exited":
-            streaks[ch] = 0           # 成功清零（更早的不再关心）
-        else:
+            seen_exit.add(ch)         # 截断：更早的 failure 不再纳入此 channel
+            # 不重置 streaks[ch]：因为这是按时间倒序遍历，"成功"在循环里出现
+            # 位置比已计入的失败更早（更老的 job）；之前的失败是更新发生的，
+            # 它们的计数才是真正的 streak
+        elif ch not in seen_exit:
             streaks[ch] = streaks.get(ch, 0) + 1
     return {ch: n for ch, n in streaks.items() if n >= window}
 

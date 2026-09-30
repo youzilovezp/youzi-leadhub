@@ -563,8 +563,39 @@ def post_seeds(req: SeedsRequest):
 _SMART_ROTATION = _CWD / "data" / ".smart-rotation"
 
 
+def _pick_recrawl_target(spawned: list[JobInfo]) -> str | None:
+    """2026-10-01：smart 模式「必重访」选 channel。
+
+    选刚 spawn 的渠道里 attempts 最大的（已知实体最多 → 重访找到新挂 wa.me
+    的概率最高）。如果没有 spawned，返回 None。
+    """
+    if not spawned:
+        return None
+    from app import db as _db
+    conn = _db.connect(str(_CWD / "data" / "leads.db"))
+    try:
+        best_ch = None
+        best_attempts = -1
+        for j in spawned:
+            ch = j.channel
+            stats = _db.get_crawl_stats(conn, ch) or {}
+            attempts = stats.get("attempts", 0) or 0
+            if attempts > best_attempts:
+                best_attempts = attempts
+                best_ch = ch
+        return best_ch if best_attempts >= 50 else None
+    finally:
+        conn.close()
+
+
 def _smart_expand_scene(seed_channels: set[str]) -> list[JobInfo]:
-    """smart 模式自带的「挖新人群」：给**池尽**渠道按轮换挑场景补种。
+    """smart 模式自带的「挖新人群」：给**池尽**渠道补种。
+
+    2026-10-01 修复：
+    - 失败 streak ≥ 2 的渠道跳过——避免 Overpass 挂掉时每次点击都 spawn
+      一个失败的 OSM seed（之前完全没退避，前端"一直爬取中"+线索零增长）
+    - 兜底：剩余 starved 渠道（如 myshopify——不在任何 SCENES plans 里）
+      走直接 spawn，按渠道兜底参数（myshopify 走 CDX 无 country/category）
 
     从轮换指针起找第一个覆盖目标渠道的场景（定向——不浪费轮换位）；
     指针推进到被选场景。防刷：已有 seed job 在跑就跳过本轮。
@@ -572,6 +603,18 @@ def _smart_expand_scene(seed_channels: set[str]) -> list[JobInfo]:
     """
     if any(j.job_id.startswith("seed-") and j.status in ("created", "running")
            for j in list(_JOBS_RUNNING.values())):
+        return []
+    # 失败 streak 过滤：避免在已经证明坏掉的渠道上无限 spawn
+    try:
+        conn = _db.connect(str(_CWD / "data" / "leads.db"))
+        try:
+            fail_streaks = _db.seed_fail_streaks(conn, window=2)
+        finally:
+            conn.close()
+    except Exception:
+        fail_streaks = {}
+    seed_channels = {c for c in seed_channels if fail_streaks.get(c, 0) < 2}
+    if not seed_channels:
         return []
     from app.seeds_scenes import SCENES
     base = 0
@@ -589,17 +632,40 @@ def _smart_expand_scene(seed_channels: set[str]) -> list[JobInfo]:
             _SMART_ROTATION.parent.mkdir(parents=True, exist_ok=True)
             _SMART_ROTATION.write_text(str((base + off) % len(SCENES)), encoding="utf-8")
             break
-    if scene is None:
-        return []
     spawned: list[JobInfo] = []
-    for plan in scene.plans:
-        if plan.channel not in seed_channels or _channel_busy(plan.channel):
+    spawned_channels: set[str] = set()
+    if scene is not None:
+        for plan in scene.plans:
+            if plan.channel not in seed_channels or _channel_busy(plan.channel):
+                continue
+            target = _pick_seed(plan.channel) or f"data/seeds-{plan.channel}.txt"
+            job = _spawn_seed(plan.channel, plan.countries, plan.categories,
+                              plan.per_country, target)
+            spawned.append(JobInfo(job_id=job.job_id, channel=job.channel,
+                                   pid=job.pid, started_at=job.started_at,
+                                   status=job.status))
+            spawned_channels.add(plan.channel)
+    # 兜底：剩余 starved 渠道——myshopify 等不在任何 SCENES plans 里
+    # 之前这些渠道 starve 永远等不到补种（智能爬取对它"已无能为力"）
+    remaining = seed_channels - spawned_channels
+    for ch in remaining:
+        if _channel_busy(ch):
             continue
-        target = _pick_seed(plan.channel) or f"data/seeds-{plan.channel}.txt"
-        job = _spawn_seed(plan.channel, plan.countries, plan.categories,
-                          plan.per_country, target)
-        spawned.append(JobInfo(job_id=job.job_id, channel=job.channel, pid=job.pid,
+        target = _pick_seed(ch) or f"data/seeds-{ch}.txt"
+        # 兜底参数：myshopify 无 country/category（CDX 通配查 *.myshopify.com）；
+        # osm 默认 SEA 五国；play 默认 BUSINESS 多国
+        if ch == "myshopify":
+            countries, categories, limit = "", "", 500
+        elif ch == "osm":
+            countries, categories, limit = "id,th,vn,ph,my", "", 200
+        elif ch == "play":
+            countries, categories, limit = "id,br,mx", "BUSINESS,SHOPPING", 150
+        else:
+            countries, categories, limit = "", "", 500
+        job = _spawn_seed(ch, countries, categories, limit, target)
+        spawned.append(JobInfo(job_id=job.job_id, channel=ch, pid=job.pid,
                                started_at=job.started_at, status=job.status))
+        spawned_channels.add(ch)
     return spawned
 
 
@@ -637,7 +703,7 @@ def post_crawl(req: CrawlRequest):
                             for c in channels],
                 "hint": "本批进行中——完成后自动补种接续，无需重复点击",
             }
-        starved = {c for c in free if _unseen_estimate(c) < 100}
+        starved = {c for c in free if _unseen_estimate(c) < 10000}
         crawlable = [c for c in free if c not in starved]
         seeded = _smart_expand_scene(seed_channels=starved)
         if crawlable:
@@ -758,6 +824,33 @@ def post_crawl(req: CrawlRequest):
                 started_at=job.started_at, status=job.status,
             ))
             targets.append(target)
+
+        # 2026-10-01 smart 模式「必重访」：增量模式用稳定 JOBDIR → Scrapy dupefilter
+        # 跳过已爬 URL → 重访发现新挂 wa.me 的机会 = 0。强制 mode=full + 新 JOBDIR
+        # 重爬一次已知实体，找"上次爬时漏掉 / 之后新加"的 wa.me 链接。
+        # 限制 200 URL（够覆盖常见 WA 高产域，避免长跑）。
+        if req.mode == "smart":
+            recrawl_ch = _pick_recrawl_target(spawned)
+            if recrawl_ch is not None:
+                rc = recrawl_ch
+                rc_cands = _seed_candidates(rc)
+                if rc_cands:
+                    rc_seed_path = max(rc_cands, key=lambda p: p.stat().st_size)
+                    rc_pool = sum(_seed_count(c) for c in rc_cands)
+                    rc_limit = min(200, max(50, rc_pool // 5))
+                    rc_conn = _db.connect(str(_CWD / "data" / "leads.db"))
+                    try:
+                        rc_stats = _db.get_crawl_stats(rc_conn, rc)
+                    finally:
+                        rc_conn.close()
+                    rc_throttle = _sc.compute_throttle(rc, rc_stats)
+                    rc_job = _spawn(rc, str(rc_seed_path), rc_limit, 2, db_path,
+                                    "full", throttle=rc_throttle)
+                    spawned.append(JobInfo(
+                        job_id=rc_job.job_id, channel=rc, pid=rc_job.pid,
+                        started_at=rc_job.started_at, status=rc_job.status,
+                    ))
+                    targets.append(_pick_seed(rc) or f"data/seeds-{rc}.txt")
 
     return {
         "mode": req.mode,

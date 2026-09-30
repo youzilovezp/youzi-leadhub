@@ -55,6 +55,27 @@ def tranco(top: int, out: Path) -> Path:
 
 
 def myshopify(limit: int, out: Path, crawl_id: str | None = None) -> Path:
+    # 2026-10-01：Shopify 默认给每个新账号随机分配子域 `xxx-nn.myshopify.com`，
+    # CDX `*.myshopify.com/*` 拉回来 86% 是这种 random hash 子域（实测 837 条种子里
+    # 723 条匹配），绝大多数是 test/abandoned 店 → myshopify 命中率 0.57%（README 也
+    # 标记该渠道 0.7% / 55% 死站）。过滤保留"像真名"的子域：至少含一段 ≥4 字母
+    # （真人店常用 brand/product 名，多音节），或纯 5+ 字母不带 dash（短品牌名）。
+    import re as _re_myshopify
+    import time as _time_myshopify
+    # 2026-10-01：判定标准从"匹配 random 模式"改为"非 real 模式即过滤"。
+    # 之前 `_RANDOM_HASH_RE.match()` 只识别 X-N 短 dash 模式，无法识别多 dash 的
+    # random hash（如 `02-0457aa-mol`、`1-10-rod-shop`），导致 86% 仍过线。
+    # 现在反过来：除非含 ≥6 字母真词（"airsoft"/"workshop"/"fashion"）或短纯字母，
+    # 一律视为 random hash 过滤掉。
+    _REAL_LOOKING_RE = _re_myshopify.compile(r"[a-z]{6,}")
+
+    def _looks_like_real_shop(sub: str) -> bool:
+        # 短名（≤5 纯字母如 "shop"）也算——人取短名通常纯字母
+        if len(sub) <= 5 and "-" not in sub and sub.isalpha():
+            return True
+        # 含 ≥6 个连续字母（"airsoft" 7、"fashion" 7 真词；"avzhh" 5 仍属 random hash）
+        return bool(_REAL_LOOKING_RE.search(sub))
+
     with httpx.Client(timeout=60, headers={"User-Agent": "youzi-bsp-leadgen/0.1"}) as client:
         if not crawl_id:
             # 最新档索引常未就绪（502）——从 collinfo 逐个回退到可用档
@@ -63,14 +84,19 @@ def myshopify(limit: int, out: Path, crawl_id: str | None = None) -> Path:
         else:
             ids = [crawl_id]
         for _id in ids:
-            probe = client.get(
-                f"https://index.commoncrawl.org/{_id}-index"
-                f"?url={quote('*.myshopify.com/*')}&output=json&limit=1"
-            )
-            if probe.status_code == 200:
-                crawl_id = _id
+            # 2026-10-01：probe 重试 3 次（CDX 502/504 间歇性，命中立即 break）
+            for _probe in range(3):
+                probe = client.get(
+                    f"https://index.commoncrawl.org/{_id}-index"
+                    f"?url={quote('*.myshopify.com/*')}&output=json&limit=1"
+                )
+                if probe.status_code == 200:
+                    crawl_id = _id
+                    break
+                _time_myshopify.sleep(2)
+            if crawl_id:
                 break
-        else:
+        if not crawl_id:
             raise RuntimeError(f"CC CDX 全部档期不可用: {ids}")
         base = (f"https://index.commoncrawl.org/{crawl_id}-index"
                 f"?url={quote('*.myshopify.com/*')}&output=json")
@@ -91,6 +117,12 @@ def myshopify(limit: int, out: Path, crawl_id: str | None = None) -> Path:
                 if "url" in rec:
                     h = urlsplit(rec["url"]).hostname or ""
                     if h.endswith(".myshopify.com"):
+                        sub = h.removesuffix(".myshopify.com")
+                        # 2026-10-01：过滤掉非真名子域——random hash 占 myshopify
+                        # 子域 86%，绝大多数是 test/abandoned 店，命中率 0.57%。
+                        # 保留：含 ≥6 真词字母 / 短纯字母（≤5 字符）。
+                        if not _looks_like_real_shop(sub):
+                            continue
                         hosts.add(h)
                 if rec.get("resumeKey"):
                     nxt = rec["resumeKey"]
@@ -174,34 +206,48 @@ def _cn_proxy() -> str | None:
         return None
 
 
-def overpass_post(q: str) -> dict:
+def overpass_post(q: str, deadline_s: float = 60.0) -> dict:
     """Overpass 查询：三端点轮换 + 429/504 退避重试（osm/osm_direct 共用）。
 
-    2026-09-30 修复：CN 直连被 reset 时三端点退避重试 = 无声挂数分钟再全失败
-    （智能爬取补种零产出的根因）。探测到本机代理就走代理，超时 200→60s。
+    2026-10-01 加总 deadline（默认 60s）：之前 60s×6 attempts = 6 分钟/单 query
+    卡死——印尼 4 bbox × 8 query（5 国）= 48 分钟最坏（智能爬取 OSM seed 永远
+    "爬取中"，前端只看到 OSM 在跑 = "只爬海外地图商户" 假象）。
+    deadline 内任何时刻超时即放弃——失败暴露给 reaper 收割 + 下轮自动重试。
+
+    2026-09-30 修复：CN 直连被 reset 时三端点退避重试 = 无声挂数分钟再全失败。
+    探测到本机代理就走代理，超时 60s 缩短到 20s（实测 5-30s）。
     """
     import time
 
     proxy = _cn_proxy()
+    deadline = time.monotonic() + deadline_s
     last: Exception | None = None
     for endpoint in _OVERPASS_ENDPOINTS:
+        if time.monotonic() >= deadline:
+            break
         for attempt in (1, 2):
+            remaining = max(deadline - time.monotonic(), 1.0)
+            if remaining <= 1.0:
+                break
+            # ponytail: 单次超时取剩余 deadline 与 20s 较小值——
+            # 否则 3 端点 × 2 重试 × 20s = 120s 物理上超出 deadline 仍会卡死
             try:
-                r = httpx.post(endpoint, data={"data": q}, timeout=60,
+                r = httpx.post(endpoint, data={"data": q}, timeout=min(20.0, remaining),
                                headers={"User-Agent": _UA}, proxy=proxy)
                 if r.status_code in (429, 504) and attempt == 1:
-                    time.sleep(15)
-                    continue
+                    if time.monotonic() + 5 < deadline:
+                        time.sleep(5)
+                        continue
+                    break
                 r.raise_for_status()
                 return r.json()
             except httpx.HTTPStatusError as e:
                 last = e
                 if e.response.status_code not in (429, 504, 502, 503):
                     raise
-                # 2026-09-30 修复：sleep 只在"准备重试同端点"前；except 路径下一步就是
-                # 切端点，不该 sleep（否则每次切端点浪费 15s）
-                if e.response.status_code in (429, 504) and attempt == 1:
-                    time.sleep(15)
+                if e.response.status_code in (429, 504) and attempt == 1 \
+                        and time.monotonic() + 5 < deadline:
+                    time.sleep(5)
             except httpx.HTTPError as e:   # 网络层错误 → 换端点
                 last = e
     raise last if last else RuntimeError("overpass unreachable")

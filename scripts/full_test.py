@@ -243,8 +243,8 @@ check("CLI: stats 输出 3 主渠道", "play" in out and "osm" in out)
 
 code, out = run_cli(["export", "--out", "/tmp/ft-export.csv"])
 check("CLI: export 退出码 0", code == 0, out[-200:] if code else "")
-check("CLI: export CSV 含 13 列", Path("/tmp/ft-export.csv").read_text().startswith(
-    "entity,channel,market,market_group,lang,p0,score,developer_name,widget,email,enrichment_status,tech_signals,phones"
+check("CLI: export CSV 含 4 列", Path("/tmp/ft-export.csv").read_text().startswith(
+    "entity,channel,market,phones"
 ))
 
 # forget 实体不存在 → 提示但不报错

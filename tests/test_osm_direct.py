@@ -28,6 +28,37 @@ def test_elements_to_rows_variants():
     assert rows[1]["osm_url"].endswith("/way/2")
 
 
+def test_elements_to_rows_skips_platform_root_hosts():
+    """2026-10-01 巡检修复：website 落在平台根（google.com / facebook.com 等 PSL 不认
+    为私有后缀但实为多商家平台）时跳过，否则 N 个不相关 OSM 商家会被 entity_key 塌成一
+    条。myshopify.com 等已受 PSL 保护、不在本测试范围。"""
+    els = [
+        # 真实业务域名 → 保留
+        {"type": "node", "id": 1, "tags": {
+            "website": "https://kopisusu.co.id",
+            "contact:whatsapp": "+628123456789"}},
+        # sites.google.com 塌到 google.com → 跳过
+        {"type": "node", "id": 2, "tags": {
+            "website": "https://sites.google.com/view/kopi",
+            "contact:whatsapp": "+628987654321"}},
+        # facebook.com 主页（FB 商家当 website）→ 跳过
+        {"type": "node", "id": 3, "tags": {
+            "website": "https://www.facebook.com/warung.budi",
+            "phone": "+60378054479"}},
+        # fb.me 短链 → 跳过
+        {"type": "node", "id": 4, "tags": {
+            "website": "http://fb.me/warung",
+            "phone": "+6621234567"}},
+        # instagram.com 主页 → 跳过
+        {"type": "node", "id": 5, "tags": {
+            "website": "https://instagram.com/warung",
+            "phone": "+62811234567"}},
+    ]
+    rows = elements_to_rows(els)
+    assert len(rows) == 1, f"应只保留 1 条真实业务，过滤了 {len(els) - len(rows) - 1} 条平台塌域"
+    assert rows[0]["e164"] == "+628123456789"
+
+
 def test_import_osm_preserves_crawled_signals(tmp_path, monkeypatch):
     """P1 修复（2026-09-28）：import-osm 不得用空 flags 覆盖已爬取的 p0/分数
     （ICP/developer_name 等持久化信号保留），且补齐 market_group——导入打分改走

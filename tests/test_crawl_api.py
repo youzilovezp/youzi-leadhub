@@ -456,14 +456,19 @@ def test_smart_expand_scene_rotates(tmp_path, monkeypatch):
     monkeypatch.setattr(crawl_api, "_spawn_seed",
                         lambda ch, c, cat, lim, out: calls.append(ch)
                         or _fake_seed_job(ch))
-    from app.seeds_scenes import SCENES
+    monkeypatch.setattr(crawl_api, "_pick_seed",
+                        lambda ch: f"data/seeds-{ch}.txt")
+    # 不让 streak 真实数据影响本测试（实跑库可能有历史失败）
+    monkeypatch.setattr(crawl_api._db, "seed_fail_streaks",
+                        lambda conn, window=3: {})
     got = crawl_api._smart_expand_scene(seed_channels={"osm"})
     assert [j.channel for j in got] == ["osm"]       # 只补目标渠道
     assert (tmp_path / ".smart-rotation").read_text().isdigit()
-    # 目标渠道不在任何场景（如 myshopify）→ 不轮换不 spawn
+    # myshopify 不在任何 SCENES plans 里 → 走兜底路径（2026-10-01 修复）
     calls.clear()
-    assert crawl_api._smart_expand_scene(seed_channels={"myshopify"}) == []
-    assert calls == []
+    got2 = crawl_api._smart_expand_scene(seed_channels={"myshopify"})
+    assert [j.channel for j in got2] == ["myshopify"]
+    assert calls == ["myshopify"]
 
 
 def test_smart_expand_scene_skips_when_seed_running(tmp_path, monkeypatch):
@@ -473,6 +478,61 @@ def test_smart_expand_scene_skips_when_seed_running(tmp_path, monkeypatch):
     monkeypatch.setattr(crawl_api, "_spawn_seed", boom)
     crawl_api._JOBS_RUNNING["seed-osm-x"] = _fake_seed_job("osm")
     assert crawl_api._smart_expand_scene(seed_channels={"osm"}) == []
+
+
+def test_smart_expand_scene_fallback_covers_myshopify(tmp_path, monkeypatch):
+    """2026-10-01 修复：myshopify 不在任何 SCENES plans 里——之前 starve 永远
+    没人补。智能爬取时若只 myshopify starved → 走兜底 spawn（country=''/category=''
+    ——CDX 通配 *.myshopify.com，不需要）。"""
+    spawns = []
+    monkeypatch.setattr(crawl_api, "_SMART_ROTATION", tmp_path / ".smart-rotation")
+    monkeypatch.setattr(crawl_api, "_pick_seed",
+                        lambda ch: f"data/seeds-{ch}.txt")
+    # 不让 streak 真实数据影响本测试（实跑库可能有历史失败）
+    monkeypatch.setattr(crawl_api._db, "seed_fail_streaks",
+                        lambda conn, window=3: {})
+    def fake_seed(channel, countries, categories, limit, out_file):
+        spawns.append((channel, countries, categories, limit))
+        return _fake_seed_job(channel)
+    monkeypatch.setattr(crawl_api, "_spawn_seed", fake_seed)
+    got = crawl_api._smart_expand_scene(seed_channels={"myshopify"})
+    assert [j.channel for j in got] == ["myshopify"]
+    ch, countries, categories, limit = spawns[0]
+    assert ch == "myshopify"
+    assert countries == ""          # CDX 无国家概念
+    assert categories == ""         # myshopify 不用 category
+    assert limit == 500
+
+
+def test_smart_expand_scene_backoff_on_seed_streak(tmp_path, monkeypatch):
+    """2026-10-01 修复：seed 失败 streak ≥ 2 → 跳过（避免 Overpass 挂掉时无限
+    spawn 一个失败的 OSM seed；之前完全无退避，每次点击都 24 分钟挂死）。"""
+    from app import db as _dbm
+    (tmp_path / "data").mkdir(exist_ok=True)
+    db_path = tmp_path / "data" / "leads.db"
+    conn = _dbm.connect(db_path)
+    try:
+        # 注入 2 条连续失败（streak=2 触发跳过）
+        for i in range(2):
+            jid = f"seed-osm-{i}"
+            _dbm.insert_job(conn, job_id=jid, kind="seed", channel="osm",
+                            pid=20 + i, started_at=200.0 + i)
+            _dbm.finish_job(conn, jid, "failed", 1)
+    finally:
+        conn.close()
+    monkeypatch.setattr(crawl_api, "_CWD", tmp_path)
+    monkeypatch.setattr(crawl_api, "_SMART_ROTATION", tmp_path / ".smart-rotation")
+    spawn_calls = []
+    monkeypatch.setattr(crawl_api, "_spawn_seed",
+                        lambda ch, *a, **k: spawn_calls.append(ch)
+                        or _fake_seed_job(ch))
+    # osm streak≥2 → 跳过（filter 在最前面，连 seed 也不 spawn）
+    assert crawl_api._smart_expand_scene(seed_channels={"osm"}) == []
+    assert "osm" not in spawn_calls
+    # 没失败记录的渠道（如 myshopify，走兜底路径）→ 仍可 spawn
+    got = crawl_api._smart_expand_scene(seed_channels={"myshopify"})
+    assert [j.channel for j in got] == ["myshopify"]
+    assert "myshopify" in spawn_calls
 
 
 def test_post_crawl_smart_all_busy_idempotent_200(monkeypatch):
@@ -488,8 +548,11 @@ def test_post_crawl_smart_all_busy_idempotent_200(monkeypatch):
 def test_post_crawl_smart_starved_seeds_crawlable_crawls(monkeypatch, tmp_path):
     """2026-09-30 审计：smart 模式增量闭环决策。
 
-    池尽渠道（unseen 估计 < 100）→ 转补种不空爬；池未尽渠道 → 照爬；
+    池尽渠道（unseen 估计 < 10000）→ 转补种不空爬；池未尽渠道 → 照爬；
     请求内渠道去重（["play","play"] 不允许同 JOBDIR 双 spawn）。
+
+    2026-10-01 更新：阈值从 100 提到 10000（"必重访"语义：每次点击都补种尝试），
+    所以测试里 play 用 50000 unseen 表达"非 starved"状态。
     """
     from app import crawl_api
     (tmp_path / "data").mkdir()
@@ -510,10 +573,13 @@ def test_post_crawl_smart_starved_seeds_crawlable_crawls(monkeypatch, tmp_path):
                               started_at=0.0, status="running")  # type: ignore[arg-type]
 
     monkeypatch.setattr(crawl_api, "_CWD", tmp_path)
+    # play unseen=50000 → 池未尽（crawlable）；osm unseen=5 → 池尽（starved）
     monkeypatch.setattr(crawl_api, "_unseen_estimate",
-                        lambda ch: 5 if ch == "osm" else 500)
+                        lambda ch: 5 if ch == "osm" else 50000)
     monkeypatch.setattr(crawl_api, "_smart_expand_scene", fake_expand)
     monkeypatch.setattr(crawl_api, "_spawn", fake_spawn)
+    monkeypatch.setattr(crawl_api, "_pick_recrawl_target",
+                        lambda spawned: None)  # 测试里关闭 re-crawl 干扰
     monkeypatch.setattr(crawl_api, "_seed_candidates",
                         lambda ch: [seed] if ch == "play" else [])
 
@@ -524,3 +590,69 @@ def test_post_crawl_smart_starved_seeds_crawlable_crawls(monkeypatch, tmp_path):
     check("池未尽渠道 play → 爬取且去重（play 传了两次只爬一次）",
           crawl_calls == ["play"], f"got {crawl_calls}")
     check("响应回传补种数 seeded=1", r.get("seeded") == 1, f"got {r.get('seeded')}")
+
+
+def test_post_crawl_smart_spawns_recrawl(monkeypatch, tmp_path):
+    """2026-10-01「必重访」：smart 模式除正常 spawn 外，额外 spawn 一个 mode=full
+    的 re-crawl（用新 JOBDIR 跳过 dupefilter），目标是访问已爬过的实体找新挂的
+    wa.me。验证：spawned 包含至少一个 mode=full 的 job。"""
+    from app import crawl_api
+    (tmp_path / "data").mkdir()
+    seed = tmp_path / "seeds-play.txt"
+    seed.write_text("\n".join(f"https://a{i}.com/" for i in range(500)))
+
+    spawned_modes: list[tuple[str, str]] = []
+    def fake_spawn(channel, seed_file, limit, max_pages, db_path, mode="incremental",
+                   throttle=None, chained=False):
+        spawned_modes.append((channel, mode))
+        return crawl_api._Job(job_id=f"{mode}-{channel}", channel=channel, pid=1,
+                              started_at=0.0, status="running")  # type: ignore[arg-type]
+    monkeypatch.setattr(crawl_api, "_CWD", tmp_path)
+    monkeypatch.setattr(crawl_api, "_seed_candidates", lambda ch: [seed] if ch == "play" else [])
+    monkeypatch.setattr(crawl_api, "_smart_expand_scene", lambda seed_channels: [])
+    # play unseen=50000 → 池未尽 → 走 crawlable（play 进 spawned）；starved 兜底不会触发
+    monkeypatch.setattr(crawl_api, "_unseen_estimate", lambda ch: 50000)
+    monkeypatch.setattr(crawl_api, "_spawn", fake_spawn)
+    monkeypatch.setattr(crawl_api._db, "seed_fail_streaks", lambda conn, window=3: {})
+    # 给 play 一个高 attempts 让 _pick_recrawl_target 选中
+    monkeypatch.setattr(crawl_api._db, "get_crawl_stats",
+                        lambda conn, ch: {"attempts": 100, "hits": 20})
+
+    r = crawl_api.post_crawl(crawl_api.CrawlRequest(channels=["play"], mode="smart"))
+    # 应该至少有：play incremental + play full (re-crawl)
+    full_modes = [(ch, m) for ch, m in spawned_modes if m == "full"]
+    check("smart 模式 spawn 含 mode=full 的 re-crawl",
+          len(full_modes) >= 1, f"got {spawned_modes}")
+    check("re-crawl 用 spawn 中 attempts 最大的渠道（play）",
+          full_modes[0][0] == "play" if full_modes else False,
+          f"got {full_modes}")
+
+
+def test_post_crawl_smart_no_recrawl_when_attempts_low(monkeypatch, tmp_path):
+    """2026-10-01 边界：spawned 渠道的 attempts < 50 时不触发 re-crawl
+    （新渠道刚起步，重访 0 产出的实体没意义）。"""
+    from app import crawl_api
+    (tmp_path / "data").mkdir()
+    seed = tmp_path / "seeds-play.txt"
+    seed.write_text("https://a.com/\n")
+
+    spawned_modes: list[str] = []
+    def fake_spawn(channel, *a, **kw):
+        mode = a[4] if len(a) > 4 else kw.get("mode", "incremental")
+        spawned_modes.append(mode)
+        return crawl_api._Job(job_id=f"{mode}-{channel}", channel=channel, pid=1,
+                              started_at=0.0, status="running")  # type: ignore[arg-type]
+    monkeypatch.setattr(crawl_api, "_CWD", tmp_path)
+    monkeypatch.setattr(crawl_api, "_seed_candidates", lambda ch: [seed] if ch == "play" else [])
+    monkeypatch.setattr(crawl_api, "_smart_expand_scene", lambda seed_channels: [])
+    monkeypatch.setattr(crawl_api, "_unseen_estimate", lambda ch: 50000)
+    # crawl_stats: play attempts=10（< 50） → 不该 re-crawl
+    monkeypatch.setattr(crawl_api._db, "get_crawl_stats",
+                        lambda conn, ch: {"attempts": 10, "hits": 0})
+    monkeypatch.setattr(crawl_api._db, "seed_fail_streaks",
+                        lambda conn, window=3: {})
+    monkeypatch.setattr(crawl_api, "_spawn", fake_spawn)
+
+    crawl_api.post_crawl(crawl_api.CrawlRequest(channels=["play"], mode="smart"))
+    check("attempts < 50 不触发 full re-crawl",
+          "full" not in spawned_modes, f"got {spawned_modes}")

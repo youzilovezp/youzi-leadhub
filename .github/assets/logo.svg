@@ -1,12 +1,78 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!--
+  youzi LeadHub 品牌标（README 顶栏用）
+  设计：深色 hero 横幅（zinc 渐变），奶白色字标
+  • 配色：容器 zinc-800/950 渐变，字标 #FAFAFA 奶白（与气泡同色）
+  • 元素：圆角方块 + 白色对话气泡（带尾巴）+ 深色电话听筒（WhatsApp DNA）
+  • 字标：youzi（36px semibold）+ · LeadHub（24px medium）+ 中文副标
+  • 与 React Logo 路径完全一致；仅排版（色 + 位置）按 README 上下文调整
+-->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 96" role="img" aria-label="youzi LeadHub">
-  <g transform="translate(8, 8)">
-    <rect width="80" height="80" rx="18" fill="#18181B"/>
-    <path d="M 28 20 L 35 20 L 35 53 L 53 53 L 53 60 L 28 60 Z" fill="#FAFAFA"/>
+  <defs>
+    <linearGradient id="youzi-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#27272A"/>
+      <stop offset="100%" stop-color="#09090B"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 深色 hero 横幅 -->
+  <rect width="360" height="96" rx="14" fill="url(#youzi-bg)"/>
+  <!-- 内描边：8% 白 —— Apple-style inner border -->
+  <rect x="0.5" y="0.5" width="359" height="95" rx="13.5"
+        fill="none" stroke="#FAFAFA" stroke-opacity="0.08"/>
+
+  <!-- 图标容器：56×56 圆角方块（位于 (20,20)）-->
+  <g transform="translate(20, 20)">
+    <!-- 容器底：6% 奶白叠在深色 hero 上，让图标更"浮起" -->
+    <rect width="56" height="56" rx="14" fill="#FAFAFA" fill-opacity="0.06"/>
+    <!-- 容器内描边：15% 奶白 -->
+    <rect x="0.5" y="0.5" width="55" height="55" rx="13.5"
+          fill="none" stroke="#FAFAFA" stroke-opacity="0.15"/>
+    <!-- 对话气泡 + 听筒：32 viewBox → 56px = 1.75× 缩放，与 React Logo 路径完全一致 -->
+    <g transform="scale(1.75)">
+      <path d="M 11 9
+               Q 9 9 9 11
+               V 19
+               Q 9 21 11 21
+               L 11 25
+               L 15 21
+               H 21
+               Q 23 21 23 19
+               V 11
+               Q 23 9 21 9 Z"
+            fill="#FAFAFA"/>
+      <path d="M 14 11.5
+               C 13.4 11.5 13 12 13 12.5
+               C 13 15 14.7 17.3 17.5 17.5
+               C 18 17.5 18.5 17 18.5 16.5
+               L 18.5 16
+               C 18.5 15.5 18 15 17.5 15
+               L 17 15
+               C 16 15 15.5 14.5 15.5 13.5
+               L 15.5 13
+               C 15.5 12.5 15 12 14.5 12 Z"
+            fill="#18181B"/>
+    </g>
   </g>
-  <g font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif">
-    <text x="104" y="38" font-size="14" font-weight="500" fill="#71717A" letter-spacing="2">youzi ·</text>
-    <text x="160" y="42" font-size="30" font-weight="700" fill="#18181B" letter-spacing="-0.5">LeadHub</text>
-    <text x="104" y="68" font-size="13" font-weight="500" fill="#52525B" letter-spacing="0.3">WhatsApp BSP 销售线索中心</text>
-  </g>
+
+  <!-- 主字标 "youzi"：Inter 600 / 36px / -0.025em 字距 / #FAFAFA 奶白 -->
+  <text x="92" y="50"
+        font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif"
+        font-size="36" font-weight="600"
+        letter-spacing="-0.9"
+        fill="#FAFAFA">youzi</text>
+
+  <!-- 副字标 "· LeadHub"：紧跟主字标右侧，55% 奶白，medium 字重 -->
+  <text x="186" y="50"
+        font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif"
+        font-size="24" font-weight="500"
+        letter-spacing="-0.2"
+        fill="#FAFAFA" fill-opacity="0.55">· LeadHub</text>
+
+  <!-- 中文副标：WhatsApp BSP 销售线索中心 -->
+  <text x="92" y="74"
+        font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif"
+        font-size="13" font-weight="500"
+        letter-spacing="0.4"
+        fill="#FAFAFA" fill-opacity="0.45">WhatsApp BSP 销售线索中心</text>
 </svg>
