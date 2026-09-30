@@ -239,7 +239,7 @@ def auto_expand_seed(channel: str, country: str = "", limit: int = 500):
     spawn seeds.py 子进程补新种子到 data/seeds-{channel}.txt（追加，不覆盖）。
     """
     from app import smart_crawler as _sc
-    if channel not in ("myshopify", "play", "osm"):
+    if channel not in ("play", "osm"):   # 2026-10-01：myshopify 退出自动
         raise HTTPException(400, f"未知 channel: {channel}")
     if limit < 50 or limit > 5000:
         raise HTTPException(400, f"limit 应在 50-5000，got {limit}")
@@ -253,6 +253,45 @@ def auto_expand_seed(channel: str, country: str = "", limit: int = 500):
         "job": job,
         "hint": "种子已 spawn，3-15 分钟完成；完成后到跑批 Tab 触发增量爬取",
     }
+
+
+@app.post("/api/crawler/enrich/{entity}")
+def enrich_lead(entity: str, provider: str = "hunter"):
+    """2026-10-01：付费富化端点——按 provider 调对应 Adapter，回填 domain 行。
+
+    需在环境变量里设对应 KEY：
+    - hunter     → YOUZI_HUNTER_API_KEY
+    - builtwith  → YOUZI_BUILTWITH_API_KEY
+    没设 KEY 返回空 dict（不报错——CLI / 调用方可降级）。
+
+    例：`curl -X POST localhost:8788/api/crawler/enrich/example.com?provider=hunter`
+    """
+    from app.enrich import run_enrichment, PROVIDERS
+    from app import db as _db
+    if provider not in PROVIDERS:
+        raise HTTPException(400, f"未知 provider: {provider}; 可选 {list(PROVIDERS)}")
+    conn = _db.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            "SELECT * FROM domain WHERE entity_key=?", (entity,)
+        ).fetchone()
+        if row is None:
+            raise HTTPException(404, f"entity not found: {entity}")
+        ctx = dict(row)
+        delta = run_enrichment(provider, entity, ctx)
+        if delta:
+            cols = ["enrichment_status='done'", "enriched_at=?",
+                    "contact_email=COALESCE(?, contact_email)",
+                    "tech_signals=COALESCE(?, tech_signals)"]
+            params = [_db.now(), delta.get("contact_email"), delta.get("tech_signals")]
+            conn.execute(
+                f"UPDATE domain SET {', '.join(cols)} WHERE entity_key=?",
+                (*params, entity))
+            conn.commit()
+        return {"entity": entity, "provider": provider,
+                "delta": delta, "updated": bool(delta)}
+    finally:
+        conn.close()
 
 
 @app.get("/api/leads")

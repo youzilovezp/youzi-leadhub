@@ -168,3 +168,67 @@ def test_patch_lead_status_invalid_input(fresh_db):
     # 非法 status
     r400 = client.patch("/api/leads/real.com/status", json={"status": "nonsense"})
     assert r400.status_code == 400
+
+
+# ============================================================================
+# 2026-10-01：付费富化端点（hunter / builtwith）
+# ============================================================================
+
+def test_enrich_endpoint_requires_known_provider(fresh_db):
+    """未知 provider → 400（不能让用户随便填）。"""
+    conn, dbp = fresh_db
+    dbm.upsert_domain(conn, "x.com", "play", None)
+    conn.commit()
+    client = TestClient(api_mod.app)
+    r = client.post("/api/crawler/enrich/x.com?provider=ghost")
+    assert r.status_code == 400
+
+
+def test_enrich_endpoint_404_for_missing_entity(fresh_db):
+    """实体不存在 → 404（避免静默无操作）。"""
+    client = TestClient(api_mod.app)
+    r = client.post("/api/crawler/enrich/ghost.com?provider=hunter")
+    assert r.status_code == 404
+
+
+def test_enrich_endpoint_graceful_when_no_api_key(fresh_db, monkeypatch):
+    """2026-10-01：没设 API KEY 时降级返回空 delta，**不报错**——
+    让 CLI / 调用方可以无脑调用，等用户配 KEY 才生效。"""
+    monkeypatch.delenv("YOUZI_HUNTER_API_KEY", raising=False)
+    conn, dbp = fresh_db
+    dbm.upsert_domain(conn, "x.com", "play", None)
+    conn.commit()
+    client = TestClient(api_mod.app)
+    r = client.post("/api/crawler/enrich/x.com?provider=hunter")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["entity"] == "x.com"
+    assert body["provider"] == "hunter"
+    assert body["delta"] == {}
+    assert body["updated"] is False
+    # 域表 enrichment_status 保持 'none'（未富化）
+    assert dbm.connect(dbp).execute(
+        "SELECT enrichment_status FROM domain WHERE entity_key='x.com'"
+    ).fetchone()[0] == "none"
+
+
+def test_enrich_endpoint_updates_domain_when_provider_returns_data(fresh_db, monkeypatch):
+    """2026-10-01：Provider 返回非空 delta 时落库（contact_email/tech_signals）。"""
+    from app.enrich import HunterProvider
+    monkeypatch.setattr(HunterProvider, "enrich",
+                        lambda self, e, c: {"contact_email": "info@x.com",
+                                            "tech_signals": "shopify,stripe"})
+    conn, dbp = fresh_db
+    dbm.upsert_domain(conn, "x.com", "play", None)
+    conn.commit()
+    client = TestClient(api_mod.app)
+    r = client.post("/api/crawler/enrich/x.com?provider=hunter")
+    assert r.status_code == 200
+    assert r.json()["updated"] is True
+    row = dbm.connect(dbp).execute(
+        "SELECT contact_email, tech_signals, enrichment_status "
+        "FROM domain WHERE entity_key='x.com'"
+    ).fetchone()
+    assert row[0] == "info@x.com"
+    assert row[1] == "shopify,stripe"
+    assert row[2] == "done"

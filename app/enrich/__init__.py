@@ -12,6 +12,12 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+import json
+import os
+import time
+from urllib.parse import quote
+
+import httpx
 
 
 class EnrichmentProvider(ABC):
@@ -52,12 +58,41 @@ class EnrichmentProvider(ABC):
 
 
 class HunterProvider(EnrichmentProvider):
-    """Hunter.io：按 domain 找企业邮箱（$49/月 1000 calls）。
+    """Hunter.io：按 domain 找企业邮箱 + tech 栈（$49/月 1000 calls）。
 
-    stub — 接入时实现 enrich()：调 Hunter API /v2/domain-search，
-    返回 {"contact_email": ..., "tech_signals": ...}（Hunter 也返回 tech 数据）。
+    2026-10-01：接入实现——需要 `YOUZI_HUNTER_API_KEY` 环境变量。
+    文档：https://hunter.io/api-documentation/v2
+
+    返回示例：
+    {
+        "contact_email": "info@example.com",
+        "tech_signals": "shopify, stripe, ga",   # Hunter 也返回 tech
+    }
     """
     provider_name = "hunter"
+
+    def enrich(self, entity_key: str, context: dict) -> dict:
+        api_key = os.environ.get("YOUZI_HUNTER_API_KEY")
+        if not api_key:
+            return {}      # 没配 key 直接降级返回空（不污染主管道）
+        try:
+            r = httpx.get(
+                "https://api.hunter.io/v2/domain-search",
+                params={"domain": entity_key, "api_key": api_key, "limit": 5},
+                timeout=15,
+            )
+            if r.status_code != 200:
+                return {}
+            data = r.json().get("data") or {}
+            emails = data.get("emails") or []
+            contact = next((e["value"] for e in emails
+                            if e.get("value") and e.get("confidence", 0) > 50), None)
+            pattern = data.get("pattern") or []
+            tech = ",".join(p for p in pattern if p)[:200] or None
+            return {k: v for k, v in
+                    {"contact_email": contact, "tech_signals": tech}.items() if v}
+        except (httpx.HTTPError, KeyError, ValueError):
+            return {}
 
 
 class SnovProvider(EnrichmentProvider):
@@ -86,3 +121,17 @@ PROVIDERS: dict[str, type[EnrichmentProvider]] = {
     for cls in (HunterProvider, SnovProvider, ApolloProvider,
                 BuiltWithProvider, ClearbitProvider)
 }
+
+
+def run_enrichment(provider_name: str, entity_key: str, context: dict) -> dict:
+    """2026-10-01：单入口——按 provider_name 调对应 enrich() 并返回增量 dict。
+
+    内部捕获异常→返回空 dict。CLI / API 共用。
+    """
+    cls = PROVIDERS.get(provider_name)
+    if cls is None:
+        return {}
+    try:
+        return cls().enrich(entity_key, context) or {}
+    except Exception:
+        return {}
