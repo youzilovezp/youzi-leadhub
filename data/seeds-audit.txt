@@ -1,0 +1,15 @@
+# 正常+命中（link 层已知）
+https://www.jotform.com
+# 跨 host 重定向（entity_key 归属 + seed_host 保留验证）
+http://jotform.com
+# 同站变体重复（dupefilter 应只爬一次）
+https://www.jotform.com/?utm_source=x
+# 私网（SSRF 拦截 → error 留痕）
+http://10.0.0.1
+# 十进制 IP 编码绕过尝试（= 127.0.0.1）
+http://2130706433/
+# DNS 不存在 → error 留痕
+http://no-such-domain-zz9x.example
+# 脏种子（无 scheme/空行/注释）→ 归一拒绝
+bare-domain-without-scheme.example
+
