@@ -131,7 +131,7 @@ def get_today_queue(limit: int = Query(20, ge=1, le=100)):
                   d.outreach_message
            FROM domain d
            JOIN sighting s ON s.entity_key = d.entity_key
-           WHERE d.contact_status = 'new'
+           WHERE d.contact_status = 'new' AND d.gambling = 0
            GROUP BY d.entity_key
            ORDER BY d.p0 DESC, d.score DESC
            LIMIT ?""",
@@ -298,11 +298,16 @@ def enrich_lead(entity: str, provider: str = "hunter"):
 def get_leads(limit: int = Query(200, ge=1, le=2000,
                                 description="最大返回 2000 条（前端导出按钮文案对齐）"),
               channel: str | None = None, p0: int | None = None,
-              market_group: str | None = None):
+              market_group: str | None = None,
+              include_gray: bool = Query(
+                  False, description="默认排灰域（博彩/demo），true 全量（审计对账）")):
     # 2026-09-30 修复：limit 上限显式 2000（与前端导出按钮文案 "≤ 2000 条" 一致）；
     # 之前 Pydantic 不限，传 limit=2000 被 SQL 静默截到 1000，前端拿不全数据。
+    # 2026-10-01：灰域隔离——gambling=1 带号域默认不进销售视野（P0-4）
     conn = _conn(DB_PATH)
     where, params = [], []
+    if not include_gray:
+        where.append("d.gambling = 0")
     if channel:
         where.append("d.channel = ?")
         params.append(channel)

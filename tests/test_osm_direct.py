@@ -5,15 +5,22 @@ from app.osm_direct import elements_to_rows
 
 
 def test_elements_to_rows_variants():
+    """2026-10-01 收窄：仅 contact:whatsapp 是 WA 证据——generic phone 标签
+    （shop+phone/restaurant+phone）导入的商家电话未验证是 WA，冒充带号线索
+    占了带号线索 47%（五代理审计 P0-3 最大假线索源）。"""
     els = [
         # wa.me 链接形态 + website（contact:whatsapp 语义最强）
         {"type": "node", "id": 1, "tags": {
             "website": "https://kopisusu.co.id",
             "contact:whatsapp": "https://wa.me/628123456789"}},
-        # 裸号码 + phone 标签（分隔符混写）
+        # 裸号码 + phone 标签——2026-10-01 起不再当 WA 线索导入
         {"type": "way", "id": 2, "tags": {
             "website": "http://warung-budi.my",
             "phone": "+60 3-7805 4479"}},
+        # contact:mobile 同样不认（未验证是 WA，只是手机号）
+        {"type": "node", "id": 5, "tags": {
+            "website": "http://mobile-only.example.my",
+            "contact:mobile": "+60123456789"}},
         # 无 website → 跳过（实体键无落点）
         {"type": "node", "id": 3, "tags": {"phone": "+6621234567"}},
         # 无效号码 → 跳过
@@ -21,11 +28,26 @@ def test_elements_to_rows_variants():
             "website": "https://x.com", "phone": "12345"}},
     ]
     rows = elements_to_rows(els)
-    assert len(rows) == 2
+    assert len(rows) == 1, f"仅 contact:whatsapp 应导入: {[r['entity'] for r in rows]}"
     assert rows[0]["e164"] == "+628123456789" and rows[0]["country"] == "ID"
     assert rows[0]["osm_url"].endswith("/node/1")           # 合规留痕：OSM 元素链接
-    assert rows[1]["e164"] == "+60378054479" and rows[1]["country"] == "MY"
-    assert rows[1]["osm_url"].endswith("/way/2")
+
+
+def test_import_osm_query_only_whatsapp_tag(tmp_path, monkeypatch):
+    """2026-10-01：Overpass 查询同步收窄——shop+phone / amenity+phone 分支
+    返回的元素已不会被导入，查询它们纯属浪费公共端点配额。"""
+    import app.osm_direct as od
+    captured = {}
+
+    def fake_post(q):
+        captured["q"] = q
+        return {"elements": []}
+
+    monkeypatch.setattr(od, "overpass_post", fake_post)
+    od.import_osm("MY", 10, str(tmp_path / "t.db"))
+    q = captured["q"]
+    assert "contact:whatsapp" in q
+    assert '"shop"]["phone"]' not in q and '"phone"]["website"]' not in q, q
 
 
 def test_elements_to_rows_skips_platform_root_hosts():

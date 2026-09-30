@@ -22,13 +22,17 @@ def channel_stats(conn) -> list[dict]:
     return [dict(r, hit_rate=round((r["hits"] or 0) / r["total"], 4)) for r in rows]
 
 
-def export_csv(conn, out_path: str) -> int:
+def export_csv(conn, out_path: str, include_gray: bool = False) -> int:
+    """带号线索 CSV。默认排灰域（gambling=1 不进销售视野——实测 11 个博彩域
+    混在导出里）；include_gray=True 全量（审计对账用）。"""
+    gray_sql = "" if include_gray else "WHERE d.gambling = 0"
     rows = conn.execute(
-        """
+        f"""
         SELECT d.entity_key, d.channel, d.market,
                GROUP_CONCAT(DISTINCT s.e164) AS phones
         FROM domain d
         JOIN sighting s ON s.entity_key = d.entity_key
+        {gray_sql}
         GROUP BY d.entity_key
         ORDER BY d.score DESC, d.entity_key
         """

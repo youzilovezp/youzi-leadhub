@@ -174,6 +174,59 @@ def test_patch_lead_status_invalid_input(fresh_db):
 # 2026-10-01：付费富化端点（hunter / builtwith）
 # ============================================================================
 
+# ============================================================================
+# 2026-10-01：灰域隔离（五代理审计 P0-4）——博彩/demo 域不进销售视野
+# ============================================================================
+
+def _seed_gambling(conn, entity, gambling=1):
+    _seed(conn, entity, "play", "ID", "SEA", 8, 0, "+628999999999")
+    conn.execute("UPDATE domain SET gambling=? WHERE entity_key=?", (gambling, entity))
+    conn.commit()
+
+
+def test_leads_excludes_gambling_by_default(fresh_db):
+    """博彩域混在 /api/leads 尾部且 CSV 全量导出（实测 11 个 gambling=1 带号域）
+    ——默认排除，?include_gray=true 显式放行。"""
+    conn, dbp = fresh_db
+    _seed(conn, "clean-shop.com", "play", "ID", "SEA", 10, 0, "+628111111111")
+    _seed_gambling(conn, "casino-x.com")
+    client = TestClient(api_mod.app)
+
+    entities = [d["entity"] for d in client.get("/api/leads").json()]
+    assert entities == ["clean-shop.com"], entities
+    entities_gray = [d["entity"] for d in
+                     client.get("/api/leads?include_gray=true").json()]
+    assert set(entities_gray) == {"clean-shop.com", "casino-x.com"}
+
+
+def test_today_excludes_gambling(fresh_db):
+    """今日联系队列同样排灰域（销售不该把预算花在博彩域上）。"""
+    conn, dbp = fresh_db
+    _seed(conn, "clean-shop.com", "play", "ID", "SEA", 10, 0, "+628111111111")
+    _seed_gambling(conn, "casino-x.com")
+    client = TestClient(api_mod.app)
+    entities = [d["entity_key"] for d in client.get("/api/today").json()]
+    assert entities == ["clean-shop.com"], entities
+
+
+def test_export_csv_excludes_gambling_by_default(fresh_db):
+    """CSV 导出默认排灰域；include_gray=True 全量（审计对账用）。"""
+    import csv as _csv
+    from app import stats as stats_mod
+    conn, dbp = fresh_db
+    _seed(conn, "clean-shop.com", "play", "ID", "SEA", 10, 0, "+628111111111")
+    _seed_gambling(conn, "casino-x.com")
+
+    out1 = str(fresh_db[1]).replace("t.db", "export-default.csv")
+    n = stats_mod.export_csv(conn, out1)
+    rows = list(_csv.DictReader(open(out1, encoding="utf-8")))
+    assert n == 1 and rows[0]["entity"] == "clean-shop.com"
+
+    out2 = str(fresh_db[1]).replace("t.db", "export-gray.csv")
+    n2 = stats_mod.export_csv(conn, out2, include_gray=True)
+    assert n2 == 2
+
+
 def test_enrich_endpoint_requires_known_provider(fresh_db):
     """未知 provider → 400（不能让用户随便填）。"""
     conn, dbp = fresh_db

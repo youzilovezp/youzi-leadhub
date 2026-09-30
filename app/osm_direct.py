@@ -14,8 +14,10 @@ from app.normalize import entity_key, normalize_phone
 from app.pipelines import score_pending
 from app.seeds import overpass_post
 
-# 电话来源标签优先级：contact:whatsapp 语义最强（明确是 WA 号）
-_PHONE_TAGS = ("contact:whatsapp", "contact:mobile", "phone", "contact:phone")
+# 2026-10-01 收窄：仅 contact:whatsapp 是 WA 证据。旧四标签（contact:mobile/
+# phone/contact:phone）导入的商家电话未验证是 WA，却与 wa.me 实锤同分同列
+# ——占了带号线索 47%（五代理审计 P0-3 最大假线索源）。
+_PHONE_TAGS = ("contact:whatsapp",)
 
 # 平台根 blocklist（2026-10-01 巡检）：website 标签指向这些时，entity_key 会塌到平台根
 # ——PSL 不认 *.google.com / *.facebook.com / *.wordpress.com 等为私有后缀，但 OSM 商家
@@ -84,12 +86,10 @@ def import_osm(countries: str, limit: int, db_path: str | Path) -> int:
     conn = db.connect(db_path)
     n = 0
     for code in codes:
-        # phone 标签不限类目会查穿百万级元素（公共端点必 504）——限定 shop/餐饮商家，
-        # 与种子渠道同一人群规模（实测 35s/国）
+        # 2026-10-01 收窄：仅查 contact:whatsapp——phone 分支返回的元素已不会被
+        # 导入（见 _PHONE_TAGS），查询它们纯属浪费公共端点配额
         q = (f'[out:json][timeout:180];area["ISO3166-1"="{code}"]->.a;'
-             f'(nwr["contact:whatsapp"]["website"](area.a);'
-             f'nwr["shop"]["phone"]["website"](area.a);'
-             f'nwr["amenity"~"^(restaurant|cafe|fast_food)$"]["phone"]["website"](area.a););'
+             f'nwr["contact:whatsapp"]["website"](area.a);'
              f'out tags {per};')
         r = overpass_post(q)
         for row in elements_to_rows(r.get("elements", [])):
