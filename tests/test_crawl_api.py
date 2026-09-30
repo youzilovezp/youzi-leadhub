@@ -9,6 +9,14 @@ import pytest
 from fastapi import HTTPException
 
 from app import crawl_api
+
+
+def check(name, ok, detail=""):
+    if ok:
+        print(f"  ✅ {name}")
+    else:
+        print(f"  ❌ {name}：{detail}")
+        raise AssertionError(f"{name}: {detail}")
 from app.crawl_api import _safe_db_path, _tail
 
 
@@ -55,8 +63,8 @@ def test_post_crawl_409_before_spawn(monkeypatch):
 def test_post_crawl_allows_exited_job(monkeypatch):
     """已退出的 job 不挡新批次（增量续跑常态）。"""
     crawl_api._JOBS_RUNNING["inc-play"] = _fake_job("play", status="exited")
-    # 仓库里有真实种子文件——必须打掉 _pick_seed/_spawn，防测试真起爬取进程
-    monkeypatch.setattr(crawl_api, "_pick_seed", lambda ch: None)
+    # 仓库里有真实种子文件——必须打掉 _seed_candidates/_spawn，防测试真起爬取进程
+    monkeypatch.setattr(crawl_api, "_seed_candidates", lambda ch: [])
     monkeypatch.setattr(crawl_api, "_spawn", lambda *a, **k: _fake_job())
     out = crawl_api.post_crawl(crawl_api.CrawlRequest(channels=["play"]))
     assert out["total"] == 0          # 无种子 → skipped 而非 409
@@ -64,10 +72,13 @@ def test_post_crawl_allows_exited_job(monkeypatch):
 
 def test_incremental_limit_is_full_seed_file(monkeypatch, tmp_path):
     """2026-09-29 修复：增量模式 limit=种子全量行数（旧实现取前 200 条，
-    第 201+ 条种子永远轮不到 → 增量永远 +0）；full 模式仍用用户 limit。"""
+    第 201+ 条种子永远轮不到 → 增量永远 +0）；full 模式仍用用户 limit。
+    2026-09-30 扩展：incremental 模式 limit=所有候选文件行数之和。
+    """
+    from pathlib import Path
     seed = tmp_path / "seeds-x.txt"
     seed.write_text("https://a.com/\n" * 309 + "# comment\n\n", encoding="utf-8")
-    monkeypatch.setattr(crawl_api, "_pick_seed", lambda ch: str(seed))
+    monkeypatch.setattr(crawl_api, "_seed_candidates", lambda ch: [seed])
     monkeypatch.setattr(crawl_api, "_CWD", tmp_path)
     calls = {}
     monkeypatch.setattr(crawl_api, "_spawn",
@@ -180,29 +191,30 @@ def test_post_seeds_busy_channel_409(monkeypatch, tmp_path):
 
 
 def test_get_seed_pools_sums_candidates(monkeypatch, tmp_path):
-    """GET /api/seeds：tranco 兜底候选（5 行）+ batch2（5874 行）应求和而非只取首个。
+    """GET /api/seeds：play 兜底候选（2 文件 + 副源）应求和而非只取首个。
 
-    ponytail：原 bug —— _pick_seed 只返回首个候选，tranco 兜底永远显示 5 行。
+    ponytail：原 bug —— _pick_seed 只返回首个候选，渠道兜底永远显示少量行。
     修复：返回 pools + details 两个字段，pools 是各渠道所有候选文件求和。
+    2026-09-30 清理：tranco 渠道已移除（命中率 0.2%，污染源）。
     """
     monkeypatch.setattr(crawl_api, "_CWD", tmp_path)
     (tmp_path / "data").mkdir()
-    # 模拟 tranco 渠道：兜底 5 行 + batch2 5874 行
-    (tmp_path / "data" / "seeds-tranco.txt").write_text("\n".join(f"https://a{i}.com/" for i in range(5)))
-    (tmp_path / "data" / "seeds-tranco-batch2.txt").write_text("\n".join(f"https://b{i}.com/" for i in range(5874)))
+    # 模拟 play 渠道：play.txt（392 行）+ play-new.txt（111 行）
+    (tmp_path / "data" / "seeds-play.txt").write_text("\n".join(f"https://a{i}.com/" for i in range(392)))
+    (tmp_path / "data" / "seeds-play-new.txt").write_text("\n".join(f"https://b{i}.com/" for i in range(111)))
     # 模拟 osm 渠道：单文件 626 行
     (tmp_path / "data" / "seeds-osm.txt").write_text("\n".join(f"https://c{i}.com/" for i in range(626)))
 
     out = crawl_api.get_seed_pools()
-    # tranco 应 = 5 + 5874 = 5879
-    assert out["pools"]["tranco"] == 5879
+    # play 应 = 392 + 111 = 503（汇总两个候选文件）
+    assert out["pools"]["play"] == 503
     # osm 应 = 626
     assert out["pools"]["osm"] == 626
-    # 其他渠道 = 0
-    assert out["pools"]["play"] == 0
+    # tranco 已从 ALL_CHANNELS 移除——不存在
+    assert "tranco" not in out["pools"]
     # details 含每个文件的明细
-    assert out["details"]["tranco"]["seeds-tranco.txt"] == 5
-    assert out["details"]["tranco"]["seeds-tranco-batch2.txt"] == 5874
+    assert out["details"]["play"]["seeds-play.txt"] == 392
+    assert out["details"]["play"]["seeds-play-new.txt"] == 111
     assert out["details"]["osm"]["seeds-osm.txt"] == 626
 
 
@@ -234,23 +246,23 @@ def test_post_crawl_toctou_lock(monkeypatch, tmp_path):
     """
     seed = tmp_path / "seeds-tranco.txt"
     seed.write_text("https://a.com/\n", encoding="utf-8")
-    monkeypatch.setattr(crawl_api, "_pick_seed", lambda ch: str(seed))
+    monkeypatch.setattr(crawl_api, "_seed_candidates", lambda ch: [seed])
     monkeypatch.setattr(crawl_api, "_CWD", tmp_path)
     # 模拟 tranco 已有 running job
-    fake = crawl_api._Job(job_id="inc-tranco", channel="tranco", pid=1,
+    fake = crawl_api._Job(job_id="inc-play", channel="play", pid=1,
                           started_at=0.0, proc=None, status="running")  # type: ignore[arg-type]
-    crawl_api._JOBS_RUNNING["inc-tranco"] = fake
+    crawl_api._JOBS_RUNNING["inc-play"] = fake
     spawned = []
     monkeypatch.setattr(crawl_api, "_spawn",
                         lambda *a, **k: spawned.append(1) or fake)
     try:
         # 第一个请求应 409，不应 spawn
         with pytest.raises(HTTPException) as e:
-            crawl_api.post_crawl(crawl_api.CrawlRequest(channels=["tranco"]))
+            crawl_api.post_crawl(crawl_api.CrawlRequest(channels=["play"]))
         assert e.value.status_code == 409
         assert spawned == [], f"已 busy 时不应 spawn: {spawned}"
     finally:
-        crawl_api._JOBS_RUNNING.pop("inc-tranco", None)
+        crawl_api._JOBS_RUNNING.pop("inc-play", None)
 
 
 def test_safe_db_path_rejects_symlink_outside_cwd(monkeypatch, tmp_path):
@@ -276,13 +288,85 @@ def test_safe_db_path_rejects_symlink_outside_cwd(monkeypatch, tmp_path):
         link.unlink()
 
 
+def test_post_crawl_incremental_uses_all_candidate_seeds(monkeypatch, tmp_path):
+    """2026-09-30 修复：incremental 模式应汇总所有候选种子文件（_seed_candidates），
+    而非 _pick_seed 取首个——例如 play 渠道有 play.txt + play-new.txt，
+    旧逻辑只跑首文件，多次增量永远在同一批 URL 上 dupefilter 命中。
+    """
+    from app import crawl_api
+    seed1 = tmp_path / "seeds-play.txt"
+    seed1.write_text("\n".join(f"https://a{i}.com/" for i in range(392)))
+    seed2 = tmp_path / "seeds-play-new.txt"
+    seed2.write_text("\n".join(f"https://b{i}.com/" for i in range(111)))
+
+    captured = {}
+    def mock_spawn(channel, seed_file, limit, *args, **kw):
+        captured["channel"] = channel
+        captured["seed_file"] = seed_file
+        captured["limit"] = limit
+        return crawl_api._Job(job_id="t", channel=channel, pid=1, started_at=0.0,
+                              status="running")  # type: ignore[arg-type]
+
+    monkeypatch.setattr(crawl_api, "_CWD", tmp_path)
+    monkeypatch.setattr(crawl_api, "_seed_candidates", lambda ch: [seed1, seed2])
+    monkeypatch.setattr(crawl_api, "_spawn", mock_spawn)
+
+    # incremental 模式：limit = 392 + 111 = 503；seed_file = 最大的 play.txt
+    crawl_api.post_crawl(crawl_api.CrawlRequest(channels=["play"], mode="incremental"))
+    check("incremental limit = 503（汇总所有候选）",
+          captured["limit"] == 503, f"got {captured['limit']}")
+    check("seed_file 选最大 play.txt", captured["seed_file"].endswith("seeds-play.txt"),
+          f"got {captured['seed_file']}")
+
+    # full 模式：limit 用 req.limit，seed 仍选最大
+    captured.clear()
+    crawl_api.post_crawl(crawl_api.CrawlRequest(channels=["play"], mode="full", limit=100))
+    check("full mode limit = req.limit=100",
+          captured["limit"] == 100, f"got {captured['limit']}")
+    check("full mode seed_file 选最大 play.txt",
+          captured["seed_file"].endswith("seeds-play.txt"))
+
+
+def test_channel_busy_distinguishes_kill_vs_crash(monkeypatch):
+    """2026-09-30 修复：_channel_busy 区分 exit code——rc==0（exited）/
+    rc<0（killed，被信号）/ rc>0（failed，程序崩溃）。前端 StatusPill 依此显示
+    "完成" / "已终止" / "失败"，避免"失败 (-9)"误判为程序崩溃。
+    """
+    import os, signal, subprocess, time
+    from app import crawl_api
+
+    def classify(rc):
+        """复制 _channel_busy 内的状态切换逻辑（避免构造真实 _Job 的 Pydantic 限制）。"""
+        if rc == 0: return "exited"
+        if rc < 0: return "killed"
+        return "failed"
+
+    # 1. 正常退出 → status="exited"
+    p_ok = subprocess.Popen([".venv/bin/python", "-c", "exit(0)"])
+    p_ok.wait()
+    check("rc=0 → exited", classify(p_ok.returncode) == "exited")
+
+    # 2. SIGKILL → rc<0 → status="killed"
+    p_kill = subprocess.Popen([".venv/bin/python", "-c", "import time;time.sleep(60)"])
+    time.sleep(0.3)
+    os.kill(p_kill.pid, signal.SIGKILL)
+    p_kill.wait()
+    assert p_kill.returncode == -9, f"预期 rc=-9, got {p_kill.returncode}"
+    check("rc=-9 (SIGKILL) → killed", classify(p_kill.returncode) == "killed")
+
+    # 3. 程序崩溃 → rc>0 → status="failed"
+    p_fail = subprocess.Popen([".venv/bin/python", "-c", "exit(42)"])
+    p_fail.wait()
+    check("rc=42 (程序崩溃) → failed", classify(p_fail.returncode) == "failed")
+
+
 def test_get_crawl_status_safe_iteration(monkeypatch):
     """2026-09-30 修复：`/api/crawl/status` TTL cleanup 必须用 `list(_JOBS_RUNNING.items())`
     快照——否则并发 pop 触发 RuntimeError 导致 API 500。
     """
     # 插入若干 stale job + active job
     now = 99999.0
-    stale1 = crawl_api._Job(job_id="stale1", channel="tranco", pid=1,
+    stale1 = crawl_api._Job(job_id="stale1", channel="play", pid=1,
                             started_at=now - 7200, proc=None, status="exited")  # type: ignore[arg-type]
     stale2 = crawl_api._Job(job_id="stale2", channel="play", pid=2,
                             started_at=now - 7200, proc=None, status="failed")  # type: ignore[arg-type]

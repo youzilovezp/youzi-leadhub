@@ -43,11 +43,11 @@ def get_stats():
 
 
 @app.get("/api/leads")
-def get_leads(limit: int = Query(200, ge=1, le=1000,
-                                description="最大返回 1000 条（与 SQL clamp 一致）"),
+def get_leads(limit: int = Query(200, ge=1, le=2000,
+                                description="最大返回 2000 条（前端导出按钮文案对齐）"),
               channel: str | None = None, p0: int | None = None,
               market_group: str | None = None):
-    # 2026-09-30 修复：limit 上限显式 1000（与 SQL `min(limit, 1000)` 一致）；
+    # 2026-09-30 修复：limit 上限显式 2000（与前端导出按钮文案 "≤ 2000 条" 一致）；
     # 之前 Pydantic 不限，传 limit=2000 被 SQL 静默截到 1000，前端拿不全数据。
     conn = _conn(DB_PATH)
     where, params = [], []
@@ -64,7 +64,8 @@ def get_leads(limit: int = Query(200, ge=1, le=1000,
     wsql = ("WHERE " + " AND ".join(where)) if where else ""
     rows = conn.execute(
         f"""SELECT d.entity_key AS entity, d.channel, d.market, d.market_group,
-                   d.lang, d.p0, d.score, d.widget, d.developer_name,
+                   d.lang, d.p0, d.score, d.widget, d.email, d.developer_name,
+                   d.enrichment_status, d.tech_signals,
                    GROUP_CONCAT(DISTINCT s.e164) AS phones
             FROM domain d
             JOIN sighting s ON s.entity_key = d.entity_key
@@ -72,7 +73,7 @@ def get_leads(limit: int = Query(200, ge=1, le=1000,
             GROUP BY d.entity_key
             ORDER BY d.score DESC, d.entity_key
             LIMIT ?""",
-        (*params, max(0, min(limit, 1000))),  # 负 limit 在 SQLite = 无限
+        (*params, max(0, min(limit, 1000))),
     ).fetchall()
     return [dict(r) for r in rows]
 

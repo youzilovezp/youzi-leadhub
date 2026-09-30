@@ -31,10 +31,11 @@ _JOBS = _CWD / "data" / ".job"
 _LOGS.mkdir(parents=True, exist_ok=True)
 _JOBS.mkdir(parents=True, exist_ok=True)
 
-ALL_CHANNELS = ("tranco", "myshopify", "play", "osm", "sample")
+# 2026-09-30 清理：tranco top-1M 是安全域名排序，命中率 0.2%——不是销售线索源
+# 保留 cli.py 的 `seed tranco` 命令供手工调试，但 UI/自动流程不再暴露 tranco
+ALL_CHANNELS = ("myshopify", "play", "osm", "sample")
 # 渠道 → 默认种子文件映射；sample 渠道需用户传 --file 故不在一键列表
 SEEDS_DEFAULT: dict[str, str] = {
-    "tranco":    "data/seeds-tranco.txt",
     "myshopify": "data/seeds-myshopify.txt",
     "play":      "data/seeds-play.txt",         # 兜底；如有 seeds-play-new.txt 自动优先
     "osm":       "data/seeds-osm.txt",
@@ -53,8 +54,10 @@ class _Job:
     started_at: float
     proc: subprocess.Popen | None = None
     log_file: Path | None = None
-    status: Literal["created", "running", "exited", "failed"] = "created"
-    exit_code: int | None = None
+    # 2026-09-30 扩展：区分"程序崩溃"和"被信号杀死"（系统清理/restart）——信号杀死标 'killed'
+    # UX：避免用户看到"失败 (-9)"误以为是程序崩溃，实际是 kill -9 清理的
+    status: Literal["created", "running", "exited", "failed", "killed"] = "created"
+    exit_code: int | None = None  # 退出码；< 0 表示被 signal 杀死（|exit_code| 是信号号）
 
 
 _JOBS_RUNNING: dict[str, _Job] = {}        # job_id → job
@@ -66,7 +69,10 @@ _BUSY_LOCK = threading.Lock()
 class CrawlRequest(BaseModel):
     # 默认空列表 = 全部（前端面命令式）；指定 list = 仅跑指定渠道
     channels: list[str] = Field(default_factory=list)
-    limit: int = Field(default=200, ge=1, le=2000, description="每渠道最大种子数")
+    # 2026-09-30 放宽：incremental 模式完全忽略 limit（用 _seed_count 决定），
+    # full 模式才是用户真正控制条数的入口；放宽到 50000 覆盖当前种池总量（7002）+ 余量
+    limit: int = Field(default=200, ge=1, le=50000,
+                       description="每渠道最大种子数（incremental 模式忽略，full 模式生效）")
     max_pages: int = Field(default=3, ge=1, le=10)
     db_path: str = "data/leads.db"
     # incremental（默认）= 复用稳定 JOBDIR，Scrapy dupefilter 跳过已爬，
@@ -92,8 +98,6 @@ def _pick_seed(channel: str) -> str | None:
     """按优先级选种子文件——新格式（如带 developer_name 的 play-new）优先。"""
     if channel == "play":
         candidates = ["data/seeds-play-new.txt", "data/seeds-play.txt"]
-    elif channel == "tranco":
-        candidates = ["data/seeds-tranco.txt", "data/seeds-tranco-batch2.txt"]
     elif channel == "myshopify":
         candidates = ["data/seeds-myshopify.txt"]
     elif channel == "osm":
@@ -171,7 +175,13 @@ def _channel_busy(channel: str) -> bool:
             rc = j.proc.poll()
             if rc is not None:
                 j.exit_code = rc
-                j.status = "exited" if rc == 0 else "failed"
+                # POSIX: rc<0 表示被信号杀死（|rc| = 信号号），0 正常退出，>0 异常退出
+                if rc == 0:
+                    j.status = "exited"
+                elif rc < 0:
+                    j.status = "killed"  # 被信号终止（不是程序崩溃——通常系统清理或用户 kill）
+                else:
+                    j.status = "failed"
                 j.proc = None
                 continue
         if j.status in ("created", "running"):
@@ -273,8 +283,6 @@ def _seed_candidates(channel: str) -> list[Path]:
     """返回渠道的所有候选种子文件路径（按优先级排；多个都计入种子池行数）。"""
     if channel == "play":
         names = ["data/seeds-play-new.txt", "data/seeds-play.txt"]
-    elif channel == "tranco":
-        names = ["data/seeds-tranco.txt", "data/seeds-tranco-batch2.txt"]
     elif channel == "myshopify":
         names = ["data/seeds-myshopify.txt"]
     elif channel == "osm":
@@ -375,16 +383,20 @@ def post_crawl(req: CrawlRequest):
         spawned: list[JobInfo] = []
         skipped: list[dict] = []
         for ch in channels:
-            seed = _pick_seed(ch)
-            if not seed or not (_CWD / seed).exists():
+            # 2026-09-30 修复：incremental 模式汇总所有候选种子文件行数（与 /api/seeds 一致），
+            # 并选最大的文件喂 Scrapy——避免 _pick_seed 只取首个候选（tranco 兜底永远 5 行
+            # 而 batch2 5874 行从未被用，导致增量 tranco 每次只爬 5 URL）。
+            candidates = _seed_candidates(ch)
+            if not candidates:
                 skipped.append({"channel": ch, "reason": f"无种子文件（需先跑 seed {ch}）"})
                 continue
-            # 增量模式不切片种子文件（2026-09-29 修复）：旧实现取前 limit 条，同一
-            # 种子文件反复跑永远轮不到第 limit+1 条（实测：seeds 309 条、limit 200，
-            # 18:19 增量 filtered 200 / 0.042s 结束 / 永远 +0）。全量交给 dupefilter
-            # 跳已爬——指纹查表极廉价，被滤的种子不产生网络请求。
-            limit = (_seed_count(_CWD / seed) if req.mode == "incremental"
-                     else req.limit)
+            # 选最大文件喂 Scrapy（Scrapy 内部 dupefilter 共享 JOBDIR——重复 URL 跨文件自动跳过）
+            seed = str(max(candidates, key=lambda p: p.stat().st_size))
+            if req.mode == "incremental":
+                # 全量交给 dupefilter：所有候选文件总行数（已被爬过的会被 dupefilter 跳过）
+                limit = sum(_seed_count(c) for c in candidates)
+            else:
+                limit = req.limit
             job = _spawn(ch, seed, limit, req.max_pages, db_path, req.mode)
             spawned.append(JobInfo(
                 job_id=job.job_id, channel=job.channel, pid=job.pid,
@@ -455,7 +467,13 @@ def get_crawl_status():
                 job.status = "running"
             else:
                 job.exit_code = rc
-                job.status = "exited" if rc == 0 else "failed"
+                # 同 _channel_busy：rc<0 是信号杀死，区别于程序崩溃
+                if rc == 0:
+                    job.status = "exited"
+                elif rc < 0:
+                    job.status = "killed"
+                else:
+                    job.status = "failed"
                 job.proc = None
         out.append(JobInfo(
             job_id=job.job_id, channel=job.channel, pid=job.pid,

@@ -12,6 +12,7 @@ import {
   Moon,
   Play,
   Plus,
+  Power,
   RefreshCw,
   Search,
   Settings2,
@@ -236,6 +237,16 @@ function StatusPill({ status, exitCode }: { status: CrawlJob['status']; exitCode
         <Check className="size-3" /> 完成
       </span>
     )
+  if (status === 'killed')
+    // 被信号杀死（不是程序崩溃）——通常是 API 重启/系统清理导致子进程被回收
+    // exit_code 是负数，|exit_code| 是信号号（-9 = SIGKILL, -15 = SIGTERM）
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-xs text-amber-700 dark:text-amber-300 ring-1 ring-amber-500/30"
+            title="子进程被信号终止（不是程序崩溃）">
+        <Power className="size-3" /> 已终止
+        {exitCode !== null ? ` (${exitCode > 128 ? `SIGKILL` : `sig${-exitCode}`})` : ''}
+      </span>
+    )
   return (
     <span className="inline-flex items-center gap-1 rounded-full bg-rose-500/15 px-2 py-0.5 text-xs text-rose-700 dark:text-rose-300 ring-1 ring-rose-500/30">
       <X className="size-3" /> 失败 {exitCode !== null ? `(${exitCode})` : ''}
@@ -364,7 +375,12 @@ function useSeedPools() {
   const refresh = useCallback(() => {
     fetch('/api/seeds')
       .then((r) => (r.ok ? r.json() : null))
-      .then((d: PoolsResp | null) => d && (setPools(d.pools ?? {}), setDetails(d.details ?? {})))
+      .then((d: PoolsResp | null) => {
+        if (d) {
+          setPools(d.pools ?? {})
+          setDetails(d.details ?? {})
+        }
+      })
       .catch(() => {})
   }, [])
   useEffect(() => { refresh() }, [refresh])
@@ -960,7 +976,7 @@ function EmptyLeads({ hasFilter, onClear }: { hasFilter: boolean; onClear: () =>
 /* 管道状态条（签名元素）：种子池 → 本次采集 → 线索库，实时数字连通成一条管道 */
 function PipelineStrip({ pools, details, planned, leads, running, runNote }: {
   pools: Record<string, number>
-  details: Record<string, Record<string, number>>
+  details?: Record<string, Record<string, number>>   // 可选——CrawlDialog 内嵌场景不传
   planned: number
   leads: number
   running: boolean
@@ -979,10 +995,16 @@ function PipelineStrip({ pools, details, planned, leads, running, runNote }: {
          aria-label={`种子池 ${poolTotal}，本次 ${planned} 站，线索库 ${leads}`}>
       {nodes.map((n, i) => {
         const Icon = n.icon
-        const tip = n.key === 'seeds' ? Object.entries(pools)
-          .filter(([, v]) => v > 0)
-          .map(([ch, v]) => `${ch} ${v.toLocaleString()}`)
-          .join(' · ') || '空' : ''
+        // details 仅在外部传入时拼接明细 tooltip（CrawlDialog 内嵌场景不传——fallback pools）
+        const tip = n.key === 'seeds' && details
+          ? Object.entries(details)
+              .flatMap(([ch, files]) =>
+                Object.entries(files).map(([fname, n]) => `${ch}/${fname.replace('.txt','')} ${n}`))
+              .join(' · ')
+          : n.key === 'seeds'
+            ? Object.entries(pools).filter(([, v]) => v > 0)
+                .map(([ch, v]) => `${ch} ${v.toLocaleString()}`).join(' · ') || '空'
+            : ''
         return (
           <Fragment key={n.key}>
             {i > 0 && (
@@ -1238,7 +1260,7 @@ function CrawlDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <PipelineStrip pools={pools} details={details} planned={plannedSeeds} leads={leadsTotal}
+        <PipelineStrip pools={pools} planned={plannedSeeds} leads={leadsTotal}
                        running={busyChannels.size > 0}
                        runNote={mode === 'incremental' ? '池中新站（旧站自动跳过）' : '全部重爬'} />
 
@@ -1639,7 +1661,7 @@ export default function App() {
                     <span className="text-border">·</span>
                     <span title="数据库累计域数（不是本次跑批新增）">总域 {totalDomains.toLocaleString()}</span>
                     <span className="text-border">·</span>
-                    <span title="数据库累计线索数（不是本次跑批新增）">总线索 {totalHits.toLocaleString()}</span>
+                    <span title="有 WhatsApp 号码的实体数（爬过的总域可能在另一数字显示）">线索 {totalHits.toLocaleString()}</span>
                     <span className="text-border">·</span>
                     <span title="高优 = 推荐跟进：中国出海线索">高优 {totalP0}</span>
                     {lastCrawlDelta !== null && (
