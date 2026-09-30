@@ -208,7 +208,7 @@ def get_crawler_strategy():
     """
     from app import smart_crawler
     conn = _conn(DB_PATH)
-    stats_map = {s["channel"]: s for s in db.get_crawl_stats(conn) or []}
+    stats_map = {s["channel"]: s for s in db.get_all_crawl_stats(conn)}
     ranked = smart_crawler.rank_channels(
         ("myshopify", "play", "osm"),
         stats_map,

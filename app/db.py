@@ -350,12 +350,15 @@ def record_crawl_outcome(conn, channel: str, *, hit: bool = False,
     )
 
 
-def get_crawl_stats(conn, channel: str | None = None) -> list[dict] | dict | None:
-    """读 channel ROI 状态——智能调度核心数据。"""
-    if channel:
-        row = conn.execute(
-            "SELECT * FROM crawl_stats WHERE channel=?", (channel,)).fetchone()
-        return dict(row) if row else None
+def get_crawl_stats(conn, channel: str) -> dict | None:
+    """读单 channel ROI 状态——智能调度核心数据（无记录返回 None）。"""
+    row = conn.execute(
+        "SELECT * FROM crawl_stats WHERE channel=?", (channel,)).fetchone()
+    return dict(row) if row else None
+
+
+def get_all_crawl_stats(conn) -> list[dict]:
+    """读全部 channel ROI（smart 模式排序用）。"""
     return [dict(r) for r in conn.execute("SELECT * FROM crawl_stats ORDER BY channel")]
 
 

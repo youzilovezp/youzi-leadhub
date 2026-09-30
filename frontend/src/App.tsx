@@ -301,7 +301,7 @@ async function triggerCrawl(opts: {
     body: JSON.stringify(opts),
   })
   if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`)
-  return r.json() as Promise<{ mode: string; spawned: CrawlJob[]; skipped: { channel: string; reason: string }[]; total: number }>
+  return r.json() as Promise<{ mode: string; spawned: CrawlJob[]; skipped: { channel: string; reason: string }[]; total: number; seeded?: number }>
 }
 
 async function exportCsv(opts: { channel?: string; marketGroup?: string }) {
@@ -1029,7 +1029,9 @@ export default function App() {
       const r = await triggerCrawl({ channels: [], mode: 'smart', limit: 1, max_pages: 3 })
       setSmartMsg(r.total > 0
         ? { kind: 'ok', text: '智能爬取已启动：自动挑最优渠道采集，同时后台挖新人群。' }
-        : { kind: 'ok', text: '本批进行中——完成后自动补种接续，无需重复点击。' })
+        : (r.seeded ?? 0) > 0
+          ? { kind: 'ok', text: '正在挖新人群（约 1–3 分钟）——种子落地后自动爬取，无需再点。' }
+          : { kind: 'ok', text: '本批进行中——完成后自动补种接续，无需重复点击。' })
     } catch (e) {
       setSmartMsg({ kind: 'error', text: (e as Error).message.replace(/^\d+:\s*/, '') })
     } finally {

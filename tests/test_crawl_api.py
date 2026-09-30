@@ -450,20 +450,20 @@ def _fake_seed_job(channel="play", status="running"):
 
 
 def test_smart_expand_scene_rotates(tmp_path, monkeypatch):
-    """每次调用轮换到下一个场景；轮换指针落在 data/ 内可随库迁移。"""
+    """定向补种：只 spawn 池尽渠道的计划；轮换指针落在 data/ 内可随库迁移。"""
     calls = []
     monkeypatch.setattr(crawl_api, "_SMART_ROTATION", tmp_path / ".smart-rotation")
     monkeypatch.setattr(crawl_api, "_spawn_seed",
                         lambda ch, c, cat, lim, out: calls.append(ch)
                         or _fake_seed_job(ch))
     from app.seeds_scenes import SCENES
-    seen = []
-    for _ in range(len(SCENES) + 1):
-        got = crawl_api._smart_expand_scene()
-        seen.append([j.channel for j in got])
-    # 轮换一周回到首场景（渠道组合应重复出现），且指针文件可解析
-    assert seen[0] == seen[-1]
+    got = crawl_api._smart_expand_scene(seed_channels={"osm"})
+    assert [j.channel for j in got] == ["osm"]       # 只补目标渠道
     assert (tmp_path / ".smart-rotation").read_text().isdigit()
+    # 目标渠道不在任何场景（如 myshopify）→ 不轮换不 spawn
+    calls.clear()
+    assert crawl_api._smart_expand_scene(seed_channels={"myshopify"}) == []
+    assert calls == []
 
 
 def test_smart_expand_scene_skips_when_seed_running(tmp_path, monkeypatch):
@@ -472,7 +472,7 @@ def test_smart_expand_scene_skips_when_seed_running(tmp_path, monkeypatch):
     boom = lambda *a, **k: pytest.fail("不应再 spawn")
     monkeypatch.setattr(crawl_api, "_spawn_seed", boom)
     crawl_api._JOBS_RUNNING["seed-osm-x"] = _fake_seed_job("osm")
-    assert crawl_api._smart_expand_scene() == []
+    assert crawl_api._smart_expand_scene(seed_channels={"osm"}) == []
 
 
 def test_post_crawl_smart_all_busy_idempotent_200(monkeypatch):

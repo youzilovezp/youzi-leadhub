@@ -135,3 +135,51 @@ def test_compute_strategy_backoff_recovery_after_cooldown_served():
     stats2 = {**stats, "backoff_until": future}
     s2 = compute_strategy("play", stats2)
     check("冷却未到期 → 仍 backoff", s2.recommendation == "backoff")
+
+
+# ============================================================
+# 2026-09-30 审计回归：backoff 时间解析（此前冷却在生产格式下全死）
+# ============================================================
+def test_parse_backoff_until_formats():
+    """SQLite datetime() 的 naive 格式与 ISO 格式统一解析为 aware UTC。
+
+    旧代码 fromisoformat 后直接与 aware now 比较——naive 格式（生产落库格式）
+    必抛 TypeError 被吞 → in_backoff 恒 False。
+    """
+    from app.smart_crawler import parse_backoff_until
+    naive = parse_backoff_until("2026-09-30 15:35:00")  # SQLite datetime() 输出
+    check("naive 格式 → aware UTC", naive is not None and naive.tzinfo is not None)
+    iso = parse_backoff_until("2026-09-30T15:35:00Z")
+    check("ISO Z 格式 → aware UTC",
+          iso is not None and iso.utcoffset().total_seconds() == 0)
+    check("空/垃圾 → None",
+          parse_backoff_until(None) is None and parse_backoff_until("garbage") is None)
+
+
+def test_compute_strategy_honors_sqlite_naive_backoff():
+    """真实生产格式（SQLite naive 字符串）的未到期冷却必须触发 backoff。"""
+    future = (datetime.now(timezone.utc) + timedelta(minutes=4)).strftime(
+        "%Y-%m-%d %H:%M:%S")
+    s = compute_strategy("play", {"attempts": 10, "hits": 2, "errors": 0,
+                                  "consecutive_errors": 6,
+                                  "backoff_until": future})
+    check("SQLite naive 未到期 → backoff", s.recommendation == "backoff", s.reason)
+    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).strftime(
+        "%Y-%m-%d %H:%M:%S")
+    s2 = compute_strategy("play", {"attempts": 10, "hits": 2, "errors": 0,
+                                   "consecutive_errors": 6,
+                                   "backoff_until": past})
+    check("SQLite naive 已过期 → 放行恢复", s2.recommendation != "backoff")
+
+
+def test_compute_throttle_sqlite_naive_backoff_slows():
+    """冷却中（naive 格式）throttle 必须收敛到最保守档。"""
+    from app.smart_crawler import compute_throttle
+    future = (datetime.now(timezone.utc) + timedelta(minutes=4)).strftime(
+        "%Y-%m-%d %H:%M:%S")
+    t = compute_throttle("play", {"attempts": 50, "hits": 5, "errors": 1,
+                                  "consecutive_errors": 6,
+                                  "backoff_until": future})
+    check("冷却中 → target 0.5 / delay 2.0",
+          t.target_concurrency == 0.5 and t.download_delay == 2.0,
+          f"got {t.target_concurrency}/{t.download_delay}")

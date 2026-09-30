@@ -56,15 +56,12 @@ def compute_strategy(channel: str, stats: dict | None,
     # 综合 ROI 评分（高命中 + 低错误 → 高分）
     score = hit_rate / (1 + error_rate * ERROR_PENALTY_WEIGHT)
 
-    # 冷却期检查
+    # 冷却期检查（parse_backoff_until 统一 aware 化——旧 naive/aware 比较抛
+    # TypeError 被吞，冷却从未生效，2026-09-30 审计修复）
     in_backoff = False
-    if backoff_until:
-        try:
-            backoff_time = datetime.fromisoformat(backoff_until.replace("Z", "+00:00"))
-            if backoff_time > now:
-                in_backoff = True
-        except (ValueError, TypeError):
-            pass
+    backoff_dt = parse_backoff_until(backoff_until)
+    if backoff_dt and backoff_dt > now:
+        in_backoff = True
 
     # 决策：冷却 → backoff；错误率高 → crawl_slow；否则 → crawl_now
     # 2026-09-30 修复：consec≥5 且 backoff_until 已写过（哪怕已过期）= 冷却已服务过
@@ -133,6 +130,25 @@ def pick_best_channel(channels: Iterable[str], stats_map: dict[str, dict],
 DEFAULT_YIELD_SCORE = 1.0  # 中位默认（无历史数据时）
 
 
+def parse_backoff_until(value: str | None) -> datetime | None:
+    """解析 backoff_until 为 aware UTC datetime——统一兼容两种落库格式：
+
+    - db.record_crawl_outcome 经 SQLite datetime() 写的 "YYYY-MM-DD HH:MM:SS"（naive）
+    - 其他路径写的 ISO 8601（带 Z 或 ±HH:MM offset）
+
+    2026-09-30 审计修复：旧代码 fromisoformat 后直接与 aware now 比较，SQLite
+    naive 格式必然抛 TypeError 被吞 → 冷却判定永远 False（backoff 全死）。
+    单一解析点，compute_strategy / compute_throttle / crawl_api 共用。
+    """
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
 def rank_seeds_by_yield(conn, urls: list[str]) -> list[str]:
     """按历史 yield_score 排序 seed URLs（高分优先）。
 
@@ -188,6 +204,17 @@ def rank_seeds_by_yield(conn, urls: list[str]) -> list[str]:
         return (-score, bucket)
 
     return sorted(urls, key=_sort_key)
+
+
+# ============================================================================
+# 池耗尽检测说明（2026-09-30 审计定稿）
+# ============================================================================
+# 「每次点击线索都递增」的池尽判定不在本模块——用 crawl_api._unseen_estimate
+#（DB 真值版：池内 host 不在 domain 表的数量）。曾试过解析 JOBDIR/requests.seen
+# 指纹文件做精确过滤，实测本机 Scrapy 2.18 该文件是 pickle 二进制流（非文本
+# 指纹行），依赖未文档化的内部序列化格式不可靠；爬虫子进程内的 dupefilter
+# 仍是去重的唯一权威。spider.py 旧 _load_seen_urls 双重失效（目录层级推导错 +
+# 把指纹字节当 URL 读），已删除。
 
 
 # ============================================================================
@@ -269,15 +296,8 @@ def compute_throttle(channel: str, stats: dict | None) -> ThrottleTuning:
 
     hit_rate = stats.get("hits", 0) / max(1, stats["attempts"])
     consec_errors = stats.get("consecutive_errors", 0)
-    in_backoff = False
-    try:
-        if stats.get("backoff_until"):
-            from datetime import datetime
-            bt = datetime.fromisoformat(stats["backoff_until"].replace("Z", "+00:00"))
-            if bt > datetime.now(timezone.utc):
-                in_backoff = True
-    except Exception:
-        pass
+    bt = parse_backoff_until(stats.get("backoff_until"))
+    in_backoff = bt is not None and bt > datetime.now(timezone.utc)
 
     if in_backoff:
         return ThrottleTuning(channel, target_concurrency=0.5, download_delay=2.0)

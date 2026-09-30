@@ -16,8 +16,10 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -312,6 +314,44 @@ def _finalize(job: _Job, rc: int) -> None:
         pass
 
 
+def _unseen_estimate(channel: str) -> int:
+    """渠道剩余未爬种子估计 = 池内 host 不在 domain 表的数量。
+
+    2026-09-30 三版定稿：①requests.seen 行数（新 Scrapy 是 pickle 二进制，行数恒 ≈1
+    → 全判"未爬"）；②dupefilter 指纹数（同上不可解析）。业务真值：每爬一个实体
+    upsert_domain 必写行（error 实体也写——爬失败的站重爬无益，计入 seen 语义正确）。
+    """
+    from app.normalize import entity_key as _ek
+    hosts: set[str] = set()
+    for cand in _seed_candidates(channel):
+        try:
+            with open(cand, encoding="utf-8") as fh:
+                for line in fh:
+                    raw = line.strip()
+                    if not raw or raw.startswith("#"):
+                        continue
+                    u = raw.split("\t", 1)[0]
+                    host = urlsplit(u if "://" in u else f"https://{u}").hostname
+                    if host:
+                        hosts.add(_ek(host.lower()))
+        except OSError:
+            continue
+    if not hosts:
+        return 0
+    try:
+        conn = _db.connect(str(_CWD / "data" / "leads.db"))
+        try:
+            ph = ",".join("?" * len(hosts))
+            seen = conn.execute(
+                f"SELECT COUNT(DISTINCT entity_key) FROM domain "
+                f"WHERE entity_key IN ({ph})", tuple(hosts)).fetchone()[0]
+        finally:
+            conn.close()
+    except Exception:
+        return 0
+    return len(hosts) - seen
+
+
 def _reap_pass() -> set[str]:
     """poll 全部内存 job，收割已退出的。
 
@@ -357,12 +397,56 @@ def _auto_chain(channel: str) -> None:
                throttle=_sc.compute_throttle(channel, ch_stats), chained=True)
 
 
+def _reap_lost_jobs() -> set[str]:
+    """收割跨重启丢失句柄的 job：DB running 但不在内存 dict（上个进程 spawn 的）。
+
+    pid 已死 → 直接 finalize DB 行 + 返回成功 seed 的渠道（触发接续）；
+    pid 活着 → 保留（下轮再查）。# ponytail: 轮询 pid 而非句柄，粗但可靠
+    """
+    import os as _os
+    done_seeds: set[str] = set()
+    try:
+        conn = _db.connect(str(_CWD / "data" / "leads.db"))
+        try:
+            rows = conn.execute(
+                "SELECT rowid, job_id, kind, channel, pid FROM job "
+                "WHERE status='running'").fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        return done_seeds
+    live_ids = set(_JOBS_RUNNING)
+    for r in rows:
+        if r["job_id"] in live_ids:
+            continue   # 有句柄的走 _reap_pass
+        try:
+            _os.kill(r["pid"], 0)
+            continue    # 还活着
+        except (ProcessLookupError, TypeError):
+            pass
+        except PermissionError:
+            continue
+        status = "exited"   # 无退出码可查——按正常结束处理（保守：exit 0）
+        try:
+            conn = _db.connect(str(_CWD / "data" / "leads.db"))
+            try:
+                _db.finish_job(conn, r["job_id"], status, 0)
+            finally:
+                conn.close()
+        except Exception:
+            pass
+        if r["kind"] == "seed":
+            done_seeds.add(r["channel"])
+    return done_seeds
+
+
 def _reaper_loop() -> None:
     """收割线程主体：5s 一轮，永不退出（异常吞掉下轮再来）。"""
     while True:
         time.sleep(5)
         try:
-            for ch in _reap_pass():
+            done = _reap_pass() | _reap_lost_jobs()
+            for ch in done:
                 _auto_chain(ch)
         except Exception:
             pass
@@ -479,31 +563,38 @@ def post_seeds(req: SeedsRequest):
 _SMART_ROTATION = _CWD / "data" / ".smart-rotation"
 
 
-def _smart_expand_scene(skip: set[str] = set()) -> list[JobInfo]:
-    """smart 模式自带的「挖新人群」：按轮换挑下一个业务场景，后台补种子。
+def _smart_expand_scene(seed_channels: set[str]) -> list[JobInfo]:
+    """smart 模式自带的「挖新人群」：给**池尽**渠道按轮换挑场景补种。
 
-    销售不选场景——轮换保证国家×类目自动铺开（挖新人群入口已并入智能爬取）。
-    skip：本轮已被选去爬取的渠道（补种与爬取同渠道互斥，让爬取先行）。
-    防刷：已有 seed job 在跑就跳过本轮，避免重复打 Google Play/Overpass。
-    # ponytail: 轮换无间隔上限，连点 5+ 次会重新展开首场景（种子 URL 去重靠 append_merge）
+    从轮换指针起找第一个覆盖目标渠道的场景（定向——不浪费轮换位）；
+    指针推进到被选场景。防刷：已有 seed job 在跑就跳过本轮。
+    # ponytail: 轮换无间隔上限，循环一周后重展开同场景（URL 去重靠 append_merge）
     """
     if any(j.job_id.startswith("seed-") and j.status in ("created", "running")
            for j in list(_JOBS_RUNNING.values())):
         return []
     from app.seeds_scenes import SCENES
-    idx = 0
+    base = 0
     if _SMART_ROTATION.exists():
         try:
-            idx = int(_SMART_ROTATION.read_text(encoding="utf-8").strip()) + 1
+            base = int(_SMART_ROTATION.read_text(encoding="utf-8").strip())
         except ValueError:
-            idx = 0
-    scene = SCENES[idx % len(SCENES)]
-    _SMART_ROTATION.parent.mkdir(parents=True, exist_ok=True)
-    _SMART_ROTATION.write_text(str(idx % len(SCENES)), encoding="utf-8")
+            base = 0
+    scene = None
+    for off in range(1, len(SCENES) + 1):
+        cand = SCENES[(base + off) % len(SCENES)]
+        if any(p.channel in seed_channels and not _channel_busy(p.channel)
+               for p in cand.plans):
+            scene = cand
+            _SMART_ROTATION.parent.mkdir(parents=True, exist_ok=True)
+            _SMART_ROTATION.write_text(str((base + off) % len(SCENES)), encoding="utf-8")
+            break
+    if scene is None:
+        return []
     spawned: list[JobInfo] = []
     for plan in scene.plans:
-        if plan.channel in skip or _channel_busy(plan.channel):
-            continue  # 本轮去爬了 / 同渠道已有任务——不冲突，下轮轮换到它
+        if plan.channel not in seed_channels or _channel_busy(plan.channel):
+            continue
         target = _pick_seed(plan.channel) or f"data/seeds-{plan.channel}.txt"
         job = _spawn_seed(plan.channel, plan.countries, plan.categories,
                           plan.per_country, target)
@@ -520,7 +611,11 @@ def post_crawl(req: CrawlRequest):
     - incremental（默认）：复用稳定 JOBDIR，dupefilter 跳过已爬；适合日常增量
     - full：全新 JOBDIR，每次从头爬；适合重检 / 字段 diff
     """
-    channels = req.channels or [c for c in ALL_CHANNELS if c != "sample"]
+    # 2026-09-30 审计修复：请求内渠道去重——["play","play"] 会在同一次锁内对同一
+    # JOBDIR 双 spawn（busy 检查只在循环前做一次），互毁指纹/队列
+    channels = list(dict.fromkeys(
+        req.channels or [c for c in ALL_CHANNELS if c != "sample"]))
+    seeded: list[JobInfo] = []   # smart 模式：本次触发的补种任务（响应回传数量）
 
     # 校验
     invalid = [c for c in channels if c not in ALL_CHANNELS]
@@ -528,11 +623,10 @@ def post_crawl(req: CrawlRequest):
         raise HTTPException(400, f"未知渠道: {invalid}; 可选: {list(ALL_CHANNELS)}")
     db_path = _safe_db_path(req.db_path)
 
-    # 2026-09-30 智能模式（销售一键黑盒）：
-    #   ① 按 ROI 排序增量爬**全部**空闲渠道（冷却中的跳过）——每次点击必吃到
-    #      有新种子的渠道（单选最优会盲选「高分但池尽」的渠道 → 实报「线索
-    #      无变化」的根因之二；低 ROI 渠道由 per-channel throttle 自动保守）
-    #   ② 被爬渠道之外，后台轮换业务场景挖新种子（种池自动铺开国家×类目）
+    # 2026-09-30 智能模式（销售一键黑盒，Q1「点击→最终必递增」闭环）：
+    #   ① 池尽判定（unseen 估计 < 100）：池尽渠道去补种（爬了也 0），种子落地后
+    #      由收割线程自动接续爬——不占本次点击
+    #   ② 池未尽的空闲渠道按 ROI 排序全爬（冷却跳过；低 ROI 由 throttle 保守）
     if req.mode == "smart":
         free = [c for c in channels if not _channel_busy(c)]
         if not free:
@@ -543,17 +637,29 @@ def post_crawl(req: CrawlRequest):
                             for c in channels],
                 "hint": "本批进行中——完成后自动补种接续，无需重复点击",
             }
-        conn_ro = _db.connect(str(_CWD / "data" / "leads.db"))
-        try:
-            stats_map = {s["channel"]: s for s in (_db.get_crawl_stats(conn_ro) or [])}
-            ranked = _sc.rank_channels(free, stats_map)
-        finally:
-            conn_ro.close()
-        if not ranked:
-            raise HTTPException(503, "smart 模式：没有可用渠道")
-        ok = [s.channel for s in ranked if s.recommendation != "backoff"]
-        channels = ok or [ranked[0].channel]  # 全在冷却 → 最高分兜底
-        _smart_expand_scene(skip=set(channels))
+        starved = {c for c in free if _unseen_estimate(c) < 100}
+        crawlable = [c for c in free if c not in starved]
+        seeded = _smart_expand_scene(seed_channels=starved)
+        if crawlable:
+            conn_ro = _db.connect(str(_CWD / "data" / "leads.db"))
+            try:
+                stats_map = {s["channel"]: s for s in _db.get_all_crawl_stats(conn_ro)}
+                ranked = _sc.rank_channels(crawlable, stats_map)
+            finally:
+                conn_ro.close()
+            ok = [s.channel for s in ranked if s.recommendation != "backoff"]
+            channels = ok or ([ranked[0].channel] if ranked else [])
+        else:
+            channels = []
+        if not channels and not seeded:
+            # 渠道全在冷却且无种可补——最高分兜底爬（给冷却恢复机会）
+            conn_ro = _db.connect(str(_CWD / "data" / "leads.db"))
+            try:
+                stats_map = {s["channel"]: s for s in _db.get_all_crawl_stats(conn_ro)}
+                ranked = _sc.rank_channels(free, stats_map)
+            finally:
+                conn_ro.close()
+            channels = [ranked[0].channel] if ranked else []
 
     # 并发守卫（2026-09-30 强化）：进程内锁包住 check+spawn——双请求同时过
     # _channel_busy 会并发 spawn 同 JOBDIR，Scrapy 指纹/断点队列互相覆盖
@@ -586,15 +692,13 @@ def post_crawl(req: CrawlRequest):
                 ch_stats = _db.get_crawl_stats(ch_conn, ch)
             finally:
                 ch_conn.close()
-            if ch_stats and ch_stats.get("backoff_until"):
-                from datetime import datetime, timezone
-                try:
-                    bt = datetime.fromisoformat(ch_stats["backoff_until"].replace("Z", "+00:00"))
-                    if bt > datetime.now(timezone.utc):
-                        skipped.append({"channel": ch, "reason": "冷却中"})
-                        continue
-                except (ValueError, TypeError):
-                    pass
+            # 2026-09-30 审计修复：backoff_until 经 SQLite datetime() 落库为 naive
+            # "YYYY-MM-DD HH:MM:SS"，旧 fromisoformat+aware now 比较抛 TypeError 被吞
+            # → 冷却从不生效（死渠道照爬浪费预算）。统一走 parse_backoff_until aware 化。
+            bt = _sc.parse_backoff_until(ch_stats.get("backoff_until")) if ch_stats else None
+            if bt and bt > datetime.now(timezone.utc):
+                skipped.append({"channel": ch, "reason": "冷却中"})
+                continue
             # 选最大文件作 fallback（Scrapy 内部 dupefilter 共享 JOBDIR——重复 URL 跨文件自动跳过）
             seed_path = max(candidates, key=lambda p: p.stat().st_size)
             # 2026-09-30 L1 per-seed scoring：按历史 yield_score 排序，高分优先爬
@@ -660,6 +764,8 @@ def post_crawl(req: CrawlRequest):
         "spawned": [j.model_dump() for j in spawned],
         "skipped": skipped,
         "total": len(spawned),
+        # smart 模式附带：本次触发的补种任务数（种子 1–3 分钟落地后自动接续爬）
+        "seeded": len(seeded) if req.mode == "smart" else 0,
     }
 
 

@@ -452,9 +452,10 @@ with tempfile.TemporaryDirectory() as _td:
         "<html><body>contact <a href='https://wa.me/8613900139000'>WhatsApp 2</a></body></html>", encoding="utf-8")
 
     class _H(http.server.SimpleHTTPRequestHandler):
+        # py3.13：directory=None 会回退 cwd（类属性被无视）——必须 __init__ 注入
+        def __init__(self, *a, **kw):
+            super().__init__(*a, directory=str(webroot), **kw)
         def log_message(self, *a): pass
-    import functools
-    _H.directory = str(webroot)
     _srv = socketserver.TCPServer(("127.0.0.1", 0), _H)
     _port = _srv.server_address[1]
     _threading.Thread(target=_srv.serve_forever, daemon=True).start()
@@ -494,12 +495,13 @@ with tempfile.TemporaryDirectory() as _td:
         seed_path.write_text(f"http://127.0.0.1:{_port}/index.html\n", encoding="utf-8")
         import subprocess as _sp, os as _os
         env = {**_os.environ, "BSP_ALLOW_PRIVATE_NET": "1"}
-        _sp.run([sys.executable, "-m", "app", "crawl",
+        _r = _sp.run([sys.executable, "-m", "app", "crawl",
                  "--seed-file", str(seed_path), "--channel", "sample",
                  "--limit", "5", "--max-pages", "2", "--db", str(qa_db),
                  "--jobdir", str(Path(_td) / "job")],
                 cwd=Path(__file__).resolve().parent.parent, env=env,
                 capture_output=True, timeout=90)
+        _err_tail = _r.stderr.decode("utf-8", "replace")[-400:]
         import sqlite3 as _sq
         _c = _sq.connect(qa_db); _c.row_factory = _sq.Row
         _n = _c.execute("SELECT COUNT(*) FROM sighting").fetchone()[0]
@@ -508,7 +510,8 @@ with tempfile.TemporaryDirectory() as _td:
         _c.close()
         check("9.3 端到端断言：爬取 → WA 号码落库（hits > 0）",
               _hit >= 1 and _n >= 2,
-              f"sightings={_n} entities={_hit}")
+              f"sightings={_n} entities={_hit} rc={_r.returncode} "
+              f"stderr={_err_tail}")
 
         # ④ smart 幂等（Q14）：全忙 → 200 非 409
         r2, _ = post(BASE + "/api/crawl", json={
@@ -518,6 +521,11 @@ with tempfile.TemporaryDirectory() as _td:
     finally:
         _srv.shutdown()
         seed_file.unlink(missing_ok=True)
+        # 9.1 的 API 爬取会在主库留 127.0.0.1 测试实体（被私网中间件拒→error 行）
+        # ——清掉，不污染销售线索列表
+        _sp.run([sys.executable, "-m", "app", "forget", "--db", "data/leads.db",
+                 "--entity", "127.0.0.1"],
+                cwd=Path(__file__).resolve().parent.parent, capture_output=True)
 
 
 
