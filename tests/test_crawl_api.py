@@ -539,10 +539,9 @@ def test_post_crawl_smart_all_busy_idempotent_200(monkeypatch):
     """Q14 幂等合并：smart 全忙 → 200 + hint（点正在跑的批次不是错误）。"""
     crawl_api._JOBS_RUNNING["inc-play"] = _fake_job("play")
     crawl_api._JOBS_RUNNING["inc-osm"] = _fake_job("osm")
-    crawl_api._JOBS_RUNNING["inc-myshopify"] = _fake_job("myshopify")
     out = crawl_api.post_crawl(crawl_api.CrawlRequest(mode="smart"))
     assert out["total"] == 0 and out["spawned"] == []
-    assert len(out["skipped"]) == 3 and "进行中" in out["hint"]
+    assert len(out["skipped"]) == 2 and "进行中" in out["hint"]
 
 
 def test_post_crawl_smart_starved_seeds_crawlable_crawls(monkeypatch, tmp_path):

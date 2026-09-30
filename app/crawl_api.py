@@ -706,7 +706,7 @@ def post_crawl(req: CrawlRequest):
                             for c in channels],
                 "hint": "本批进行中——完成后自动补种接续，无需重复点击",
             }
-        starved = {c for c in free if _unseen_estimate(c) < 500}
+        starved = {c for c in free if _unseen_estimate(c) < 100}
         crawlable = [c for c in free if c not in starved]
         seeded = _smart_expand_scene(seed_channels=starved)
         if crawlable:
