@@ -4,12 +4,13 @@
 1. GET API: /api/stats、/api/leads（多维度）、/api/seeds、/api/scenes、/api/crawl/status
 2. POST API 错误路径: /api/crawl、/api/seeds 的 400/409
 3. Pydantic le=1000 限制（limit=99999 应 422）
-4. CLI 全套: seed/crawl/stats/export/forget/backup/restore/golden/import-osm
+4. CLI 全套: seed/crawl/stats/export/forget/golden/import-osm
 5. Golden 全链路: prelabel + eval（mock fetch）
 6. GDPR forget: 一号多挂不误删
 7. 并发 TOCTOU lock: 同 channel 并发 409
 """
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -21,8 +22,8 @@ from unittest.mock import patch
 
 import requests
 
-BASE = "http://127.0.0.1:8788"
-PROJECT_ROOT = Path("/Users/zhangpeng/workspace/liaohe/youzi/youzi-leadhub")
+BASE = os.environ.get("BSP_BASE_URL", "http://127.0.0.1:8788")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # 全局 Session：避免环境代理被误用（BSP_PROXY 影响 httpx）
 SESSION = requests.Session()
@@ -260,16 +261,6 @@ _tmp.close()
 code, out = run_cli(["forget", "--entity", "forget-test.example"])
 check("CLI: forget 已存实体", "已删除" in out, out)
 
-# backup
-code, out = run_cli(["backup"])
-check("CLI: backup 退出码 0", code == 0)
-import re
-backup_match = re.search(r"backup-(\d{8}-\d{6})\.tar\.gz", out)
-check("CLI: backup 产物路径在 out 里", backup_match is not None)
-if backup_match:
-    backup_path = PROJECT_ROOT / "data" / backup_match.group(0)
-    check("CLI: backup 文件存在", backup_path.exists())
-
 # golden-eval（label 全空时返回 "未标完"）
 code, out = run_cli(["golden-eval"])
 check("CLI: golden-eval 退出码 0", code == 0)
@@ -339,28 +330,6 @@ with tempfile.TemporaryDirectory() as td:
     # phone 应被孤儿清理
     phones2 = [r[0] for r in conn.execute("SELECT e164 FROM phone")]
     check("phone 孤儿被清理", phones2 == [])
-
-# ============================================================================
-# 8. Backup → Restore roundtrip
-# ============================================================================
-section("8. Backup → Restore roundtrip")
-
-# 找到刚才生成的 backup
-backup_files = sorted((PROJECT_ROOT / "data").glob("backup-*.tar.gz"),
-                     key=lambda p: p.stat().st_mtime, reverse=True)
-check("至少 1 个 backup 文件", len(backup_files) >= 1)
-if backup_files:
-    backup = backup_files[0]
-    # restore 到临时目录（不动原库）
-    with tempfile.TemporaryDirectory() as td:
-        from app import backup as bk
-        # 解包 backup 看里面的 leads.db 实体数
-        import tarfile
-        with tarfile.open(backup) as tar:
-            members = tar.getnames()
-        check("backup 包含 leads.db", "data/leads.db" in members)
-        check("backup 包含种子池", any("seeds-" in m for m in members))
-        check("backup 包含 JOBDIR", any(".job" in m for m in members))
 
 # ============================================================================
 # 9. /api/crawl/status 安全清理（并发 pop 不爆 RuntimeError）

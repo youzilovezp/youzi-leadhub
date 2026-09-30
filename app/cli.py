@@ -77,16 +77,6 @@ def main(argv=None) -> None:
                              "链接层 P≥98%%、文本层 FP≤5%%）")
     ge.add_argument("--csv", default="docs/golden-set-sample.csv")
 
-    bk = sub.add_parser("backup",
-                        help="打包数据快照（线索库一致性备份 + 种子池 + 增量进度"
-                             "+ 金标准），跨机器迁移用")
-    bk.add_argument("--out", default=None, help="缺省 data/backup-<时间戳>.tar.gz")
-
-    rs = sub.add_parser("restore",
-                        help="从快照恢复数据（覆盖现有文件；先停 API/爬取进程）")
-    rs.add_argument("--from", dest="from_archive", required=True,
-                    help="backup 生成的 tar.gz 路径")
-
     a = p.parse_args(argv)
     data = Path("data")
 
@@ -142,6 +132,15 @@ def main(argv=None) -> None:
         if a.concurrency:
             sset.set("CONCURRENT_REQUESTS", a.concurrency)
             sset.set("AUTOTHROTTLE_TARGET_CONCURRENCY", float(a.concurrency))
+        # 2026-09-30 智能爬虫：L3 per-channel AutoThrottle——spawn 时通过环境变量
+        # 设的 throttle 参数（被 _spawn 通过 env 传给子进程）会覆盖上面的 CLI 参数。
+        # 优先级：env > CLI > 默认 settings
+        env_target = os.environ.get("YOUZI_AUTOTHROTTLE_TARGET_CONCURRENCY")
+        env_delay = os.environ.get("YOUZI_DOWNLOAD_DELAY")
+        if env_target:
+            sset.set("AUTOTHROTTLE_TARGET_CONCURRENCY", float(env_target))
+        if env_delay:
+            sset.set("DOWNLOAD_DELAY", float(env_delay))
         process = CrawlerProcess(sset)
         process.crawl("wa", seed_file=a.seed_file, channel=a.channel,
                       limit=a.limit, max_pages=a.max_pages)
@@ -178,18 +177,6 @@ def main(argv=None) -> None:
     elif a.cmd == "golden-eval":
         from app import golden
         print(golden.report(golden.evaluate(Path(a.csv))))
-
-    elif a.cmd == "backup":
-        from app import backup
-        out = backup.create_backup(Path(a.out) if a.out else None)
-        print(f"快照已生成: {out}\n迁移：拷到新机器 → python -m app "
-              f"restore --from {out.name}")
-
-    elif a.cmd == "restore":
-        from app import backup
-        n = backup.restore_backup(Path(a.from_archive))
-        print(f"已恢复 {n} 个条目（线索库/种子池/增量进度）。"
-              f"重启 API 后即可继续增量爬取。")
 
 
 if __name__ == "__main__":

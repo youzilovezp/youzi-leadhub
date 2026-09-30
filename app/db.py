@@ -110,6 +110,131 @@ def _migrate(conn: sqlite3.Connection) -> None:
                  "ON domain(contact_status, p0, score DESC) "
                  "WHERE contact_status = 'new'")
 
+    # 2026-09-30 智能爬虫（Smart Crawler）：每 channel ROI + 错误连击 + 冷却窗口
+    if "crawl_stats" not in {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}:
+        conn.execute(
+            """CREATE TABLE crawl_stats (
+                 channel TEXT PRIMARY KEY,
+                 attempts INT NOT NULL DEFAULT 0,    -- 累计爬过 URL 数
+                 hits INT NOT NULL DEFAULT 0,         -- 累计入库 entity 数（含 WA）
+                 phones INT NOT NULL DEFAULT 0,       -- 累计发现 WA 号码数
+                 errors INT NOT NULL DEFAULT 0,       -- 累计 5xx/timeout/4xx 计数
+                 last_crawl_at TEXT,                  -- 上次爬取时间
+                 last_hit_at TEXT,                    -- 上次入库时间（用于"最近有产出吗"）
+                 consecutive_errors INT NOT NULL DEFAULT 0, -- 当前错误连击
+                 backoff_until TEXT,                  -- 冷却到该时刻之前不爬
+                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+               )""")
+
+    # 2026-09-30 智能爬取加固：job 表 = 任务状态单一事实源（API 重启不丢）
+    # kind: 'crawl' | 'seed'；chained=1 表示由收割线程自动接续 spawn（非用户点击）。
+    # 不设 UNIQUE(job_id)：incremental job_id 稳定复用（inc-<channel>），重跑保留历史行。
+    if "job" not in {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}:
+        conn.execute(
+            """CREATE TABLE job (
+                 job_id TEXT NOT NULL,
+                 kind TEXT NOT NULL,
+                 channel TEXT NOT NULL,
+                 status TEXT NOT NULL,            -- running | exited | failed | killed
+                 pid INTEGER,
+                 started_at REAL NOT NULL,
+                 finished_at REAL,
+                 exit_code INTEGER,
+                 chained INTEGER NOT NULL DEFAULT 0,
+                 log TEXT                          -- 日志文件相对路径（status 端点读尾部）
+               )""")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_job_channel_started "
+            "ON job(channel, started_at DESC)")
+    else:
+        # 旧 schema 列迁移：表可能由早期版本（无 log 列）建过——IF NOT EXISTS 不改旧表
+        jcols = {r["name"] for r in conn.execute("PRAGMA table_info(job)")}
+        if "log" not in jcols:
+            conn.execute("ALTER TABLE job ADD COLUMN log TEXT")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_job_channel_started "
+            "ON job(channel, started_at DESC)")
+
+
+def insert_job(conn: sqlite3.Connection, *, job_id: str, kind: str, channel: str,
+               pid: int, started_at: float, chained: bool = False,
+               log: str | None = None) -> None:
+    conn.execute(
+        "INSERT INTO job(job_id, kind, channel, status, pid, started_at, chained, log) "
+        "VALUES(?, ?, ?, 'running', ?, ?, ?, ?)",
+        (job_id, kind, channel, pid, started_at, int(chained), log))
+    conn.commit()
+
+
+def finish_job(conn: sqlite3.Connection, job_id: str, status: str,
+               exit_code: int | None) -> None:
+    """收割：running → 终态（exited/failed/killed）+ finished_at（epoch 秒）。
+
+    WHERE 带 status='running'：同 job_id 历史终态行（incremental 重跑）不受影响。
+    """
+    import time as _time
+    conn.execute(
+        "UPDATE job SET status=?, exit_code=?, finished_at=? "
+        "WHERE job_id=? AND status='running'",
+        (status, exit_code, _time.time(), job_id))
+    conn.commit()
+
+
+def reap_orphan_jobs(conn: sqlite3.Connection) -> int:
+    """API 启动收割：表里 running 但进程已死（重启期间退出）的行标 killed。
+
+    PID 复用误判风险接受（后果仅状态标签错）。返回收割行数。
+    """
+    import os as _os
+    import time as _time
+    n = 0
+    for r in conn.execute("SELECT rowid, pid FROM job WHERE status='running'").fetchall():
+        pid = r["pid"]
+        try:
+            _os.kill(pid, 0)          # 还活着（单实例铁律下=本实例的 job）
+            continue
+        except ProcessLookupError:
+            pass                       # 进程不存在 → 已死
+        except PermissionError:
+            continue                   # 存在但非本用户 → 视为活着
+        conn.execute(
+            "UPDATE job SET status='killed', finished_at=? "
+            "WHERE rowid=? AND status='running'",
+            (_time.time(), r["rowid"]))
+        n += 1
+    conn.commit()
+    return n
+
+
+def list_jobs(conn: sqlite3.Connection, limit: int = 100) -> list[dict]:
+    rows = conn.execute(
+        "SELECT job_id, kind, channel, status, pid, started_at, finished_at, "
+        "exit_code, chained, log FROM job ORDER BY started_at DESC LIMIT ?", (limit,)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def seed_fail_streaks(conn: sqlite3.Connection, window: int = 3) -> dict[str, int]:
+    """每 channel 最近 seed 任务的连续失败次数（health 冒头依据）。
+
+    连续 window 次全失败 → streak≥window（前端横幅）；任何一次成功 → 0。
+    """
+    streaks: dict[str, int] = {}
+    rows = conn.execute(
+        "SELECT channel, status FROM job WHERE kind='seed' "
+        "ORDER BY started_at DESC LIMIT 200").fetchall()
+    for r in rows:
+        ch, st = r["channel"], r["status"]
+        if st == "running":           # 进行中的不算成败
+            continue
+        if st == "exited":
+            streaks[ch] = 0           # 成功清零（更早的不再关心）
+        else:
+            streaks[ch] = streaks.get(ch, 0) + 1
+    return {ch: n for ch, n in streaks.items() if n >= window}
+
 
 def upsert_domain(conn, key: str, channel: str, seed_host: str | None,
                   developer_name: str | None = None) -> None:
@@ -174,3 +299,69 @@ def forget(conn, entity: str) -> int:
         "DELETE FROM phone WHERE e164 NOT IN (SELECT DISTINCT e164 FROM sighting)")
     conn.commit()
     return n
+
+
+# ============================================================================
+# 智能爬虫（Smart Crawler，2026-09-30）：每 channel ROI 跟踪 + 错误连击冷却
+# ============================================================================
+
+def record_crawl_outcome(conn, channel: str, *, hit: bool = False,
+                          phones_found: int = 0, errored: bool = False) -> None:
+    """记录一次爬取 outcome——供智能调度选最优 channel。
+
+    hit: 本次爬取产出了新 entity（含 WA 号码）
+    phones_found: 本次爬取发现的号码数（增量）
+    errored: 本次出现 5xx/timeout/4xx（不计 robots 拒——正常）
+    冷却逻辑：连续 5+ 次 errored → 5 分钟冷却；成功一次 → 重置 consecutive_errors。
+    """
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc).isoformat(timespec='seconds')
+    conn.execute(
+        """INSERT INTO crawl_stats(channel, attempts, hits, phones, errors,
+                                 last_crawl_at, last_hit_at, consecutive_errors,
+                                 updated_at)
+           VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(channel) DO UPDATE SET
+             attempts = attempts + excluded.attempts,
+             hits = hits + excluded.hits,
+             phones = phones + excluded.phones,
+             errors = errors + excluded.errors,
+             last_crawl_at = excluded.last_crawl_at,
+             last_hit_at = COALESCE(excluded.last_hit_at, crawl_stats.last_hit_at),
+             consecutive_errors = CASE WHEN excluded.errored = 0 THEN 0
+                                       ELSE consecutive_errors + 1 END,
+             backoff_until = CASE
+               WHEN excluded.errored = 0 THEN NULL  -- 成功：清冷却
+               WHEN consecutive_errors + 1 >= 5
+                 THEN datetime(?, '+5 minutes')
+               ELSE backoff_until  -- 未达阈值：保留原冷却
+             END,
+             updated_at = ?""",
+        (channel,
+         1 if not errored else 1,  # attempts 都 +1（出错也算尝试过）
+         1 if hit else 0,
+         phones_found,
+         1 if errored else 0,
+         now if not errored else None,  # last_crawl_at 失败时不更新（保留上次成功时间）
+         now if hit else None,
+         1 if errored else 0,
+         now,
+         now),  # 给 CASE 用（datetime 函数）
+    )
+
+
+def get_crawl_stats(conn, channel: str | None = None) -> list[dict] | dict | None:
+    """读 channel ROI 状态——智能调度核心数据。"""
+    if channel:
+        row = conn.execute(
+            "SELECT * FROM crawl_stats WHERE channel=?", (channel,)).fetchone()
+        return dict(row) if row else None
+    return [dict(r) for r in conn.execute("SELECT * FROM crawl_stats ORDER BY channel")]
+
+
+def clear_backoff(conn, channel: str) -> None:
+    """手动清除冷却——admin 确认 channel 恢复后调用。"""
+    conn.execute(
+        "UPDATE crawl_stats SET backoff_until=NULL, consecutive_errors=0, updated_at=datetime('now') WHERE channel=?",
+        (channel,),
+    )

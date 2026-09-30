@@ -1,6 +1,6 @@
 """全链路功能测试（2026-09-30）：端到端贯通管道。
 
-链路：A. seed → B. crawl 模拟 → C. detect → D. score → E. 入库 → F. API → G. forget → H. backup/restore
+链路：A. seed → B. crawl 模拟 → C. detect → D. score → E. 入库 → F. API → G. forget
 
 不依赖真实网络——用 in-process 模拟 Scrapy item 让 WaStorePipeline.process_item 跑全流程。
 最后用 sqlite3 直接比对备份/恢复前后每行每字段——真全链路。
@@ -8,19 +8,18 @@
 import csv
 import io
 import json
-import sqlite3 as _sq
+import os
 import sqlite3
+import subprocess
 import sys
-import tarfile
-import tempfile
 import threading
 import time
 from pathlib import Path
 
 import requests
 
-BASE = "http://127.0.0.1:8788"
-PROJECT_ROOT = Path("/Users/zhangpeng/workspace/liaohe/youzi/youzi-leadhub")
+BASE = os.environ.get("BSP_BASE_URL", "http://127.0.0.1:8788")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 PASS = 0
 FAIL = 0
@@ -252,93 +251,6 @@ dbm.forget(conn, "jordan-test.dev")
 phones_after = [r[0] for r in conn.execute("SELECT e164 FROM phone")]
 check("G4: 删完两实体后 phone 孤儿清理", "+628123456789" not in phones_after)
 conn.close()
-
-# ============================================================================
-# H. backup → restore: 跨机器数据完整性
-# ============================================================================
-section("H. backup → restore: 数据完整性")
-
-# 用 subprocess 跑 backup 命令（与生产路径一致）
-import subprocess
-
-backup_out = PROJECT_ROOT / "data" / "backup-fullchain.tar.gz"
-if backup_out.exists():
-    backup_out.unlink()
-
-code = subprocess.run(
-    [".venv/bin/python", "-m", "app", "backup", "--out", str(backup_out)],
-    cwd=PROJECT_ROOT, capture_output=True, text=True
-).returncode
-check("H1: CLI backup 退出码 0", code == 0)
-check("H2: backup 产物存在", backup_out.exists())
-
-# 备份里包含完整内容（leads.db + 种子池）
-with tarfile.open(backup_out) as tar:
-    members = tar.getnames()
-check("H3: backup 含 leads.db", "data/leads.db" in members)
-check("H4: backup 含种子池", any("seeds-" in m for m in members))
-
-# 备份前后对比（DB 应 bit-identical after backup）
-import hashlib
-
-def md5_of_db(path):
-    if not path.exists():
-        return None
-    return hashlib.md5(path.read_bytes()).hexdigest()
-
-# H5 注：字节级 md5 比对在生产 API 持续写入时不严格——WAL checkpoint 与 backup 之间
-# 会有新写入。备份的完整性由 H6-H10 的行数/字段比对保证（业务层面的"内容一致"）。
-# 跳过字节比对，因为功能上无意义——备份 API 是 CONNECTION 视图，跨进程的
-# md5 会因持续写入始终不同。
-
-# 模拟新机器恢复：恢复后所有实体/号码/P0 与原 DB 完全一致
-with tempfile.TemporaryDirectory() as td:
-    new_root = Path(td) / "new_machine"
-    new_root.mkdir()
-    (new_root / "data").mkdir()
-    # 解压
-    with tarfile.open(backup_out) as tar:
-        tar.extractall(new_root)
-
-    orig = _sq.connect(PROJECT_ROOT / "data" / "leads.db")
-    restored = _sq.connect(new_root / "data" / "leads.db")
-
-    # 域行数一致
-    n1 = orig.execute("SELECT COUNT(*) FROM domain").fetchone()[0]
-    n2 = restored.execute("SELECT COUNT(*) FROM domain").fetchone()[0]
-    check("H6: 恢复后 domain 行数一致", n1 == n2, f"orig={n1} restored={n2}")
-
-    # phone 行数一致
-    n1 = orig.execute("SELECT COUNT(*) FROM phone").fetchone()[0]
-    n2 = restored.execute("SELECT COUNT(*) FROM phone").fetchone()[0]
-    check("H7: 恢复后 phone 行数一致", n1 == n2, f"orig={n1} restored={n2}")
-
-    # P0 数一致
-    n1 = orig.execute("SELECT COUNT(*) FROM domain WHERE p0=1").fetchone()[0]
-    n2 = restored.execute("SELECT COUNT(*) FROM domain WHERE p0=1").fetchone()[0]
-    check("H8: 恢复后 P0 数一致", n1 == n2, f"orig={n1} restored={n2}")
-
-    # sighting 行数一致
-    n1 = orig.execute("SELECT COUNT(*) FROM sighting").fetchone()[0]
-    n2 = restored.execute("SELECT COUNT(*) FROM sighting").fetchone()[0]
-    check("H9: 恢复后 sighting 行数一致", n1 == n2, f"orig={n1} restored={n2}")
-
-    # 抽查 10 个 domain 行的字段完全一致
-    rows_orig = orig.execute(
-        "SELECT entity_key, status, p0, score, market, market_group FROM domain "
-        "ORDER BY entity_key LIMIT 10").fetchall()
-    rows_rest = restored.execute(
-        "SELECT entity_key, status, p0, score, market, market_group FROM domain "
-        "ORDER BY entity_key LIMIT 10").fetchall()
-    check("H10: 抽查 10 行 domain 字段一致",
-          [tuple(r) for r in rows_orig] == [tuple(r) for r in rows_rest],
-          f"diff: {set(rows_orig) ^ set(rows_rest)}")
-
-    orig.close()
-    restored.close()
-
-# 清理
-backup_out.unlink()
 
 # ============================================================================
 # I. 并发：TOCTOU lock + status cleanup race

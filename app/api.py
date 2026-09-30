@@ -5,15 +5,18 @@
 from __future__ import annotations
 
 import os
+import threading
+from contextlib import asynccontextmanager
 from functools import lru_cache
 from pathlib import Path
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from app import db, stats
+from app import crawl_api
 from app.crawl_api import router as crawl_router
 
 DB_PATH = os.environ.get("BSP_DB", "data/leads.db")
@@ -60,13 +63,41 @@ def _conn(path: str):
     return db.connect(path, check_same_thread=False)
 
 
+# ============================================================================
+# 2026-09-30 智能爬取加固（grilling 共识 Q9/Q12）：
+#   启动 = ① flock 单实例守卫（单 worker/单 data 目录铁律）② 收割线程（孤儿收割 + seed→crawl 自动接续）
+# ============================================================================
+_API_LOCK: list = []  # 持引用防 GC 关闭 fd（进程退出自动释放）
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    import fcntl
+    lock_path = Path("data") / ".api.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(lock_path, "w")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (OSError, BlockingIOError):
+        raise RuntimeError(
+            f"另一实例已持有 {lock_path}（单 worker/单实例铁律：并发写 data/ 会互毁）")
+    _API_LOCK.append(fh)
+    crawl_api.start_reaper()
+    yield
+
+
 app = FastAPI(title="youzi-bsp", version="0.1.0",
-              description="WhatsApp BSP 线索获取 · 只发现不外联")
+              description="WhatsApp BSP 线索获取 · 只发现不外联",
+              lifespan=_lifespan)
+# 跨机访问（局域网 IP / 域名）通过 BSP_CORS_ORIGINS 覆盖，逗号分隔
+_cors_env = os.environ.get("BSP_CORS_ORIGINS")
+_origins = ([o.strip() for o in _cors_env.split(",") if o.strip()] if _cors_env
+            else ["http://localhost:5173",
+                  "http://127.0.0.1:5173",
+                  "http://localhost:8788",
+                  "http://127.0.0.1:8788"])
 app.add_middleware(CORSMiddleware,
-                   allow_origins=["http://localhost:5173",
-                                   "http://127.0.0.1:5173",
-                                   "http://localhost:8788",
-                                   "http://127.0.0.1:8788"],
+                   allow_origins=_origins,
                    allow_methods=["GET", "POST", "PATCH"],
                    allow_credentials=False)
 app.include_router(crawl_router)
@@ -140,21 +171,88 @@ def patch_lead_status(entity: str, body: ContactUpdate):
     """销售标记跟进状态（销售每天点几十次）。
 
     PATCH 而非 POST——状态是"更新"语义。
+    2026-09-30 修复：_conn 是 lru_cache 共享连接，FastAPI 线程池并发 PATCH 时
+    同一连接并发写 → sqlite3.InterfaceError（连接打坏后连锁 500）——写路径加锁。
     """
     from fastapi import HTTPException
     if body.status not in ("new", "contacted", "in_conversation", "won", "lost"):
         raise HTTPException(400, f"invalid status: {body.status}")
-    conn = _conn(DB_PATH)
-    ok = db.update_contact_status(conn, entity, body.status, body.notes)
-    if not ok:
-        raise HTTPException(404, f"entity not found: {entity}")
-    conn.commit()
+    with _WRITE_LOCK:
+        conn = _conn(DB_PATH)
+        ok = db.update_contact_status(conn, entity, body.status, body.notes)
+        if not ok:
+            raise HTTPException(404, f"entity not found: {entity}")
+        conn.commit()
     return {"entity": entity, "status": body.status, "notes": body.notes}
+
+
+# 2026-09-30：PATCH 并发写锁（见 patch_lead_status 注释）
+_WRITE_LOCK = threading.Lock()
 
 
 @app.get("/api/stats")
 def get_stats():
     return stats.channel_stats(_conn(DB_PATH))
+
+
+# ============================================================================
+# 2026-09-30 智能爬虫（Smart Crawler）：ROI 调度 + 自动选 channel
+# ============================================================================
+
+@app.get("/api/crawler/strategy")
+def get_crawler_strategy():
+    """每个 channel 的 ROI 评分 + 推荐（前端「智能推荐」面板用）。
+
+    评分逻辑见 app/smart_crawler.py。返回倒序（高分在前）+ 总览统计。
+    sample 是占位 channel（手工上传），无 ROI 不计。
+    """
+    from app import smart_crawler
+    conn = _conn(DB_PATH)
+    stats_map = {s["channel"]: s for s in db.get_crawl_stats(conn) or []}
+    ranked = smart_crawler.rank_channels(
+        ("myshopify", "play", "osm"),
+        stats_map,
+    )
+    return {
+        "channels": [vars(s) for s in ranked],
+        "best": vars(ranked[0]) if ranked else None,
+        "tuning": {
+            "backoff_threshold": smart_crawler.BACKOFF_THRESHOLD,
+            "backoff_minutes": smart_crawler.BACKOFF_DURATION_MINUTES,
+        },
+    }
+
+
+@app.post("/api/crawler/clear-backoff/{channel}")
+def clear_channel_backoff(channel: str):
+    """手动清除某 channel 冷却（admin 用——确认 channel 恢复后调用）。"""
+    conn = _conn(DB_PATH)
+    db.clear_backoff(conn, channel)
+    conn.commit()
+    return {"channel": channel, "backoff_until": None}
+
+
+@app.post("/api/crawler/expand/{channel}")
+def auto_expand_seed(channel: str, country: str = "", limit: int = 500):
+    """2026-09-30 L2 Auto-expansion：种池耗尽时 admin 一键补种。
+
+    spawn seeds.py 子进程补新种子到 data/seeds-{channel}.txt（追加，不覆盖）。
+    """
+    from app import smart_crawler as _sc
+    if channel not in ("myshopify", "play", "osm"):
+        raise HTTPException(400, f"未知 channel: {channel}")
+    if limit < 50 or limit > 5000:
+        raise HTTPException(400, f"limit 应在 50-5000，got {limit}")
+    job = _sc.auto_expand_seed(channel, country=country, limit=limit,
+                               cwd=str(os.getcwd()))
+    return {
+        "ok": True,
+        "channel": channel,
+        "country": country,
+        "limit": limit,
+        "job": job,
+        "hint": "种子已 spawn，3-15 分钟完成；完成后到跑批 Tab 触发增量爬取",
+    }
 
 
 @app.get("/api/leads")
@@ -188,7 +286,7 @@ def get_leads(limit: int = Query(200, ge=1, le=2000,
             GROUP BY d.entity_key
             ORDER BY d.score DESC, d.entity_key
             LIMIT ?""",
-        (*params, max(0, min(limit, 1000))),
+        (*params, max(0, min(limit, 2000))),
     ).fetchall()
     return [dict(r) for r in rows]
 

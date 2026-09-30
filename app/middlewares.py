@@ -70,6 +70,10 @@ class PrivateNetMiddleware:
         return ok
 
     def process_request(self, request, spider):
+        # QA 离线端到端逃生口：显式 env 豁免（生产绝不设——私网防护是 SSRF 红线）
+        import os as _os
+        if _os.environ.get("BSP_ALLOW_PRIVATE_NET"):
+            return None
         host = (urlsplit(request.url).hostname or "").strip("[]").lower()
         if not host or not self._allowed(host):
             raise IgnoreRequest(f"private/cgnet host blocked: {host}")

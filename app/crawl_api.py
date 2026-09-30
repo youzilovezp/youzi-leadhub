@@ -22,6 +22,11 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+# 2026-09-30 智能爬虫：ROI 查询需要 db 模块
+from app import db as _db  # noqa: F401  复用名字避免与函数 db 冲突
+from app import smart_crawler as _sc  # 智能调度引擎（per-channel throttle、auto-expand）
+from app.normalize import normalize_url
+
 # 路径：API 进程 cwd 是项目根目录（uvicorn 启动方式决定）；爬取需在该 cwd 下
 # 跑才能正确解析相对 seed-file / db 路径
 _CWD = Path(os.getcwd()).resolve()
@@ -75,10 +80,12 @@ class CrawlRequest(BaseModel):
                        description="每渠道最大种子数（incremental 模式忽略，full 模式生效）")
     max_pages: int = Field(default=3, ge=1, le=10)
     db_path: str = "data/leads.db"
+    # 2026-09-30 智能爬虫：新增 'smart' 模式——自动按 ROI 选最优 channel（绕过冷却）；
     # incremental（默认）= 复用稳定 JOBDIR，Scrapy dupefilter 跳过已爬，
     #                  网络层只抓新种子，最经济（适合日常增量积累）。
     # full = 全新 JOBDIR，每次都从头开始（适合重检旧站点 / 字段 diff / 试新版本）。
-    mode: Literal["incremental", "full"] = "incremental"
+    # smart = 智能模式：自动按 ROI 评分选最佳 channel（front-end 用户点一下就跑最优渠道）。
+    mode: Literal["incremental", "full", "smart"] = "incremental"
 
 
 class JobInfo(BaseModel):
@@ -102,6 +109,9 @@ def _pick_seed(channel: str) -> str | None:
         candidates = ["data/seeds-myshopify.txt"]
     elif channel == "osm":
         candidates = ["data/seeds-osm.txt"]
+    elif channel == "sample":
+        # sample = 手工/测试清单：支持 API 触发（QA 离线端到端走这条路）
+        candidates = ["data/seeds-sample.txt"]
     else:
         return None
     for c in candidates:
@@ -111,12 +121,18 @@ def _pick_seed(channel: str) -> str | None:
 
 
 def _spawn(channel: str, seed_file: str, limit: int, max_pages: int,
-           db_path: str, mode: str = "incremental") -> _Job:
+           db_path: str, mode: str = "incremental",
+           throttle: '_sc.ThrottleTuning | None' = None,
+           chained: bool = False) -> _Job:
     """spawn 独立 subprocess 跑一个 channel——不阻塞 API 响应。
 
     JOBDIR 选择：
     - incremental：复用 data/.job/_inc/<channel>/ 稳定目录，Scrapy dupefilter 跳过已爬
     - full        ：data/.job/_full/<channel>-<timestamp>/ 全新目录，每次从头爬
+
+    2026-09-30 智能爬虫（L3）：根据 ROI 动态设 AUTOTHROTTLE_TARGET_CONCURRENCY 与
+    DOWNLOAD_DELAY——高命中快爬、低命中慢爬避免浪费预算。Throttle 参数通过环境变量
+    传给子进程（cli.py 读取）。
     """
     if mode == "incremental":
         jobdir = _JOBS / "_inc" / channel
@@ -142,20 +158,20 @@ def _spawn(channel: str, seed_file: str, limit: int, max_pages: int,
         "--db", db_path,
         "--jobdir", str(jobdir),
     ]
-    proc = subprocess.Popen(
-        cmd, cwd=str(_CWD),
-        stdout=log_handle, stderr=subprocess.STDOUT,
-        start_new_session=True,         # 独立 session，API 进程退出不影响
-    )
-    # 父进程立即关 fd（2026-09-28 修复：旧实现每次 spawn 泄一个描述符；
-    # 子进程已通过 stdout 继承，父侧只留句柄没用）
+    env = os.environ.copy()
+    if throttle is not None:
+        # 把 throttle 参数塞进环境变量给 cli.py 读取（避免改 cli.py 参数签名）
+        env["YOUZI_AUTOTHROTTLE_TARGET_CONCURRENCY"] = str(throttle.target_concurrency)
+        env["YOUZI_DOWNLOAD_DELAY"] = str(throttle.download_delay)
+    proc = subprocess.Popen(cmd, cwd=str(_CWD), stdout=log_handle,
+                            stderr=subprocess.STDOUT, start_new_session=True,
+                            env=env)
     log_handle.close()
-    job = _Job(
-        job_id=job_id, channel=channel, pid=proc.pid,
-        started_at=time.time(), proc=proc, log_file=log_file,
-        status="running",
-    )
+    job = _Job(job_id=job_id, channel=channel, pid=proc.pid,
+               started_at=time.time(), proc=proc,
+               status="running")
     _JOBS_RUNNING[job_id] = job
+    _record_job(job, kind="crawl", chained=chained, log_file=log_file)
     return job
 
 
@@ -174,15 +190,7 @@ def _channel_busy(channel: str) -> bool:
         if j.proc is not None:
             rc = j.proc.poll()
             if rc is not None:
-                j.exit_code = rc
-                # POSIX: rc<0 表示被信号杀死（|rc| = 信号号），0 正常退出，>0 异常退出
-                if rc == 0:
-                    j.status = "exited"
-                elif rc < 0:
-                    j.status = "killed"  # 被信号终止（不是程序崩溃——通常系统清理或用户 kill）
-                else:
-                    j.status = "failed"
-                j.proc = None
+                _finalize(j, rc)   # POSIX: rc<0 = 信号杀死；0 正常；>0 崩溃
                 continue
         if j.status in ("created", "running"):
             return True
@@ -267,7 +275,117 @@ def _spawn_seed(channel: str, countries: str, categories: str,
                started_at=time.time(), proc=proc, log_file=log_file,
                status="running")
     _JOBS_RUNNING[job_id] = job
+    _record_job(job, kind="seed", chained=False, log_file=log_file)
     return job
+
+
+# ============================================================
+# 2026-09-30 智能爬取加固：job 落库 + 后台收割线程 + seed→crawl 自动接续
+# （grilling 共识 Q5/Q9/Q10/Q11：DB 单一事实源，关掉浏览器接续不断）
+# ============================================================
+def _record_job(job: _Job, *, kind: str, chained: bool, log_file: Path) -> None:
+    """spawn 即落 job 表（失败不阻塞主流程——内存 dict 仍可兜底收割）。"""
+    try:
+        conn = _db.connect(str(_CWD / "data" / "leads.db"))
+        try:
+            _db.insert_job(conn, job_id=job.job_id, kind=kind, channel=job.channel,
+                           pid=job.pid, started_at=job.started_at,
+                           chained=chained, log=str(log_file))
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+
+def _finalize(job: _Job, rc: int) -> None:
+    """job 退出 → 内存 + DB 同步终态（rc<0 = 信号杀死，区别于崩溃）。"""
+    job.exit_code = rc
+    job.status = "exited" if rc == 0 else ("killed" if rc < 0 else "failed")
+    job.proc = None
+    try:
+        conn = _db.connect(str(_CWD / "data" / "leads.db"))
+        try:
+            _db.finish_job(conn, job.job_id, job.status, rc)
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+
+def _reap_pass() -> set[str]:
+    """poll 全部内存 job，收割已退出的。
+
+    返回「本轮收割为成功（exit 0）的 seed job 渠道集合」——自动接续的触发信号。
+    """
+    done_seeds: set[str] = set()
+    for job in list(_JOBS_RUNNING.values()):
+        if job.proc is None:
+            continue
+        rc = job.proc.poll()
+        if rc is None:
+            continue
+        _finalize(job, rc)
+        if job.job_id.startswith("seed-") and rc == 0:
+            done_seeds.add(job.channel)
+    return done_seeds
+
+
+def _auto_chain(channel: str) -> None:
+    """seed 落地 → 自动接续该渠道增量爬（Q1 体感保证的核心链路）。
+
+    只爬种子刚落地的渠道（Q10 最小扰动）；并发安全复用 _BUSY_LOCK。
+    """
+    with _BUSY_LOCK:
+        if _channel_busy(channel):
+            return
+        cands = _seed_candidates(channel)
+        if not cands:
+            return
+        # ponytail: 接续直喂最大种子文件不走 L1 排序——接续是全量预算，排序无增益
+        seed_path = max(cands, key=lambda p: p.stat().st_size)
+        limit = sum(_seed_count(c) for c in cands)
+        ch_stats = None
+        try:
+            conn = _db.connect(str(_CWD / "data" / "leads.db"))
+            try:
+                ch_stats = _db.get_crawl_stats(conn, channel)
+            finally:
+                conn.close()
+        except Exception:
+            pass
+        _spawn(channel, str(seed_path), limit, 3, "data/leads.db", "incremental",
+               throttle=_sc.compute_throttle(channel, ch_stats), chained=True)
+
+
+def _reaper_loop() -> None:
+    """收割线程主体：5s 一轮，永不退出（异常吞掉下轮再来）。"""
+    while True:
+        time.sleep(5)
+        try:
+            for ch in _reap_pass():
+                _auto_chain(ch)
+        except Exception:
+            pass
+
+
+_REAPER: threading.Thread | None = None
+
+
+def start_reaper() -> None:
+    """uvicorn lifespan 调用：先收割 DB 孤儿行（上次重启遗留），再起 daemon 线程。"""
+    global _REAPER
+    if _REAPER is not None and _REAPER.is_alive():
+        return
+    try:
+        conn = _db.connect(str(_CWD / "data" / "leads.db"))
+        try:
+            _db.reap_orphan_jobs(conn)
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    _REAPER = threading.Thread(target=_reaper_loop, daemon=True, name="job-reaper")
+    _REAPER.start()
 
 
 @router.get("/api/scenes")
@@ -287,6 +405,8 @@ def _seed_candidates(channel: str) -> list[Path]:
         names = ["data/seeds-myshopify.txt"]
     elif channel == "osm":
         names = ["data/seeds-osm.txt"]
+    elif channel == "sample":
+        names = ["data/seeds-sample.txt"]   # 手工/测试清单：QA 离线端到端入口
     else:
         return []
     return [p for n in names if (_CWD / n).exists() for p in [_CWD / n]]
@@ -351,8 +471,45 @@ def post_seeds(req: SeedsRequest):
         "scene": {"id": scene.id, "label": scene.label, "pitch": scene.pitch},
         "jobs": [j.model_dump() for j in spawned],
         "targets": targets,
-        "hint": f"后台约 1–3 分钟；完成后到跑批页确认退出码，再点「增量爬取」吃新种子",
+        "hint": "后台约 1–3 分钟；完成后点「智能爬取」吃新种子",
     }
+
+
+# 智能爬取黑盒状态：场景轮换指针（存 data/ 内——随数据目录整体迁移到新机器）
+_SMART_ROTATION = _CWD / "data" / ".smart-rotation"
+
+
+def _smart_expand_scene(skip: set[str] = set()) -> list[JobInfo]:
+    """smart 模式自带的「挖新人群」：按轮换挑下一个业务场景，后台补种子。
+
+    销售不选场景——轮换保证国家×类目自动铺开（挖新人群入口已并入智能爬取）。
+    skip：本轮已被选去爬取的渠道（补种与爬取同渠道互斥，让爬取先行）。
+    防刷：已有 seed job 在跑就跳过本轮，避免重复打 Google Play/Overpass。
+    # ponytail: 轮换无间隔上限，连点 5+ 次会重新展开首场景（种子 URL 去重靠 append_merge）
+    """
+    if any(j.job_id.startswith("seed-") and j.status in ("created", "running")
+           for j in list(_JOBS_RUNNING.values())):
+        return []
+    from app.seeds_scenes import SCENES
+    idx = 0
+    if _SMART_ROTATION.exists():
+        try:
+            idx = int(_SMART_ROTATION.read_text(encoding="utf-8").strip()) + 1
+        except ValueError:
+            idx = 0
+    scene = SCENES[idx % len(SCENES)]
+    _SMART_ROTATION.parent.mkdir(parents=True, exist_ok=True)
+    _SMART_ROTATION.write_text(str(idx % len(SCENES)), encoding="utf-8")
+    spawned: list[JobInfo] = []
+    for plan in scene.plans:
+        if plan.channel in skip or _channel_busy(plan.channel):
+            continue  # 本轮去爬了 / 同渠道已有任务——不冲突，下轮轮换到它
+        target = _pick_seed(plan.channel) or f"data/seeds-{plan.channel}.txt"
+        job = _spawn_seed(plan.channel, plan.countries, plan.categories,
+                          plan.per_country, target)
+        spawned.append(JobInfo(job_id=job.job_id, channel=job.channel, pid=job.pid,
+                               started_at=job.started_at, status=job.status))
+    return spawned
 
 
 @router.post("/api/crawl")
@@ -371,6 +528,33 @@ def post_crawl(req: CrawlRequest):
         raise HTTPException(400, f"未知渠道: {invalid}; 可选: {list(ALL_CHANNELS)}")
     db_path = _safe_db_path(req.db_path)
 
+    # 2026-09-30 智能模式（销售一键黑盒）：
+    #   ① 按 ROI 排序增量爬**全部**空闲渠道（冷却中的跳过）——每次点击必吃到
+    #      有新种子的渠道（单选最优会盲选「高分但池尽」的渠道 → 实报「线索
+    #      无变化」的根因之二；低 ROI 渠道由 per-channel throttle 自动保守）
+    #   ② 被爬渠道之外，后台轮换业务场景挖新种子（种池自动铺开国家×类目）
+    if req.mode == "smart":
+        free = [c for c in channels if not _channel_busy(c)]
+        if not free:
+            # Q14 幂等合并：点正在跑的批次不是错误——200 + 中性提示（前端不特判 409）
+            return {
+                "mode": "smart", "spawned": [], "total": 0,
+                "skipped": [{"channel": c, "reason": "已有任务在跑（爬取或补种中）"}
+                            for c in channels],
+                "hint": "本批进行中——完成后自动补种接续，无需重复点击",
+            }
+        conn_ro = _db.connect(str(_CWD / "data" / "leads.db"))
+        try:
+            stats_map = {s["channel"]: s for s in (_db.get_crawl_stats(conn_ro) or [])}
+            ranked = _sc.rank_channels(free, stats_map)
+        finally:
+            conn_ro.close()
+        if not ranked:
+            raise HTTPException(503, "smart 模式：没有可用渠道")
+        ok = [s.channel for s in ranked if s.recommendation != "backoff"]
+        channels = ok or [ranked[0].channel]  # 全在冷却 → 最高分兜底
+        _smart_expand_scene(skip=set(channels))
+
     # 并发守卫（2026-09-30 强化）：进程内锁包住 check+spawn——双请求同时过
     # _channel_busy 会并发 spawn 同 JOBDIR，Scrapy 指纹/断点队列互相覆盖
     with _BUSY_LOCK:
@@ -382,26 +566,94 @@ def post_crawl(req: CrawlRequest):
 
         spawned: list[JobInfo] = []
         skipped: list[dict] = []
+        targets: list[str] = []
         for ch in channels:
             # 2026-09-30 修复：incremental 模式汇总所有候选种子文件行数（与 /api/seeds 一致），
             # 并选最大的文件喂 Scrapy——避免 _pick_seed 只取首个候选（tranco 兜底永远 5 行
             # 而 batch2 5874 行从未被用，导致增量 tranco 每次只爬 5 URL）。
             candidates = _seed_candidates(ch)
             if not candidates:
-                skipped.append({"channel": ch, "reason": f"无种子文件（需先跑 seed {ch}）"})
+                if req.mode == "smart":
+                    # L2 兜底：池子空 → 后台自动补该渠道种子（走 _spawn_seed 进 busy 守卫）
+                    _spawn_seed(ch, "", "", 500, f"data/seeds-{ch}.txt")
+                    skipped.append({"channel": ch, "reason": "无种子文件（已在后台补充，稍后再点）"})
+                else:
+                    skipped.append({"channel": ch, "reason": f"无种子文件（需先跑 seed {ch}）"})
                 continue
-            # 选最大文件喂 Scrapy（Scrapy 内部 dupefilter 共享 JOBDIR——重复 URL 跨文件自动跳过）
-            seed = str(max(candidates, key=lambda p: p.stat().st_size))
-            if req.mode == "incremental":
+            # 冷却中跳过（其他模式也尊重冷却——admin 用 clear-backoff 解除）
+            ch_conn = _db.connect(str(_CWD / "data" / "leads.db"))
+            try:
+                ch_stats = _db.get_crawl_stats(ch_conn, ch)
+            finally:
+                ch_conn.close()
+            if ch_stats and ch_stats.get("backoff_until"):
+                from datetime import datetime, timezone
+                try:
+                    bt = datetime.fromisoformat(ch_stats["backoff_until"].replace("Z", "+00:00"))
+                    if bt > datetime.now(timezone.utc):
+                        skipped.append({"channel": ch, "reason": "冷却中"})
+                        continue
+                except (ValueError, TypeError):
+                    pass
+            # 选最大文件作 fallback（Scrapy 内部 dupefilter 共享 JOBDIR——重复 URL 跨文件自动跳过）
+            seed_path = max(candidates, key=lambda p: p.stat().st_size)
+            # 2026-09-30 L1 per-seed scoring：按历史 yield_score 排序，高分优先爬
+            # 同 crawl budget 下优先验证「已知有钱」的域——这能让销售更快看到新 WA。
+            # 2026-09-30 修复②：读**全部**候选文件（旧代码只读最大文件——第二候选的
+            # URL 在增量模式从未被喂给爬虫，与 limit 汇总所有候选的意图相反）
+            try:
+                all_urls = []
+                for cand in candidates:
+                    with open(cand, encoding="utf-8") as fh:
+                        for line in fh:
+                            raw = line.strip()
+                            if not raw or raw.startswith("#"):
+                                continue
+                            # tab 分隔 URL<TAB>dev_name（dev_name 忽略）
+                            url_part = raw.split("\t", 1)[0]
+                            if "://" in url_part:
+                                u = normalize_url(url_part)
+                            else:
+                                u = normalize_url(f"https://{url_part}")
+                            if u:
+                                all_urls.append(u)
+                with _db.connect(str(_CWD / "data" / "leads.db")) as rank_conn:
+                    ranked_urls = _sc.rank_seeds_by_yield(rank_conn, all_urls)
+                # 用排序后的 URL 写临时文件（避免覆盖原 seed 文件）
+                if req.mode in ("incremental", "smart"):
+                    limit = sum(_seed_count(c) for c in candidates)
+                else:
+                    limit = req.limit
+                ranked_urls = ranked_urls[:limit]
+                # 2026-09-30 修复：旧代码这里写 {channel}（未定义）→ 每次 NameError 静默
+                # 回退未排序种子文件，L1 按历史产出排序从未生效。
+                # 固定文件名（非时间戳）：同渠道并发已被 409 守卫挡住，覆盖写不会
+                # 互踩，且避免每次爬取堆积一个临时文件
+                ranked_seed_file = _CWD / "data" / f".seed-ranked-{ch}.txt"
+                with open(ranked_seed_file, "w", encoding="utf-8") as out:
+                    for u in ranked_urls:
+                        out.write(u + "\n")
+                seed_file = str(ranked_seed_file)
+            except Exception:
+                # 排序失败 → fallback 到原文件
+                seed_file = str(seed_path)
+            if req.mode in ("incremental", "smart"):
                 # 全量交给 dupefilter：所有候选文件总行数（已被爬过的会被 dupefilter 跳过）
                 limit = sum(_seed_count(c) for c in candidates)
             else:
                 limit = req.limit
-            job = _spawn(ch, seed, limit, req.max_pages, db_path, req.mode)
+            target = _pick_seed(ch) or f"data/seeds-{ch}.txt"
+            # 2026-09-30 L3 per-channel AutoThrottle：按 ROI 动态设并发/延迟
+            # 高命中快爬、低命中慢爬（保守用预算）
+            throttle = _sc.compute_throttle(ch, ch_stats)
+            job = _spawn(ch, seed_file, limit, req.max_pages, db_path,
+                         "incremental" if req.mode == "smart" else req.mode,
+                         throttle=throttle)
             spawned.append(JobInfo(
-                job_id=job.job_id, channel=job.channel, pid=job.pid,
+                job_id=job.job_id, channel=ch, pid=job.pid,
                 started_at=job.started_at, status=job.status,
             ))
+            targets.append(target)
 
     return {
         "mode": req.mode,
@@ -432,7 +684,7 @@ def _tail(path: Path | None, n: int = 30, max_bytes: int = 4096) -> str | None:
         # 绝对路径 → 相对路径，避免内部信息泄露
         import re as _re
         text = _re.sub(r"/[\w/.-]+/app/", "app/", text)
-        text = _re.sub(r"/Users/\w+/", "~/", text)
+        text = _re.sub(r"/(?:Users|home)/\w+/", "~/", text)
         return text
     except OSError:
         return None
@@ -440,45 +692,21 @@ def _tail(path: Path | None, n: int = 30, max_bytes: int = 4096) -> str | None:
 
 @router.get("/api/crawl/status")
 def get_crawl_status():
-    """返回当前/最近 crawl job 状态（含退出码 + 末尾 30 行/4KB 日志）。
+    """job 状态 + 渠道健康（Q5/Q13：job 表单一事实源，API 重启不丢）。
 
-    F2 fix: TTL 清理——只保留最近 100 条；已 exited 超过 1 小时的清出 dict。
+    返回 {jobs: [...], health: {channel: 连续补种失败次数}}。
+    health 只在 streak≥3 时出现该渠道（前端横幅据此冒头，一次成功即消）。
     """
-    import time as _t
-    now = _t.time()
-    TTL = 3600  # 已退出 job 在 _JOBS_RUNNING 保留 1 小时供前端查看，之后清
-    # TTL 清理：已 exited/failed 且 started_at > 1 小时前的全部清出
-    # 2026-09-30 修复：迭代前 `list(_JOBS_RUNNING.items())` 快照——并发 pop 触发
-    # `RuntimeError: dictionary changed size during iteration` 导致 API 500
-    stale = [jid for jid, j in list(_JOBS_RUNNING.items())
-             if j.status in ("exited", "failed") and (now - j.started_at) > TTL]
-    for jid in stale:
-        _JOBS_RUNNING.pop(jid, None)
-    # 大小限幅：保留最近 100 条
-    if len(_JOBS_RUNNING) > 100:
-        for jid in list(_JOBS_RUNNING.keys())[:len(_JOBS_RUNNING) - 100]:
-            _JOBS_RUNNING.pop(jid, None)
-
-    out: list[JobInfo] = []
-    for job_id, job in list(_JOBS_RUNNING.items()):
-        if job.proc is not None:
-            rc = job.proc.poll()
-            if rc is None:
-                job.status = "running"
-            else:
-                job.exit_code = rc
-                # 同 _channel_busy：rc<0 是信号杀死，区别于程序崩溃
-                if rc == 0:
-                    job.status = "exited"
-                elif rc < 0:
-                    job.status = "killed"
-                else:
-                    job.status = "failed"
-                job.proc = None
-        out.append(JobInfo(
-            job_id=job.job_id, channel=job.channel, pid=job.pid,
-            started_at=job.started_at, status=job.status,
-            exit_code=job.exit_code,
-            log=_tail(job.log_file, 30, max_bytes=4096),
-        ))
-    return [j.model_dump() for j in out]
+    _reap_pass()  # 有人看板时顺带收割，降低收割线程 5s 延迟的体感
+    try:
+        conn = _db.connect(str(_CWD / "data" / "leads.db"))
+        try:
+            jobs = _db.list_jobs(conn, 100)
+            health = _db.seed_fail_streaks(conn)
+        finally:
+            conn.close()
+    except Exception:
+        return {"jobs": [], "health": {}}
+    for j in jobs:
+        j["log"] = _tail(Path(j["log"]), 30, max_bytes=4096) if j.get("log") else None
+    return {"jobs": jobs, "health": health}

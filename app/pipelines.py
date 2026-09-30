@@ -139,6 +139,12 @@ class WaStorePipeline:
                    WHERE entity_key=? AND status='pending' AND last_crawled IS NULL""",
                 (key,))
             self.conn.commit()
+            # 2026-09-30 智能爬虫：error item 写 ROI 失败记录（连续错误 → 冷却）
+            try:
+                db.record_crawl_outcome(self.conn, item.get("channel", "sample"),
+                                          errored=True)
+            except Exception:
+                pass  # 不阻塞主流程
             return item
         # 成功重爬历史 error 域（如上次超时本次成功）：复活为 pending 交 close_spider 重算
         self.conn.execute(
@@ -170,14 +176,34 @@ class WaStorePipeline:
             _atomic_merge_csv(self.conn, "domain", key, set(res["widgets"]), "widget")
         if res["emails"]:
             _atomic_merge_csv(self.conn, "domain", key, set(res["emails"]), "email")
+        phones_found = 0
+        is_first_sighting = False
         for raw, layer in res["candidates"]:
             ph = normalize_phone(raw, imply_plus=(layer == "link"))
             if not ph:
                 continue
             e164, country = ph
+            # 检查 sighting 是否已存在（避免重复计入 phones_found）
+            existing = self.conn.execute(
+                "SELECT 1 FROM sighting WHERE entity_key=? AND e164=? LIMIT 1",
+                (key, e164)).fetchone()
+            if not existing:
+                is_first_sighting = True
             db.upsert_phone(self.conn, e164, country)
             db.upsert_sighting(self.conn, key, e164, url, layer)
+            phones_found += 1
         self.conn.commit()
+
+        # 2026-09-30 智能爬虫：成功路径写 ROI（hit=首次产出 WA 实体；phones=本次新号码数）
+        try:
+            db.record_crawl_outcome(
+                self.conn, item.get("channel", "sample"),
+                hit=is_first_sighting and phones_found > 0,
+                phones_found=phones_found,
+                errored=False,
+            )
+        except Exception:
+            pass  # 不阻塞主流程
         return item
 
     def close_spider(self, spider):

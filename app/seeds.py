@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import zipfile
 from pathlib import Path
 from urllib.parse import quote, urlsplit
@@ -156,16 +157,38 @@ _OVERPASS_ENDPOINTS = (_OVERPASS,
 _UA = "youzi-leadhub/0.1 (BSP leadgen; polite; youzi99013@gmail.com)"
 
 
+def _cn_proxy() -> str | None:
+    """Overpass 出口代理：BSP_PROXY/HTTPS_PROXY 显式 > 本机 clash 7890 > 直连。
+
+    2026-09-30 实测：CN 网络直连 Overpass 被 reset（GFW），走 clash 1.5s 即回包；
+    海外 VPS 探测不到 clash 自动直连——不与任何机器绑定。
+    """
+    explicit = os.environ.get("BSP_PROXY") or os.environ.get("HTTPS_PROXY")
+    if explicit:
+        return explicit
+    import socket
+    try:
+        with socket.create_connection(("127.0.0.1", 7890), timeout=0.3):
+            return "http://127.0.0.1:7890"
+    except OSError:
+        return None
+
+
 def overpass_post(q: str) -> dict:
-    """Overpass 查询：三端点轮换 + 429/504 退避重试（osm/osm_direct 共用）。"""
+    """Overpass 查询：三端点轮换 + 429/504 退避重试（osm/osm_direct 共用）。
+
+    2026-09-30 修复：CN 直连被 reset 时三端点退避重试 = 无声挂数分钟再全失败
+    （智能爬取补种零产出的根因）。探测到本机代理就走代理，超时 200→60s。
+    """
     import time
 
+    proxy = _cn_proxy()
     last: Exception | None = None
     for endpoint in _OVERPASS_ENDPOINTS:
         for attempt in (1, 2):
             try:
-                r = httpx.post(endpoint, data={"data": q}, timeout=200,
-                               headers={"User-Agent": _UA})
+                r = httpx.post(endpoint, data={"data": q}, timeout=60,
+                               headers={"User-Agent": _UA}, proxy=proxy)
                 if r.status_code in (429, 504) and attempt == 1:
                     time.sleep(15)
                     continue

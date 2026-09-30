@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertCircle,
   Check,
@@ -8,19 +8,12 @@ import {
   ExternalLink,
   Globe,
   Loader2,
-  MessageCircle,
-  Moon,
-  Play,
-  Plus,
-  Power,
-  RefreshCw,
+  MapPin,
+  Phone,
   Search,
-  Settings2,
   ShoppingBag,
   Smartphone,
-  Sun,
   TestTube2,
-  TrendingUp,
   X,
   Zap,
 } from 'lucide-react'
@@ -28,25 +21,8 @@ import {
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Checkbox } from '@/components/ui/checkbox'
-import {
-  Dialog,
-  DialogClose,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
 import { Logo } from '@/components/Logo'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
 import {
   Pagination,
   PaginationContent,
@@ -64,7 +40,6 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
-import { Switch } from '@/components/ui/switch'
 import {
   Tabs,
   TabsContent,
@@ -110,19 +85,26 @@ type CrawlJob = {
   channel: string
   pid: number
   started_at: number
-  status: 'created' | 'running' | 'exited' | 'failed'
+  status: 'created' | 'running' | 'exited' | 'failed' | 'killed'
   exit_code: number | null
   log: string | null
 }
 
-type Theme = 'light' | 'dark' | 'system'
-
 const PAGE_SIZE = 24
 
-/* 渠道视觉身份：克制型 — 单一 emerald 强调 + 中性灰，告别"五色卡片" */
+/* WhatsApp 品牌标（FA5 brands 轮廓，官方绿 #25D366） */
+function WhatsAppIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 448 512" fill="currentColor" aria-hidden className={className}>
+      <path d="M380.9 97.1C339 55.1 283.2 32 223.9 32c-122.4 0-222 99.6-222 222 0 39.1 10.2 77.3 29.6 111L0 480l117.7-30.9c32.4 17.7 68.9 27 106.1 27h.1c122.3 0 224.1-99.6 224.1-222 0-59.3-25.2-115-67.1-157zm-157 341.6c-33.2 0-65.7-8.9-94-25.7l-6.7-4-69.8 18.3L72 359.2l-4.4-7c-18.5-29.4-28.2-63.3-28.2-98.2 0-101.7 82.8-184.5 184.6-184.5 49.3 0 95.6 19.2 130.4 54.1 34.8 34.9 56.2 81.2 56.1 130.5 0 101.8-84.9 184.6-186.6 184.6zm101.2-138.2c-5.5-2.8-32.8-16.2-37.9-18-5.1-1.9-8.8-2.8-12.5 2.8-3.7 5.6-14.3 18-17.6 21.8-3.2 3.7-6.5 4.2-12 1.4-32.6-16.3-54-29.1-75.5-66-5.7-9.8 5.7-9.1 16.3-30.3 1.8-3.7.9-6.9-.5-9.7-1.4-2.8-12.5-30.1-17.1-41.2-4.5-10.8-9.1-9.3-12.5-9.5-3.2-.2-6.9-.2-10.6-.2-3.7 0-9.7 1.4-14.8 6.9-5.1 5.6-19.4 19-19.4 46.3 0 27.3 19.9 53.7 22.6 57.4 2.8 3.7 39.1 59.7 94.8 83.8 35.2 15.2 49 16.5 66.6 13.9 10.7-1.6 32.8-13.4 37.4-26.4 4.6-13 4.6-24.1 3.2-26.4-1.3-2.5-5-3.9-10.5-6.6z" />
+    </svg>
+  )
+}
+
+/* 渠道视觉身份：zinc 单色，与 Logo 配色同源 */
 const CHANNEL_IDENTITY: Record<string, { icon: typeof Globe; chip: string; grad: string }> = {
-  play:      { icon: Smartphone,  chip: 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
-                                grad: 'from-emerald-500/10 to-teal-500/10' },
+  play:      { icon: Smartphone,  chip: 'bg-foreground/10 text-foreground',
+                                grad: 'from-foreground/8 to-foreground/4' },
   myshopify: { icon: ShoppingBag, chip: 'bg-muted text-muted-foreground',
                                 grad: 'from-muted/30 to-muted/10' },
   osm:       { icon: Globe,       chip: 'bg-muted text-muted-foreground',
@@ -134,27 +116,14 @@ const channelStyle = (c: string) =>
   CHANNEL_IDENTITY[c] ?? { icon: Globe, chip: 'bg-muted text-muted-foreground',
                             grad: 'from-muted/30 to-muted/10' }
 
-/* 渠道历史命中率 hint（v7 实测口径——给用户预算参考）
- * 2026-09-30：tranco 渠道已清理（命中率 0.2%，污染源），从 CRAWL_CHANNELS 移除。
- * 后端 ALL_CHANNELS 同步。手工调试仍可用 `app seed tranco`。 */
-const CRAWL_CHANNELS = ['myshopify', 'play', 'osm'] as const
-type CrawlChannel = (typeof CRAWL_CHANNELS)[number]
-
-/* 渠道中文名 + 一句话定位 — 给非开发者用户看的，不是给后端看的 */
-const CHANNEL_CN: Record<CrawlChannel, { name: string; desc: string }> = {
-  myshopify: { name: 'Shopify 店铺', desc: 'CDX 索引 *.myshopify.com 子域的店铺' },
-  play:      { name: 'Play 应用',    desc: '按国家×类目爬应用及开发者官网（高优级第 1 强信号）' },
-  osm:       { name: '地图商户',     desc: 'OpenStreetMap 提商户电话（需海外 VPS）' },
+/* 渠道码 → 中文名（销售可读；导出 CSV 仍用机器码） */
+const CHANNEL_CN: Record<string, string> = {
+  play: 'Google Play 商店',
+  myshopify: 'Shopify 独立站',
+  osm: '海外地图商户',
+  sample: '示例数据',
 }
-
-/* 拖到模块顶层：避免 CrawlDialog 收到新引用就 useEffect 重置用户已选渠道。
- * （HIGH-2 fix：父组件轮询时 setJobs → App 重渲染 → defaultChannels 新数组 → 子 dialog 重置）*/
-const DEFAULT_CRAWL_CHANNELS: CrawlChannel[] = [...CRAWL_CHANNELS]
-const CHANNEL_HIT_RATE_HINT: Record<CrawlChannel, string> = {
-  play:      '~12–25%',
-  myshopify: '~0.7%',
-  osm:       '~15–55%',
-}
+const channelName = (c: string) => CHANNEL_CN[c] ?? c
 
 const MARKET_GROUPS = ['SEA', 'LATAM', 'MENA', 'EU', 'OTHER'] as const
 type MarketGroup = (typeof MARKET_GROUPS)[number]
@@ -224,59 +193,6 @@ function P0Badge({ active }: { active: boolean }) {
   )
 }
 
-function StatusPill({ status, exitCode }: { status: CrawlJob['status']; exitCode: number | null }) {
-  if (status === 'running')
-    return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-sky-500/15 px-2 py-0.5 text-xs text-sky-700 dark:text-sky-300 ring-1 ring-sky-500/30">
-        <Loader2 className="size-3 animate-spin" /> 跑批中
-      </span>
-    )
-  if (status === 'exited')
-    return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs text-emerald-700 dark:text-emerald-300 ring-1 ring-emerald-500/30">
-        <Check className="size-3" /> 完成
-      </span>
-    )
-  if (status === 'killed')
-    // 被信号杀死（不是程序崩溃）——通常是 API 重启/系统清理导致子进程被回收
-    // exit_code 是负数，|exit_code| 是信号号（-9 = SIGKILL, -15 = SIGTERM）
-    return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-xs text-amber-700 dark:text-amber-300 ring-1 ring-amber-500/30"
-            title="子进程被信号终止（不是程序崩溃）">
-        <Power className="size-3" /> 已终止
-        {exitCode !== null ? ` (${exitCode > 128 ? `SIGKILL` : `sig${-exitCode}`})` : ''}
-      </span>
-    )
-  return (
-    <span className="inline-flex items-center gap-1 rounded-full bg-rose-500/15 px-2 py-0.5 text-xs text-rose-700 dark:text-rose-300 ring-1 ring-rose-500/30">
-      <X className="size-3" /> 失败 {exitCode !== null ? `(${exitCode})` : ''}
-    </span>
-  )
-}
-
-/* ============================================================
- * 主题
- * ============================================================ */
-function useTheme() {
-  const [theme, setTheme] = useState<Theme>(
-    () => (localStorage.getItem('theme') as Theme) || 'system'
-  )
-
-  useEffect(() => {
-    const mq = window.matchMedia('(prefers-color-scheme: dark)')
-    const apply = () => {
-      const dark = theme === 'dark' || (theme === 'system' && mq.matches)
-      document.documentElement.classList.toggle('dark', dark)
-    }
-    apply()
-    localStorage.setItem('theme', theme)
-    mq.addEventListener('change', apply)
-    return () => mq.removeEventListener('change', apply)
-  }, [theme])
-
-  return [theme, setTheme] as const
-}
-
 /* ============================================================
  * 数据 hooks
  * ============================================================ */
@@ -288,7 +204,6 @@ function usePanelData() {
   const [updatedAt, setUpdatedAt] = useState<string | null>(null)
   const [channel, setChannel] = useState('all')
   const [marketGroup, setMarketGroup] = useState('all')
-  const [p0Only, setP0Only] = useState(false)
   const [search, setSearch] = useState('')
   const [tick, setTick] = useState(0)
 
@@ -301,7 +216,6 @@ function usePanelData() {
 
     const qs = new URLSearchParams({ limit: '500' })
     if (channel !== 'all') qs.set('channel', channel)
-    if (p0Only) qs.set('p0', '1')
     if (marketGroup !== 'all') qs.set('market_group', marketGroup)
 
     Promise.all([
@@ -327,17 +241,19 @@ function usePanelData() {
     return () => {
       alive = false
     }
-  }, [channel, p0Only, marketGroup, tick])
+  }, [channel, marketGroup, tick])
 
   return {
     stats, leads, error, loading, updatedAt,
-    channel, setChannel, marketGroup, setMarketGroup, p0Only, setP0Only,
+    channel, setChannel, marketGroup, setMarketGroup,
     search, setSearch, refresh,
   }
 }
 
 function useCrawlStatus() {
   const [jobs, setJobs] = useState<CrawlJob[]>([])
+  /* health：{channel: 连续补种失败次数}——streak≥3 才出现（后端口径），冒横幅 */
+  const [health, setHealth] = useState<Record<string, number>>({})
   const [tick, setTick] = useState(0)
 
   useEffect(() => {
@@ -351,7 +267,9 @@ function useCrawlStatus() {
            * 无效重渲染（jobs 在 App 根组件，一次更新带动整棵树 diff） */
           if (!alive || raw === null || raw === lastRaw) return
           lastRaw = raw
-          setJobs(JSON.parse(raw))
+          const d = JSON.parse(raw) as { jobs: CrawlJob[]; health?: Record<string, number> }
+          setJobs(d.jobs ?? [])
+          setHealth(d.health ?? {})
         })
         .catch(() => {})
     }
@@ -363,82 +281,17 @@ function useCrawlStatus() {
     }
   }, [tick])
 
-  return { jobs, bump: () => setTick((t) => t + 1) }
-}
-
-/* 种子池：各渠道待爬种子数（挖新人群追加后刷新） */
-type PoolsResp = { pools: Record<string, number>; details: Record<string, Record<string, number>> }
-
-function useSeedPools() {
-  const [pools, setPools] = useState<Record<string, number>>({})
-  const [details, setDetails] = useState<Record<string, Record<string, number>>>({})
-  const refresh = useCallback(() => {
-    fetch('/api/seeds')
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d: PoolsResp | null) => d && (setPools(d.pools ?? {}), setDetails(d.details ?? {})))
-      .catch(() => {})
-  }, [])
-  useEffect(() => { refresh() }, [refresh])
-  return { pools, details, refreshPools: refresh }
-}
-
-/* ============================================================================
- * 2026-09-30 销售 UX 重构：今日队列 + 跟进进度
- * ============================================================================
- */
-
-type TodayLead = {
-  entity_key: string; market: string | null; market_group: string | null;
-  lang: string | null; score: number; p0: number; widget: string | null;
-  contact_status: string; contact_notes: string | null; phones: string;
-  outreach: { message: string; language: string; whatsapp_deep_link: string; entity: string };
-}
-
-function useTodayQueue(refreshKey = 0) {
-  const [leads, setLeads] = useState<TodayLead[]>([])
-  const refresh = useCallback(() => {
-    fetch('/api/today?limit=20')
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => setLeads(d ?? []))
-      .catch(() => setLeads([]))
-  }, [])
-  useEffect(() => { refresh() }, [refresh, refreshKey])
-  return { todayLeads: leads, refreshToday: refresh }
-}
-
-type Progress = {
-  week_contacts: number; by_status: Record<string, number>;
-  total: number; new_today: number;
-}
-
-function useProgress(refreshKey = 0) {
-  const [progress, setProgress] = useState<Progress | null>(null)
-  const refresh = useCallback(() => {
-    fetch('/api/progress')
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => setProgress(d))
-      .catch(() => setProgress(null))
-  }, [])
-  useEffect(() => { refresh() }, [refresh, refreshKey])
-  return { progress, refreshProgress: refresh }
-}
-
-async function patchLeadStatus(entity: string, status: string, notes?: string) {
-  const r = await fetch(`/api/leads/${encodeURIComponent(entity)}/status`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ status, notes }),
-  })
-  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`)
-  return r.json()
+  return { jobs, health, bump: () => setTick((t) => t + 1) }
 }
 
 /* ============================================================
  * API 客户端
  * ============================================================ */
+/* 智能爬取（2026-09-30 合并入口）：一键黑盒——后端自动挑最优渠道增量爬 +
+   轮换业务场景后台挖新人群。销售不选渠道/模式/页数。*/
 async function triggerCrawl(opts: {
-  channels: CrawlChannel[]
-  mode: 'incremental' | 'full'
+  channels: string[]
+  mode: 'incremental' | 'full' | 'smart'
   limit: number
   max_pages: number
 }) {
@@ -448,38 +301,12 @@ async function triggerCrawl(opts: {
     body: JSON.stringify(opts),
   })
   if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`)
-  return r.json() as Promise<{ mode: string; spawned: CrawlJob[]; skipped: unknown[]; total: number }>
+  return r.json() as Promise<{ mode: string; spawned: CrawlJob[]; skipped: { channel: string; reason: string }[]; total: number }>
 }
 
-/* 挖新人群（2026-09-30 简化）：选业务场景，后端自动展开到 play/osm 子任务。
-   销售不填 ISO 国家码 / 类目英文名 —— 按业务场景一键。*/
-type SeedScene = { id: string; label: string; pitch: string; channels: string[] }
-
-async function fetchScenes(): Promise<SeedScene[]> {
-  const r = await fetch('/api/scenes')
-  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`)
-  return r.json()
-}
-
-async function triggerSeedScene(sceneId: string) {
-  const r = await fetch('/api/seeds', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ scene: sceneId }),
-  })
-  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`)
-  return r.json() as Promise<{
-    scene: { id: string; label: string; pitch: string }
-    jobs: CrawlJob[]
-    targets: string[]
-    hint: string
-  }>
-}
-
-async function exportCsv(opts: { channel?: string; p0?: boolean; marketGroup?: string }) {
+async function exportCsv(opts: { channel?: string; marketGroup?: string }) {
   const qs = new URLSearchParams()
   if (opts.channel && opts.channel !== 'all') qs.set('channel', opts.channel)
-  if (opts.p0) qs.set('p0', '1')
   if (opts.marketGroup && opts.marketGroup !== 'all') qs.set('market_group', opts.marketGroup)
   const r = await fetch(`/api/leads?${qs}&limit=2000`)
   if (!r.ok) throw new Error(`${r.status}`)
@@ -533,70 +360,26 @@ function PanelError({ onRetry, label }: { onRetry: () => void; label: string }) 
   )
 }
 
-/* 跑批状态行 */
-function CrawlJobsList({ jobs, onRefresh }: { jobs: CrawlJob[]; onRefresh: () => void }) {
-  if (jobs.length === 0) return null
-  return (
-    <div className="rounded-xl border border-border/70 bg-card p-4">
-      <div className="mb-3 flex items-center justify-between">
-        <h3 className="text-xs font-medium text-muted-foreground">
-          跑批状态
-        </h3>
-        <Button variant="ghost" size="sm" onClick={onRefresh}>
-          <RefreshCw className="size-3.5" /> 刷新
-        </Button>
-      </div>
-      <ul className="space-y-1.5">
-        {jobs.map((j) => (
-          <li key={j.job_id} className="rounded-md bg-muted/40 px-3 py-2 text-xs">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="font-mono font-semibold">{j.channel}</span>
-              <StatusPill status={j.status} exitCode={j.exit_code} />
-              <span className="text-muted-foreground tabular-nums">PID {j.pid}</span>
-              <span className="ml-auto text-muted-foreground tabular-nums">
-                {new Date(j.started_at * 1000).toLocaleTimeString('zh-CN')}
-              </span>
-            </div>
-            {j.log && (
-              <details className="mt-1">
-                <summary className="cursor-pointer text-muted-foreground hover:text-foreground">日志末尾</summary>
-                <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap break-all rounded bg-background/60 p-2 font-mono text-[11px] text-muted-foreground">
-                  {j.log}
-                </pre>
-              </details>
-            )}
-          </li>
-        ))}
-      </ul>
-    </div>
-  )
-}
-
-/* HIGH-1 修复：跑批状态精简为 sticky 短条（仅显示有任务时），不再占据大块屏幕。
- * 完整列表搬到跑批 Tab 内（#crawl）。点击短条跳转过去。
- * v2：只在有 RUNNING 任务时才显示——已完成/失败的任务落库后用户不再需要关注，避免噪声。*/
-function CrawlStatusBar({ jobs, onJump }: { jobs: CrawlJob[]; onJump: () => void }) {
+/* 智能爬取运行指示：仅在有 RUNNING 任务时显示的非交互短条（黑盒——不暴露跳转/日志入口）。 */
+function CrawlStatusBar({ jobs }: { jobs: CrawlJob[] }) {
   const running = jobs.filter((j) => j.status === 'running')
   if (running.length === 0) return null
   const head = running[0]
   const more = running.length - 1
   return (
-    <button
-      onClick={onJump}
-      title="跳到跑批 Tab 查看实时日志"
-      className="group inline-flex items-center gap-2 rounded-md border border-primary/30 bg-primary/5 px-3 py-1.5 text-xs transition-colors hover:bg-primary/10"
+    <div
+      role="status"
+      className="inline-flex items-center gap-2 rounded-md border border-primary/30 bg-primary/5 px-3 py-1.5 text-xs"
     >
       <Loader2 className="size-3 animate-spin text-primary" />
-      <span className="font-medium">爬批运行中</span>
-      <span className="font-mono font-semibold text-foreground/80">{head.channel}</span>
-      <span className="text-[10px] tabular-nums text-muted-foreground">PID {head.pid}</span>
+      <span className="font-medium">智能爬取进行中</span>
+      <span className="font-semibold text-foreground/80">{channelName(head.channel)}</span>
       {more > 0 && (
         <span className="rounded-full bg-rose-500 px-1.5 text-[10px] font-semibold text-white">
           +{more}
         </span>
       )}
-      <span className="ml-1 text-muted-foreground group-hover:text-foreground">查看 →</span>
-    </button>
+    </div>
   )
 }
 
@@ -652,10 +435,10 @@ function StatsCards({
                 )}>
                   <Icon className="size-3.5" aria-hidden />
                 </span>
-                <p className="text-xs font-medium text-muted-foreground">{s.channel}</p>
+                <p className="text-xs font-medium text-muted-foreground">{channelName(s.channel)}</p>
               </div>
               <span
-                title={`${s.channel} 渠道高优（推荐跟进）线索数 ${s.p0}`}
+                title={`${channelName(s.channel)} 渠道高优（推荐跟进）线索数 ${s.p0}`}
                 className={cn(
                   'inline-flex h-5 items-center rounded-md px-1.5 text-[10px] font-semibold tabular-nums tracking-wide',
                   isPrimary ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground'
@@ -694,9 +477,9 @@ function StatsCards({
  * Tab 1：线索表
  * ============================================================ */
 function LeadsTable({
-  leads, loading, error, onRetry, channel, marketGroup, p0Only,
+  leads, loading, error, onRetry, channel, marketGroup,
   channelFilter, setChannelFilter, marketGroupFilter, setMarketGroupFilter,
-  setP0Only, search, setSearch, stats,
+  search, setSearch, stats,
 }: {
   leads: Lead[] | null
   loading: boolean
@@ -704,12 +487,10 @@ function LeadsTable({
   onRetry: () => void
   channel: string
   marketGroup: string
-  p0Only: boolean
   channelFilter: string
   setChannelFilter: (v: string) => void
   marketGroupFilter: string
   setMarketGroupFilter: (v: string) => void
-  setP0Only: (v: boolean) => void
   search: string
   setSearch: (v: string) => void
   stats: Stat[] | null
@@ -727,7 +508,7 @@ function LeadsTable({
     )
   }, [leads, search])
 
-  useEffect(() => setPage(1), [channel, marketGroup, p0Only, search])
+  useEffect(() => setPage(1), [channel, marketGroup, search])
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
   const pageLeads = useMemo(
@@ -746,7 +527,7 @@ function LeadsTable({
   }
 
   const filterCount = (channel !== 'all' ? 1 : 0) + (marketGroup !== 'all' ? 1 : 0) +
-                      (p0Only ? 1 : 0) + (search ? 1 : 0)
+                      (search ? 1 : 0)
 
   return (
     <section aria-labelledby="leads-heading" className="space-y-3">
@@ -761,28 +542,46 @@ function LeadsTable({
         </h2>
         <div className="flex flex-wrap items-center gap-2">
           <div className="relative">
-            <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+            <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground/70" />
             <Input
               type="search"
-              placeholder="搜索实体 / 电话 / 开发者"
+              placeholder="搜索实体 / 电话"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="w-56 pl-8"
+              className="w-64 rounded-lg bg-muted/40 pl-9 shadow-none transition-colors focus-visible:bg-background"
             />
+            {search && (
+              <button
+                type="button"
+                onClick={() => setSearch('')}
+                aria-label="清空搜索"
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded-sm p-0.5 text-muted-foreground/70 transition-colors hover:text-foreground"
+              >
+                <X className="size-3.5" />
+              </button>
+            )}
           </div>
           <Select value={channelFilter} onValueChange={setChannelFilter}>
-            <SelectTrigger className="w-32" aria-label="按渠道筛选">
+            <SelectTrigger
+              className="w-36 rounded-lg bg-background shadow-none transition-colors hover:border-ring/50 data-[size=default]:h-9 dark:bg-input/30 dark:hover:border-ring/50"
+              aria-label="按渠道筛选"
+            >
+              <Globe className="size-3.5 text-muted-foreground" />
               <SelectValue placeholder="渠道" />
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">全部渠道</SelectItem>
               {(stats ?? []).map((s) => (
-                <SelectItem key={s.channel} value={s.channel}>{s.channel}</SelectItem>
+                <SelectItem key={s.channel} value={s.channel}>{channelName(s.channel)}</SelectItem>
               ))}
             </SelectContent>
           </Select>
           <Select value={marketGroupFilter} onValueChange={setMarketGroupFilter}>
-            <SelectTrigger className="w-28" aria-label="按市场筛选">
+            <SelectTrigger
+              className="w-32 rounded-lg bg-background shadow-none transition-colors hover:border-ring/50 data-[size=default]:h-9 dark:bg-input/30 dark:hover:border-ring/50"
+              aria-label="按市场筛选"
+            >
+              <MapPin className="size-3.5 text-muted-foreground" />
               <SelectValue placeholder="市场" />
             </SelectTrigger>
             <SelectContent>
@@ -792,10 +591,6 @@ function LeadsTable({
               ))}
             </SelectContent>
           </Select>
-          <label className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1 text-sm hover:bg-muted">
-            <Switch checked={p0Only} onCheckedChange={setP0Only} aria-label="仅看高优" />
-            <span className="whitespace-nowrap" title="仅显示推荐跟进的高优线索">仅高优</span>
-          </label>
           {(filterCount > 0) && (
             <Button
               variant="ghost"
@@ -803,7 +598,6 @@ function LeadsTable({
               onClick={() => {
                 setChannelFilter('all')
                 setMarketGroupFilter('all')
-                setP0Only(false)
                 setSearch('')
               }}
             >
@@ -823,7 +617,6 @@ function LeadsTable({
         <EmptyLeads hasFilter={filterCount > 0} onClear={() => {
           setChannelFilter('all')
           setMarketGroupFilter('all')
-          setP0Only(false)
           setSearch('')
         }} />
       ) : (
@@ -834,9 +627,8 @@ function LeadsTable({
               <TableHeader>
                 <TableRow className="hover:bg-transparent border-b border-border/60 bg-muted/30">
                   <TableHead className="text-left font-medium">企业</TableHead>
-                  <TableHead className="hidden md:table-cell text-left font-medium">渠道</TableHead>
-                  <TableHead className="hidden md:table-cell text-left font-medium">市场</TableHead>
-                  <TableHead className="text-right font-medium whitespace-nowrap">分数 · 高优</TableHead>
+                  <TableHead className="hidden md:table-cell text-left font-medium">渠道 / 市场</TableHead>
+                  <TableHead className="text-right font-medium">分数</TableHead>
                   <TableHead className="text-left font-medium">电话</TableHead>
                 </TableRow>
               </TableHeader>
@@ -860,7 +652,6 @@ function LeadsTable({
                               {l.entity}
                               <ExternalLink className="size-3 shrink-0 text-muted-foreground/0 transition-colors group-hover:text-primary" />
                             </a>
-                            {l.p0 ? <P0Badge active /> : null}
                           </div>
                           {l.developer_name && (
                             <span className="text-[11px] text-muted-foreground">
@@ -874,25 +665,30 @@ function LeadsTable({
                           )}
                         </div>
                       </TableCell>
+                      {/* 渠道/市场合并列：均为次级元数据，合并后给企业和电话让出宽度 */}
                       <TableCell className="hidden py-3 md:table-cell align-top">
-                        <span className={cn('inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs', Style.chip)}>
-                          {l.channel}
-                        </span>
-                      </TableCell>
-                      <TableCell className="hidden py-3 align-top text-xs text-muted-foreground md:table-cell">
-                        {l.market ? (
-                          <span className="flex flex-col gap-0.5">
-                            <span className="text-foreground/80">{marketName(l.market)}</span>
-                            {l.market_group && (
-                              <span className="text-[10px] text-muted-foreground/60">{l.market_group}</span>
-                            )}
+                        <div className="flex flex-col items-start gap-1">
+                          <span className={cn('inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs', Style.chip)}>
+                            {channelName(l.channel)}
                           </span>
-                        ) : (
-                          <span className="text-muted-foreground/40">—</span>
-                        )}
+                          {l.market ? (
+                            <span className="text-xs text-foreground/80">
+                              {marketName(l.market)}
+                              {l.market_group && (
+                                <span className="ml-1 text-[10px] text-muted-foreground/60">{l.market_group}</span>
+                              )}
+                            </span>
+                          ) : (
+                            <span className="text-xs text-muted-foreground/40">—</span>
+                          )}
+                        </div>
                       </TableCell>
+                      {/* 优先级列：分数 + 高优同列聚合，扫一眼右边即知该不该先跟 */}
                       <TableCell className="py-3 text-right align-top">
-                        <ScorePill score={l.score} />
+                        <div className="flex flex-col items-end gap-1">
+                          <ScorePill score={l.score} />
+                          {l.p0 ? <P0Badge active /> : null}
+                        </div>
                       </TableCell>
                       <TableCell className="py-3 align-top">
                         <div className="flex flex-col gap-1">
@@ -915,18 +711,28 @@ function LeadsTable({
                               </Badge>
                             )}
                           </button>
-                          {/* 点击直达 WhatsApp：销售外联主入口，电话一键唤起 */}
-                          <a
-                            href={waUrl(phones[0])}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            title={`唤起 WhatsApp 与 ${l.entity} 对话`}
-                            aria-label={`唤起 WhatsApp 与 ${l.entity}`}
-                            className="inline-flex w-fit items-center gap-1 rounded px-1 py-0 text-[11px] text-emerald-700 transition-colors hover:bg-emerald-500/10 dark:text-emerald-400"
-                          >
-                            <MessageCircle className="size-3" />
-                            <span>WA</span>
-                          </a>
+                          {/* 外联双入口横向并列：WhatsApp + 电话直达，统一绿色系配色 */}
+                          <div className="flex items-center gap-0.5">
+                            <a
+                              href={waUrl(phones[0])}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              title={`唤起 WhatsApp 与 ${l.entity} 对话`}
+                              aria-label={`唤起 WhatsApp 与 ${l.entity}`}
+                              className="inline-flex items-center rounded-md p-1 text-[#25D366] transition-colors hover:bg-[#25D366]/10 hover:text-[#1EBE5B]"
+                            >
+                              <WhatsAppIcon className="size-3.5" />
+                            </a>
+                            {/* 号码与 WA 同一 E.164，tel: 直接拨打 */}
+                            <a
+                              href={`tel:${phones[0]}`}
+                              title={`拨打 ${l.entity} 的电话`}
+                              aria-label={`拨打 ${l.entity} 的电话`}
+                              className="inline-flex items-center rounded-md p-1 text-[#25D366] transition-colors hover:bg-[#25D366]/10 hover:text-[#1EBE5B]"
+                            >
+                              <Phone className="size-3.5" />
+                            </a>
+                          </div>
                         </div>
                       </TableCell>
                     </TableRow>
@@ -1002,7 +808,7 @@ function EmptyLeads({ hasFilter, onClear }: { hasFilter: boolean; onClear: () =>
       ) : (
         <>
           <p>暂无线索</p>
-          <p className="text-xs">先跑 seed + crawl（README 步骤 4），完成后点首页"刷新"</p>
+          <p className="text-xs">点右上角「智能爬取」，完成后这里就有数据了</p>
         </>
       )}
     </div>
@@ -1010,670 +816,18 @@ function EmptyLeads({ hasFilter, onClear }: { hasFilter: boolean; onClear: () =>
 }
 
 /* ============================================================
- * Tab 2：跑一次采集 —— 任务控制台（重构 2026-09-29）
- *
- * 设计判断：
- * 1. 「挖新人群」是前置的异步任务，与「跑这次采集」生命周期不同 → 拆成独立弹窗
- * 2. ①种子 → ②模式 → ③渠道 是真实的决策顺序 → 编号即结构
- * 3. 发射后弹窗切进度态，不玩"提交即失联"
- * 4. 术语去工程化：JOBDIR/dupefilter 不出现在操作者面前
- * ============================================================ */
-
-/* 管道状态条（签名元素）：种子池 → 本次采集 → 线索库，实时数字连通成一条管道 */
-function PipelineStrip({ pools, details, planned, leads, running, runNote }: {
-  pools: Record<string, number>
-  details?: Record<string, Record<string, number>>   // 可选——CrawlDialog 内嵌场景不传
-  planned: number
-  leads: number
-  running: boolean
-  runNote: string
-}) {
-  const poolTotal = Object.values(pools).reduce((a, b) => a + b, 0)
-  const nodes = [
-    { key: 'seeds', label: '种子池', value: poolTotal, sub: '待爬站点（hover 看明细）',
-      icon: Database },
-    { key: 'run', label: '本次采集', value: planned, sub: running ? '采集中…' : runNote,
-      icon: Play, active: true },
-    { key: 'leads', label: '线索库', value: leads, sub: '已入库带号线索', icon: Check },
-  ]
-  return (
-    <div className="grid grid-cols-[1fr_auto_1fr_auto_1fr] items-stretch gap-1" role="img"
-         aria-label={`种子池 ${poolTotal}，本次 ${planned} 站，线索库 ${leads}`}>
-      {nodes.map((n, i) => {
-        const Icon = n.icon
-        // details 仅在外部传入时拼接明细 tooltip（CrawlDialog 内嵌场景不传——fallback pools）
-        const tip = n.key === 'seeds' && details
-          ? Object.entries(details)
-              .flatMap(([ch, files]) =>
-                Object.entries(files).map(([fname, n]) => `${ch}/${fname.replace('.txt','')} ${n}`))
-              .join(' · ')
-          : n.key === 'seeds'
-            ? Object.entries(pools).filter(([, v]) => v > 0)
-                .map(([ch, v]) => `${ch} ${v.toLocaleString()}`).join(' · ') || '空'
-            : ''
-        return (
-          <Fragment key={n.key}>
-            {i > 0 && (
-              <div className="flex w-5 items-center justify-center"
-                   aria-hidden="true">
-                <span className={cn('h-px w-full bg-muted-foreground/40',
-                                    running && n.key === 'leads'
-                                      && 'animate-pulse motion-reduce:animate-none')} />
-              </div>
-            )}
-            <div className={cn(
-                   'rounded-lg border px-2.5 py-2 text-center',
-                   n.active ? 'border-primary/50 bg-primary/5' : 'border-border/60 bg-muted/30'
-                 )}
-                 title={tip}>
-              <div className="flex items-center justify-center gap-1 text-[10px] text-muted-foreground">
-                <Icon className="size-3" aria-hidden="true" />
-                {n.label}
-              </div>
-              <div className={cn('mt-0.5 text-lg font-semibold tabular-nums leading-none',
-                                 n.active && 'text-primary',
-                                 running && n.key === 'run' && 'animate-pulse motion-reduce:animate-none')}>
-                {n.value.toLocaleString()}
-              </div>
-               <div className="mt-0.5 text-[9px] leading-none text-muted-foreground/70">{n.sub}</div>
-             </div>
-           </Fragment>
-         )
-       })}
-     </div>
-   )
-}
-
-/* ============================================================================
- * 2026-09-30 销售 UX 重构：「今天」Tab + 「我的进度」Tab
- * 设计原则：每张卡片一个行动（WhatsApp 一键）；状态颜色块让管道可视化；
- * 多语言开场白按市场自动选；进度条让 quota 完成感直观。
- * ========================================================================== */
-
-/* 跟进状态色块（销售每天扫一眼就懂） */
-function ContactStatusBadge({ status }: { status: string }) {
-  const map: Record<string, { label: string; cls: string }> = {
-    new:             { label: '未联系', cls: 'bg-sky-500/15 text-sky-700 dark:text-sky-300 ring-sky-500/30' },
-    contacted:      { label: '已联系', cls: 'bg-amber-500/15 text-amber-700 dark:text-amber-300 ring-amber-500/30' },
-    in_conversation: { label: '沟通中', cls: 'bg-violet-500/15 text-violet-700 dark:text-violet-300 ring-violet-500/30' },
-    won:            { label: '成交', cls: 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 ring-emerald-500/30' },
-    lost:           { label: '流失', cls: 'bg-rose-500/15 text-rose-700 dark:text-rose-300 ring-rose-500/30' },
-  }
-  const info = map[status] || map.new
-  return (
-    <span className={cn('inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold tracking-wider ring-1',
-                         info.cls)}>
-      {info.label}
-    </span>
-  )
-}
-
-/* 今日队列 Hero：今天要联系谁？进度几何？ */
-function TodayHero({ onContacted }: { onContacted: number }) {
-  const { progress } = useProgress(onContacted)
-  const weekContacts = progress?.week_contacts ?? 0
-  const newToday = progress?.new_today ?? 0
-  const byStatus = progress?.by_status ?? {}
-  // quota 假设每周联系 50 个（销售管理层定，这里给个合理默认）
-  const WEEKLY_QUOTA = 50
-  const weekPct = Math.min(100, Math.round(weekContacts / WEEKLY_QUOTA * 100))
-
-  return (
-    <section className="rounded-xl border border-primary/30 bg-gradient-to-br from-primary/8 via-card to-card p-6">
-      <div className="flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <p className="text-[11px] font-semibold uppercase tracking-wider text-primary">今日联系</p>
-          <h1 className="mt-1 text-3xl font-bold tabular-nums">
-            {newToday}
-            <span className="ml-2 text-base font-medium text-muted-foreground">条新线索待联系</span>
-          </h1>
-          <p className="mt-2 text-xs text-muted-foreground">
-            {byStatus.contacted ? `${byStatus.contacted} 已联系 · ` : ''}
-            {byStatus.in_conversation ? `${byStatus.in_conversation} 沟通中 · ` : ''}
-            {byStatus.won ? `${byStatus.won} 成交 · ` : ''}
-            {byStatus.lost ? `${byStatus.lost} 流失` : ''}
-          </p>
-        </div>
-        <div className="min-w-[240px] flex-1">
-          <div className="flex items-baseline justify-between text-xs">
-            <span className="font-medium">本周进度</span>
-            <span className="tabular-nums text-muted-foreground">
-              {weekContacts}/{WEEKLY_QUOTA} ({weekPct}%)
-            </span>
-          </div>
-          <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-muted">
-            <div
-              className={cn('h-full transition-all',
-                          weekPct >= 100 ? 'bg-emerald-500' :
-                          weekPct >= 50  ? 'bg-primary' : 'bg-amber-500')}
-              style={{ width: `${weekPct}%` }}
-            />
-          </div>
-        </div>
-      </div>
-    </section>
-  )
-}
-
-/* 今日队列卡片：电话 + 一键 WhatsApp + 状态切换 + 消息草稿 */
-function TodayQueue({ onContacted }: { onContacted: number }) {
-  const { todayLeads, refreshToday } = useTodayQueue(onContacted)
-  const [busy, setBusy] = useState<string | null>(null)
-
-  const markContacted = async (entity: string) => {
-    setBusy(entity)
-    try {
-      await patchLeadStatus(entity, 'contacted')
-      refreshToday()
-      // 通知 parent refresh——用 prop 回调（避免全局 state）
-    } finally { setBusy(null) }
-  }
-
-  if (todayLeads.length === 0) {
-    return (
-      <section className="rounded-xl border border-border/70 bg-card p-12 text-center">
-        <p className="text-base font-medium text-muted-foreground">🎉 今日队列已清空</p>
-        <p className="mt-2 text-xs text-muted-foreground">
-          联系管理员补充种子，或等明日自动增量爬取
-        </p>
-      </section>
-    )
-  }
-
-  return (
-    <section className="space-y-3">
-      {todayLeads.map((lead) => {
-        const waLink = lead.outreach?.whatsapp_deep_link
-        const firstPhone = (lead.phones || '').split(',')[0] || '—'
-        const status = lead.contact_status || 'new'
-        return (
-          <article key={lead.entity_key}
-                   className="rounded-xl border border-border/70 bg-card p-4 transition-colors hover:border-primary/40">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  <h3 className="text-base font-semibold">{lead.entity_key}</h3>
-                  {lead.p0 ? (
-                    <span className="inline-flex items-center rounded-md bg-rose-500 px-1.5 py-0.5 text-[10px] font-bold tracking-wider text-white">P0 优先</span>
-                  ) : null}
-                  <ContactStatusBadge status={status} />
-                  <span className="text-[10px] text-muted-foreground">
-                    {lead.market} · {lead.market_group} · score {lead.score}
-                  </span>
-                </div>
-                <p className="mt-1.5 font-mono text-sm text-muted-foreground">
-                  {firstPhone}
-                </p>
-                {lead.outreach?.message && (
-                  <details className="mt-2 group">
-                    <summary className="cursor-pointer text-[11px] font-medium text-primary">
-                      消息草稿（{lead.outreach.language}）↘
-                    </summary>
-                    <p className="mt-1.5 rounded-md bg-muted/50 p-2 text-xs leading-relaxed text-foreground/80">
-                      {lead.outreach.message}
-                    </p>
-                  </details>
-                )}
-              </div>
-              <div className="flex shrink-0 flex-col items-end gap-2">
-                {waLink && (
-                  <a href={waLink} target="_blank" rel="noopener noreferrer"
-                     className="inline-flex items-center gap-1.5 rounded-md bg-emerald-500 px-3 py-1.5 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-emerald-600">
-                    <MessageCircle className="size-4" /> 打开 WhatsApp
-                  </a>
-                )}
-                <Button size="sm" variant="outline" disabled={busy === lead.entity_key || status !== 'new'}
-                        onClick={() => markContacted(lead.entity_key)}>
-                  <Check className="size-3.5" /> 标已联系
-                </Button>
-              </div>
-            </div>
-          </article>
-        )
-      })}
-    </section>
-  )
-}
-
-/* 我的进度 Tab：状态分布 + 跟进时间线 */
-function ProgressHero() {
-  return <TodayHero onContacted={0} />
-}
-
-function ProgressDetail() {
-  const { progress } = useProgress(0)
-  if (!progress) {
-    return <section className="rounded-xl border border-border/70 bg-card p-8 text-center text-muted-foreground">加载中…</section>
-  }
-  const { by_status, total } = progress
-  const pct = (n: number) => total > 0 ? Math.round(n / total * 100) : 0
-  const stages = [
-    { key: 'new', label: '未联系', color: 'bg-sky-500' },
-    { key: 'contacted', label: '已联系', color: 'bg-amber-500' },
-    { key: 'in_conversation', label: '沟通中', color: 'bg-violet-500' },
-    { key: 'won', label: '成交', color: 'bg-emerald-500' },
-    { key: 'lost', label: '流失', color: 'bg-rose-500' },
-  ]
-  return (
-    <section className="space-y-4">
-      <div className="rounded-xl border border-border/70 bg-card p-5">
-        <h2 className="text-sm font-medium">跟进管道</h2>
-        <div className="mt-3 flex h-3 overflow-hidden rounded-full bg-muted">
-          {stages.map(s => {
-            const n = by_status[s.key] ?? 0
-            const p = pct(n)
-            return p > 0 ? (
-              <div key={s.key} className={cn(s.color, 'h-full')}
-                   style={{ width: `${p}%` }} title={`${s.label}: ${n}`} />
-            ) : null
-          })}
-        </div>
-        <div className="mt-3 grid grid-cols-5 gap-2 text-center text-[11px]">
-          {stages.map(s => (
-            <div key={s.key}>
-              <div className="text-base font-semibold tabular-nums">{by_status[s.key] ?? 0}</div>
-              <div className="mt-0.5 flex items-center justify-center gap-1 text-muted-foreground">
-                <span className={cn('inline-block size-1.5 rounded-full', s.color)} />
-                {s.label}
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </section>
-  )
-}
-
-/* 挖新人群（2026-09-30 简化）：业务场景卡片选择 → 后端展开渠道子任务。*/
-function SeedDialog({ open, onOpenChange }: {
-  open: boolean
-  onOpenChange: (v: boolean) => void
-}) {
-  const [scenes, setScenes] = useState<SeedScene[]>([])
-  const [picked, setPicked] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
-  const [msg, setMsg] = useState<{ kind: 'info' | 'error'; text: string } | null>(null)
-
-  useEffect(() => {
-    if (!open) return
-    setMsg(null)
-    setPicked(null)
-    fetchScenes().then(setScenes).catch((e) =>
-      setMsg({ kind: 'error', text: `加载场景失败：${(e as Error).message}` }),
-    )
-  }, [open])
-
-  const submit = async () => {
-    if (!picked) return
-    setBusy(true); setMsg(null)
-    try {
-      const r = await triggerSeedScene(picked)
-      const scene = scenes.find((s) => s.id === picked)
-      const channels = r.jobs.map((j) => j.channel).join(' + ')
-      setMsg({
-        kind: 'info',
-        text: `已提交「${scene?.label}」→ 后台跑 ${channels}（${r.jobs.length} 个子任务，约 1–3 分钟）。完成后到「跑批」页确认退出码，再点「开始采集·只爬新增」。`,
-      })
-    } catch (e) {
-      setMsg({ kind: 'error', text: (e as Error).message })
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>挖新人群</DialogTitle>
-          <DialogDescription>
-            选一个目标市场，后台自动生成种子并追加到种子池（已有不重复）。
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-          {scenes.map((s) => (
-            <label key={s.id}
-                   className={cn('flex cursor-pointer gap-2.5 rounded-lg border p-3 transition-colors',
-                                 picked === s.id
-                                   ? 'border-primary/60 bg-primary/8 ring-1 ring-primary/30'
-                                   : 'border-border/60 hover:border-muted-foreground/40')}>
-              <input type="radio" name="seed-scene" checked={picked === s.id}
-                     onChange={() => setPicked(s.id)}
-                     className="mt-0.5 size-4 accent-primary"
-                     aria-label={s.label} />
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-medium">{s.label}</span>
-                  <span className="text-[10px] text-muted-foreground">
-                    {s.channels.map((c) => c === 'play' ? 'Play' : '地图').join(' + ')}
-                  </span>
-                </div>
-                <p className="mt-0.5 text-[11px] leading-snug text-muted-foreground">{s.pitch}</p>
-              </div>
-            </label>
-          ))}
-        </div>
-
-        {msg && (
-          <p className={cn('rounded-md px-2.5 py-2 text-xs leading-relaxed',
-                           msg.kind === 'info' ? 'bg-primary/10 text-primary'
-                                                : 'bg-destructive/10 text-destructive')}>
-            {msg.text}
-          </p>
-        )}
-
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}
-                  aria-label="关闭挖新人群">关闭</Button>
-          <Button onClick={submit} disabled={!picked || busy}
-                  aria-label="开始生成种子">
-            {busy ? (<><Loader2 className="size-4 animate-spin" /> 生成中…</>)
-                  : (<><Plus className="size-4" /> 开始生成</>)}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-/* 跑一次采集：任务控制台 */
-function CrawlDialog({
-  open, onOpenChange, defaultChannels, jobs, pools, leadsTotal,
-}: {
-  open: boolean
-  onOpenChange: (v: boolean) => void
-  defaultChannels: CrawlChannel[]
-  jobs: CrawlJob[]
-  pools: Record<string, number>
-  leadsTotal: number
-}) {
-  const [mode, setMode] = useState<'incremental' | 'full'>('incremental')
-  const [selected, setSelected] = useState<Set<CrawlChannel>>(new Set(defaultChannels))
-  /* 数字输入用字符串状态：清空即 0 的受控 number 框会让每次输入都以"0"开头 */
-  const [maxPages, setMaxPages] = useState('3')
-  const [fullLimit, setFullLimit] = useState('500')
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [phase, setPhase] = useState<'configure' | 'launched'>('configure')
-  const [launchedChannels, setLaunchedChannels] = useState<Set<CrawlChannel>>(new Set())
-
-  useEffect(() => {
-    if (open) {
-      setSelected(new Set(defaultChannels))
-      setMode('incremental')
-      setMaxPages('3')
-      setError(null)
-      setPhase('configure')
-    }
-  }, [open, defaultChannels])
-
-  const toggle = (ch: CrawlChannel) => {
-    setSelected((s) => {
-      const n = new Set(s)
-      if (n.has(ch)) n.delete(ch)
-      else n.add(ch)
-      return n
-    })
-  }
-
-  /* 运行中感知：同渠道任务在跑时按钮让位，不再让用户撞 409 */
-  const busyChannels = new Set(
-    jobs.filter((j) => j.status === 'running' && !j.job_id.startsWith('seed-'))
-        .map((j) => j.channel as CrawlChannel))
-  const launchable = [...selected].filter((ch) => !busyChannels.has(ch))
-
-  const plannedSeeds = launchable.reduce((a, ch) => a + (pools[ch] ?? 0), 0)
-  const nPages = Math.round(Number(maxPages) || 0)
-
-  const submit = async () => {
-    if (launchable.length === 0) { setError('所选渠道都在跑批中——等它结束，或换一个渠道'); return }
-    if (nPages < 1) { setError('每站页数必须 ≥ 1'); return }
-    setBusy(true); setError(null)
-    try {
-      await triggerCrawl({
-        channels: launchable, mode, max_pages: nPages,
-        limit: mode === 'full' ? Math.max(1, Math.round(Number(fullLimit) || 0)) : plannedSeeds,
-      })
-      setLaunchedChannels(new Set(launchable))
-      setPhase('launched')
-    } catch (e) {
-      setError((e as Error).message)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  /* 进度态：盯本次发射的渠道；任务从 jobs（App 每 2s 轮询）实时来 */
-  const myJobs = jobs.filter((j) => launchedChannels.has(j.channel as CrawlChannel)
-                              && !j.job_id.startsWith('seed-'))
-  const allDone = myJobs.length > 0 && myJobs.every((j) => j.status === 'exited' || j.status === 'failed')
-  const anyRunning = myJobs.some((j) => j.status === 'running')
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
-
-        {phase === 'launched' ? (
-          /* ---------- 进度态：发射后弹窗不玩失踪 ---------- */
-          <div className="space-y-4">
-            <DialogHeader>
-              <DialogTitle>采集中</DialogTitle>
-              <DialogDescription>
-                {allDone
-                  ? (myJobs.every((j) => j.status === 'exited')
-                      ? '全部完成，数据已自动刷新。'
-                      : '部分渠道失败——详情看跑批页日志。')
-                  : '礼貌爬取需要时间，可以留在原地等，也可以放后台。'}
-              </DialogDescription>
-            </DialogHeader>
-            <ul className="space-y-1.5">
-              {myJobs.map((j) => {
-                const cnInfo = CHANNEL_CN[j.channel as CrawlChannel]
-                return (
-                  <li key={j.job_id}
-                      className="flex items-center gap-2.5 rounded-lg border border-border/60 px-3 py-2.5">
-                    {j.status === 'running'
-                      ? <Loader2 className="size-4 shrink-0 animate-spin text-primary" />
-                      : j.status === 'exited'
-                        ? <Check className="size-4 shrink-0 text-primary" />
-                        : <AlertCircle className="size-4 shrink-0 text-rose-500" />}
-                    <span className="text-sm font-medium">{cnInfo?.name ?? j.channel}</span>
-                    <span className="ml-auto text-xs tabular-nums text-muted-foreground">
-                      {j.status === 'running' ? '爬取中…'
-                        : j.status === 'exited' ? '完成'
-                        : `失败（exit ${j.exit_code}）`}
-                    </span>
-                  </li>
-                )
-              })}
-            </ul>
-            <DialogFooter>
-              <DialogClose asChild>
-                <Button variant={allDone ? 'default' : 'outline'}>
-                  {allDone ? '完成' : '放后台运行'}
-                </Button>
-              </DialogClose>
-            </DialogFooter>
-          </div>
-        ) : (
-          /* ---------- 配置态：① 种子 → ② 模式 → ③ 渠道（真实决策顺序） ---------- */
-          <>
-        <DialogHeader>
-          <DialogTitle>跑一次采集</DialogTitle>
-          <DialogDescription>
-            种子池里有站没爬过就进线索库；都在池子里 → 先挖新人群。
-          </DialogDescription>
-        </DialogHeader>
-
-        <PipelineStrip pools={pools} planned={plannedSeeds} leads={leadsTotal}
-                       running={busyChannels.size > 0}
-                       runNote={mode === 'incremental' ? '池中新站（旧站自动跳过）' : '全部重爬'} />
-
-        <section className="space-y-2">
-          <div className="flex items-center justify-between">
-            <h3 className="text-xs font-semibold text-muted-foreground">
-              <span className="mr-1.5 text-primary">①</span>种子池
-            </h3>
-            <span className="text-[10px] tabular-nums text-muted-foreground">
-              {Object.entries(pools).filter(([, n]) => n > 0)
-                .map(([c, n]) => `${CHANNEL_CN[c as CrawlChannel]?.name ?? c} ${n}`).join(' · ') || '空'}
-            </span>
-          </div>
-          <button
-            onClick={() => window.dispatchEvent(new CustomEvent('open-seed-dialog'))}
-            className="flex w-full items-center gap-2 rounded-lg border border-dashed border-border/70 px-3 py-2 text-left text-sm text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground"
-            aria-label="打开挖新人群"
-          >
-            <Plus className="size-4" aria-hidden="true" />
-            挖新人群——换国家×类目，给种子池补货
-            <span className="ml-auto text-[10px]">1–3 分钟 · 后台</span>
-          </button>
-        </section>
-
-        <section className="space-y-2">
-          <h3 className="text-xs font-semibold text-muted-foreground">
-            <span className="mr-1.5 text-primary">②</span>模式
-          </h3>
-          <div className="grid grid-cols-2 gap-2 rounded-lg bg-muted/50 p-1" role="radiogroup" aria-label="采集模式">
-            {([
-              ['incremental', '只爬新增', '跳过爬过的站，只吃新种子。快，日常用这个。'],
-              ['full', '全部重爬', '从头爬一遍，用于校准和对比变化。慢。'],
-            ] as const).map(([value, label, desc]) => (
-              <button
-                key={value}
-                role="radio" aria-checked={mode === value}
-                onClick={() => setMode(value)}
-                className={cn(
-                  'flex items-start gap-2 rounded-md px-3 py-2 text-left transition-colors',
-                  mode === value ? 'bg-background shadow-sm' : 'hover:bg-background/50'
-                )}
-              >
-                <span className={cn('mt-1 size-2 shrink-0 rounded-full border',
-                                    mode === value
-                                      ? 'border-primary bg-primary'
-                                      : 'border-muted-foreground/50')}
-                      aria-hidden="true" />
-                <span>
-                  <span className={cn('block text-sm font-medium',
-                                      mode === value && 'text-primary')}>{label}</span>
-                  <span className="mt-0.5 block text-[11px] leading-snug text-muted-foreground">{desc}</span>
-                </span>
-              </button>
-            ))}
-          </div>
-          {mode === 'full' && (
-            <div className="flex items-center gap-2 pl-1">
-              <Label htmlFor="full-limit" className="text-[11px] text-muted-foreground">
-                每渠道重爬上限
-              </Label>
-              <Input id="full-limit" type="number" min={1} max={2000} value={fullLimit}
-                     onChange={(e) => setFullLimit(e.target.value)}
-                     className="h-7 w-24 text-xs" />
-              <span className="text-[10px] text-muted-foreground">留空按整池</span>
-            </div>
-          )}
-        </section>
-
-        <section className="space-y-2">
-          <h3 className="text-xs font-semibold text-muted-foreground">
-            <span className="mr-1.5 text-primary">③</span>渠道
-          </h3>
-          <div className="grid grid-cols-2 gap-1.5" role="group" aria-label="采集渠道多选">
-            {CRAWL_CHANNELS.map((ch) => {
-              const checked = selected.has(ch)
-              const running = busyChannels.has(ch)
-              const Icon = channelStyle(ch).icon
-              const cnInfo = CHANNEL_CN[ch]
-              return (
-                <button
-                  key={ch}
-                  role="checkbox" aria-checked={checked}
-                  onClick={() => toggle(ch)}
-                  className={cn(
-                    'flex items-center gap-2 rounded-lg border px-2.5 py-2 text-left transition-colors',
-                    checked ? 'border-primary/50 bg-primary/5' : 'border-border/60 hover:border-muted-foreground/40',
-                    running && 'opacity-60'
-                  )}
-                >
-                  <span className={cn('flex size-4 shrink-0 items-center justify-center rounded border',
-                                      checked ? 'border-primary bg-primary text-primary-foreground'
-                                              : 'border-muted-foreground/40')}
-                        aria-hidden="true">
-                    {checked && <Check className="size-3" />}
-                  </span>
-                  <Icon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-[13px] font-medium leading-tight">
-                      {cnInfo.name}
-                    </span>
-                    <span className="block text-[11px] tabular-nums leading-tight text-muted-foreground">
-                      {running ? '跑批中…' : `池 ${pools[ch] ?? 0} · 命中 ${CHANNEL_HIT_RATE_HINT[ch]}`}
-                    </span>
-                  </span>
-                </button>
-              )
-            })}
-          </div>
-        </section>
-
-        <section className="space-y-1.5">
-          <div className="flex items-end gap-3">
-            <div className="space-y-1">
-              <Label htmlFor="crawl-pages">每站页数</Label>
-              <Input id="crawl-pages" type="number" min={1} max={10} value={maxPages}
-                     onChange={(e) => setMaxPages(e.target.value)}
-                     className="h-8 w-20 text-sm" />
-            </div>
-            <p className="flex-1 pb-1.5 text-[11px] leading-snug text-muted-foreground">
-              一个站最多下钻几页（首页 → 联系页）；建议 3–5，礼貌上限 5。
-            </p>
-          </div>
-        </section>
-
-        {error && (
-          <Alert variant="destructive">
-            <AlertCircle className="size-4" />
-            <AlertDescription className="font-mono text-xs">{error}</AlertDescription>
-          </Alert>
-        )}
-
-        <DialogFooter className="items-center gap-3">
-          <p className="flex-1 text-[11px] leading-snug text-muted-foreground" aria-live="polite">
-            {launchable.length === 0
-              ? '所选渠道都在跑批中——等它结束或换渠道'
-              : `${launchable.length} 个渠道 · ${plannedSeeds.toLocaleString()} 站 · 每站 ≤${nPages} 页`}
-          </p>
-          <DialogClose asChild>
-            <Button variant="ghost" disabled={busy}>取消</Button>
-          </DialogClose>
-          <Button onClick={submit} disabled={busy || launchable.length === 0}
-                  aria-label="开始采集">
-            {busy ? (<><Loader2 className="size-4 animate-spin" /> 启动中…</>)
-                   : (<><Play className="size-4" /> 开始采集</>)}
-          </Button>
-        </DialogFooter>
-          </>
-        )}
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-/* ============================================================
  * Tab 3：导出
  * ============================================================ */
 function ExportPanel({
-  stats, channelFilter, marketGroupFilter, p0Only,
-  setChannelFilter, setMarketGroupFilter, setP0Only,
+  stats, leads, channelFilter, marketGroupFilter,
+  setChannelFilter, setMarketGroupFilter,
 }: {
   stats: Stat[] | null
+  leads: Lead[] | null
   channelFilter: string
   marketGroupFilter: string
-  p0Only: boolean
   setChannelFilter: (v: string) => void
   setMarketGroupFilter: (v: string) => void
-  setP0Only: (v: boolean) => void
 }) {
   const [busy, setBusy] = useState(false)
 
@@ -1682,7 +836,6 @@ function ExportPanel({
     try {
       await exportCsv({
         channel: channelFilter,
-        p0: p0Only,
         marketGroup: marketGroupFilter,
       })
     } catch (e) {
@@ -1693,91 +846,133 @@ function ExportPanel({
   }
 
   const summary = stats ?? []
-  const totalDomains = summary.reduce((a, s) => a + s.total, 0)
-  const totalHits = summary.reduce((a, s) => a + s.hits, 0)
-  const totalP0 = summary.reduce((a, s) => a + s.p0, 0)
+  /* 只统计真实会进 CSV 的（leads 即有号码线索），不展示与导出无关的"域"总数 */
+  const p0Count = useMemo(() => (leads ?? []).filter((l) => l.p0).length, [leads])
+  const hasFilter = channelFilter !== 'all' || marketGroupFilter !== 'all'
 
   return (
-    <div className="space-y-6">
-      <div className="rounded-xl border border-border/70 bg-card p-5">
-        <div className="flex items-start gap-4">
-          <div className="rounded-lg bg-primary/10 p-2.5">
-            <Download className="size-5 text-primary" />
-          </div>
-          <div className="flex-1">
-            <h3 className="text-sm font-semibold">线索导出（CSV）</h3>
-            <p className="mt-1 text-xs text-muted-foreground">
-              按当前筛选条件导出 ≤ 2000 条线索，UTF-8 with BOM（Excel 中文兼容）。
-              CSV 列：entity, channel, market, market_group, lang, p0, score,
-              developer_name, widget, phones
+    <div className="overflow-hidden rounded-xl border border-border/70 bg-card">
+      {/* 工具栏：筛选 + 计数 + 导出操作一行完成（data-table toolbar 模式） */}
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/60 bg-muted/30 px-4 py-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <Select value={channelFilter} onValueChange={setChannelFilter}>
+            <SelectTrigger
+              aria-label="按渠道筛选"
+              className="w-36 rounded-lg bg-background shadow-none transition-colors hover:border-ring/50 data-[size=default]:h-9 dark:bg-input/30 dark:hover:border-ring/50"
+            >
+              <Globe className="size-3.5 text-muted-foreground" />
+              <SelectValue placeholder="渠道" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">全部渠道</SelectItem>
+              {summary.map((s) => (
+                <SelectItem key={s.channel} value={s.channel}>{channelName(s.channel)}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Select value={marketGroupFilter} onValueChange={setMarketGroupFilter}>
+            <SelectTrigger
+              aria-label="按市场分组筛选"
+              className="w-36 rounded-lg bg-background shadow-none transition-colors hover:border-ring/50 data-[size=default]:h-9 dark:bg-input/30 dark:hover:border-ring/50"
+            >
+              <MapPin className="size-3.5 text-muted-foreground" />
+              <SelectValue placeholder="市场分组" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">全部市场</SelectItem>
+              {MARKET_GROUPS.map((g) => (
+                <SelectItem key={g} value={g}>{g}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {hasFilter && (
+            <Button variant="ghost" onClick={() => {
+              setChannelFilter('all'); setMarketGroupFilter('all')
+            }}>
+              <X className="size-4" /> 清筛选
+            </Button>
+          )}
+        </div>
+        <div className="flex items-center gap-3">
+          {leads !== null && (
+            <p className="text-xs tabular-nums text-muted-foreground">
+              将导出 <span className="font-semibold text-foreground">{leads.length}{leads.length >= 500 ? '+' : ''}</span> 条 · 高优 {p0Count}
             </p>
-            <div className="mt-4 grid grid-cols-3 gap-2 text-sm">
-              <div className="rounded-lg bg-muted/40 p-3">
-                <p className="text-xs text-muted-foreground">域</p>
-                <p className="mt-1 text-lg font-semibold tabular-nums">{totalDomains.toLocaleString()}</p>
-              </div>
-              <div className="rounded-lg bg-muted/40 p-3">
-                <p className="text-xs text-muted-foreground">带号码线索</p>
-                <p className="mt-1 text-lg font-semibold tabular-nums">{totalHits.toLocaleString()}</p>
-              </div>
-              <div className="rounded-lg bg-muted/40 p-3">
-                <p className="text-xs text-muted-foreground" title="高优 = 中国出海推荐跟进">高优</p>
-                <p className="mt-1 text-lg font-semibold tabular-nums text-primary">{totalP0.toLocaleString()}</p>
-              </div>
-            </div>
-          </div>
+          )}
+          <Button onClick={handleExport} disabled={busy}>
+            {busy ? (<><Loader2 className="size-4 animate-spin" /> 打包中…</>)
+                  : (<><Download className="size-4" /> 导出 CSV</>)}
+          </Button>
         </div>
       </div>
-
-      <div className="rounded-xl border border-border/70 bg-card p-5">
-        <h4 className="text-sm font-medium">筛选条件</h4>
-        <p className="mt-1 text-xs text-muted-foreground">选择范围后导出，仅导出该范围的线索</p>
-        <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-3">
-          <div className="space-y-1.5">
-            <Label>渠道</Label>
-            <Select value={channelFilter} onValueChange={setChannelFilter}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">全部渠道</SelectItem>
-                {summary.map((s) => (
-                  <SelectItem key={s.channel} value={s.channel}>{s.channel}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-1.5">
-            <Label>市场分组</Label>
-            <Select value={marketGroupFilter} onValueChange={setMarketGroupFilter}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">全部市场</SelectItem>
-                {MARKET_GROUPS.map((g) => (
-                  <SelectItem key={g} value={g}>{g}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="flex items-end">
-            <label className="flex w-full cursor-pointer items-center justify-between rounded-md border border-border/60 p-3 text-sm hover:bg-muted/40">
-              <span>仅高优（推荐跟进）</span>
-              <Switch checked={p0Only} onCheckedChange={setP0Only} />
-            </label>
-          </div>
-        </div>
+        {leads === null ? (
+          <Skeleton className="h-40 w-full rounded-none" />
+        ) : leads.length === 0 ? (
+          <p className="px-4 py-8 text-center text-sm text-muted-foreground">
+            当前筛选条件下暂无线索，调整上方筛选或先「智能爬取」获取数据
+          </p>
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow className="border-b border-border/60 bg-muted/30 hover:bg-transparent">
+                <TableHead className="text-left font-medium">企业</TableHead>
+                <TableHead className="text-left font-medium">渠道</TableHead>
+                <TableHead className="text-left font-medium">市场</TableHead>
+                <TableHead className="text-right font-medium">分数</TableHead>
+                <TableHead className="text-left font-medium">电话</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {leads.slice(0, 20).map((l) => {
+                const Style = channelStyle(l.channel)
+                const phones = l.phones.split(',')
+                return (
+                  <TableRow key={l.entity} className="group">
+                    <TableCell className="py-2.5">
+                      <div className="flex items-center gap-1.5">
+                        <a
+                          href={entityUrl(l.entity)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="font-medium transition-colors hover:text-primary hover:underline"
+                        >
+                          {l.entity}
+                        </a>
+                        {l.p0 ? <P0Badge active /> : null}
+                      </div>
+                      {l.developer_name && (
+                        <p className="text-[11px] text-muted-foreground">{l.developer_name}</p>
+                      )}
+                    </TableCell>
+                    <TableCell className="py-2.5">
+                      <span className={cn('inline-flex items-center rounded-md px-1.5 py-0.5 text-xs', Style.chip)}>
+                        {channelName(l.channel)}
+                      </span>
+                    </TableCell>
+                    <TableCell className="py-2.5 text-xs text-muted-foreground">
+                      {l.market ? marketName(l.market) : '—'}
+                    </TableCell>
+                    <TableCell className="py-2.5 text-right">
+                      <ScorePill score={l.score} />
+                    </TableCell>
+                    <TableCell className="py-2.5 font-mono text-xs tabular-nums">
+                      {phones[0]}
+                      {phones.length > 1 && (
+                        <span className="ml-1 text-muted-foreground">+{phones.length - 1}</span>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                )
+              })}
+            </TableBody>
+          </Table>
+        )}
+        {leads !== null && leads.length > 20 && (
+          <p className="border-t border-border/60 bg-muted/20 px-4 py-2 text-center text-xs text-muted-foreground">
+            仅预览前 20 条，导出包含全部 {leads.length}{leads.length >= 500 ? '+' : ''} 条
+          </p>
+        )}
       </div>
-
-      <div className="flex items-center justify-end gap-3">
-        <Button variant="outline" onClick={() => {
-          setChannelFilter('all'); setMarketGroupFilter('all'); setP0Only(false)
-        }}>
-          <X className="size-4" /> 重置
-        </Button>
-        <Button onClick={handleExport} disabled={busy} size="lg">
-          {busy ? (<><Loader2 className="size-4 animate-spin" /> 打包中…</>)
-                 : (<><Download className="size-4" /> 导出 CSV</>)}
-        </Button>
-      </div>
-    </div>
   )
 }
 
@@ -1785,41 +980,16 @@ function ExportPanel({
  * App
  * ============================================================ */
 export default function App() {
-  const [theme, setTheme] = useTheme()
   const {
-    stats, leads, error, loading, updatedAt,
-    channel, setChannel, marketGroup, setMarketGroup, p0Only, setP0Only,
+    stats, leads, error, loading,
+    channel, setChannel, marketGroup, setMarketGroup,
     search, setSearch, refresh,
   } = usePanelData()
-  const { jobs, bump: bumpCrawl } = useCrawlStatus()
-  const { pools, details, refreshPools } = useSeedPools()
-  const [crawlDialogOpen, setCrawlDialogOpen] = useState(false)
-  const [seedDialogOpen, setSeedDialogOpen] = useState(false)
-  /* 2026-09-30 销售 UX：今日队列 + 进度 */
-  const [todayRefreshKey, setTodayRefreshKey] = useState(0)
-  const { todayLeads, refreshToday } = useTodayQueue(todayRefreshKey)
-  const { progress, refreshProgress } = useProgress(todayRefreshKey)
-  const todayCount = todayLeads.length
-
-  /* 控制台「① 挖新人群」入口 → 独立弹窗（事件桥接，保持组件无 prop 钻透） */
-  useEffect(() => {
-    const open = () => setSeedDialogOpen(true)
-    window.addEventListener('open-seed-dialog', open)
-    return () => window.removeEventListener('open-seed-dialog', open)
-  }, [])
-  /* 种子任务结束 → 池子立刻反映追加结果 */
-  useEffect(() => {
-    const seedRunning = jobs.some((j) => j.job_id.startsWith('seed-') && j.status === 'running')
-    if (!seedRunning) refreshPools()
-  }, [jobs, refreshPools])
-  const [tab, setTab] = useState<'data' | 'crawl' | 'export'>(() => {
+  const { jobs, health } = useCrawlStatus()
+  const [tab, setTab] = useState<'data' | 'export'>(() => {
     const h = window.location.hash.replace('#', '')
-    return h === 'crawl' || h === 'export' ? h : 'data'
+    return h === 'export' ? h : 'data'
   })
-
-  /* 本次新增：用户点"触发爬取"时快照当前线索总数；任务结束且总数增长时算 delta */
-  const hitsAtCrawlStart = useRef<number | null>(null)
-  const [lastCrawlDelta, setLastCrawlDelta] = useState<number | null>(null)
 
   /* URL hash 双向：Tab 切换 → 更新 hash（便于分享 + 后退） */
   useEffect(() => {
@@ -1829,7 +999,7 @@ export default function App() {
   useEffect(() => {
     const onHash = () => {
       const h = window.location.hash.replace('#', '')
-      if (h === 'crawl' || h === 'export' || h === 'data') setTab(h)
+      if (h === 'export' || h === 'data') setTab(h)
     }
     window.addEventListener('hashchange', onHash)
     return () => window.removeEventListener('hashchange', onHash)
@@ -1844,16 +1014,30 @@ export default function App() {
     return total ? hits / total : 0
   }, [stats])
 
-  const totalDomains = stats?.reduce((a, s) => a + s.total, 0) ?? 0
-  const totalHits = stats?.reduce((a, s) => a + s.hits, 0) ?? 0
-  const totalP0 = stats?.reduce((a, s) => a + s.p0, 0) ?? 0
+  /* 智能爬取（一键黑盒）：渠道/模式/种子全部后端决策，这里只发起 + 反馈 */
+  const [smartBusy, setSmartBusy] = useState(false)
+  const [smartMsg, setSmartMsg] = useState<{ kind: 'ok' | 'warn' | 'error'; text: string } | null>(null)
+  useEffect(() => {
+    if (!smartMsg || smartMsg.kind === 'error') return
+    const t = setTimeout(() => setSmartMsg(null), 6000)
+    return () => clearTimeout(t)
+  }, [smartMsg])
 
-  const openCrawlDialog = () => {
-    hitsAtCrawlStart.current = totalHits
-    setCrawlDialogOpen(true)
+  const runSmartCrawl = async () => {
+    setSmartBusy(true); setSmartMsg(null)
+    try {
+      const r = await triggerCrawl({ channels: [], mode: 'smart', limit: 1, max_pages: 3 })
+      setSmartMsg(r.total > 0
+        ? { kind: 'ok', text: '智能爬取已启动：自动挑最优渠道采集，同时后台挖新人群。' }
+        : { kind: 'ok', text: '本批进行中——完成后自动补种接续，无需重复点击。' })
+    } catch (e) {
+      setSmartMsg({ kind: 'error', text: (e as Error).message.replace(/^\d+:\s*/, '') })
+    } finally {
+      setSmartBusy(false)
+    }
   }
-  /* 跑批状态：started → running → exited/failed。必须从"有 running"切到"全部完成"才算跑完一次。
-   * 此时主动 refresh() 拉新数据，否则 totalHits 一直停在旧值，本此新增算不出来。 */
+  /* 跑批状态：started → running → exited/failed。必须从"有 running"切到"全部完成"才算跑完一次，
+   * 此时主动 refresh() 拉新数据。 */
   const wasRunning = useRef(false)
   useEffect(() => {
     const hasRunning = jobs.some((j) => j.status === 'running')
@@ -1865,19 +1049,6 @@ export default function App() {
       refresh()
     }
   }, [jobs, refresh])
-  useEffect(() => {
-    if (hitsAtCrawlStart.current === null) return
-    const stillRunning = jobs.some((j) => j.status === 'running')
-    if (stillRunning) return
-    /* 任务结束且数据已刷新 — 算 delta */
-    if (totalHits > hitsAtCrawlStart.current) {
-      setLastCrawlDelta(totalHits - hitsAtCrawlStart.current)
-    } else {
-      /* 增量跑完未发现新数据 — 0 让用户知道任务确实完成了 */
-      setLastCrawlDelta(0)
-    }
-    hitsAtCrawlStart.current = null
-  }, [jobs, totalHits])
 
   // stats 卡点击 → 切换 Tab + 设筛选
   const onChannelClick = useCallback(
@@ -1901,124 +1072,65 @@ export default function App() {
         <div className="mx-auto flex h-14 max-w-7xl items-center justify-between gap-4 px-5 md:px-8 md:h-16">
           <div className="flex min-w-0 items-center gap-3">
             <Logo size={40} className="shrink-0" />
-            <div className="min-w-0">
-              <h1 className="flex items-baseline gap-2 truncate">
-                <span className="text-[15px] font-semibold tracking-tight md:text-base">youzi-LeadHub</span>
-              </h1>
-              <p className="hidden items-center gap-2 truncate text-[11px] text-muted-foreground md:flex md:text-xs">
-                {updatedAt && !error ? (
-                  <>
-                    <span>更新于 {updatedAt}</span>
-                    <span className="text-border">·</span>
-                    <span title="数据库累计域数（不是本次跑批新增）">总域 {totalDomains.toLocaleString()}</span>
-                    <span className="text-border">·</span>
-                    <span title="有 WhatsApp 号码的实体数（爬过的总域可能在另一数字显示）">线索 {totalHits.toLocaleString()}</span>
-                    <span className="text-border">·</span>
-                    <span title="高优 = 推荐跟进：中国出海线索">高优 {totalP0}</span>
-                    {lastCrawlDelta !== null && (
-                      <span
-                        className={cn(
-                          'ml-1 inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-semibold tabular-nums',
-                          lastCrawlDelta > 0
-                            ? 'bg-primary/10 text-primary'
-                            : 'bg-muted text-muted-foreground'
-                        )}
-                        title="上一次爬批相对开始前的增量（0 = 增量模式已完成且未发现新线索）"
-                      >
-                        {lastCrawlDelta > 0 ? `本次新增 +${lastCrawlDelta}` : '本次 +0'}
-                      </span>
-                    )}
-                  </>
-                ) : (
-                  <span>WhatsApp BSP 线索获取 · 只发现不外联（合规红线）</span>
-                )}
-              </p>
-            </div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <Button
-              variant="outline" size="icon"
-              onClick={refresh} disabled={loading}
-              aria-label="刷新数据"
-              className="size-9"
-            >
-              <RefreshCw className={cn('size-3.5', loading && 'animate-spin')} />
-            </Button>
-            <Button
               variant="default" size="sm"
-              onClick={openCrawlDialog}
-              aria-label="触发爬取"
+              onClick={runSmartCrawl}
+              disabled={smartBusy}
+              aria-label="智能爬取"
               className="relative h-9 gap-1.5 px-3.5"
             >
-              <Play className="size-3.5" />
-              <span className="hidden sm:inline">触发爬取</span>
+              {smartBusy || runningCount > 0
+                ? <Loader2 className="size-3.5 animate-spin" />
+                : <Zap className="size-3.5" />}
+              {/* 进行中仍可点：后端幂等合并（200），点了只刷新提示 */}
+              <span className="hidden sm:inline">
+                {runningCount > 0 ? '爬取中…' : '智能爬取'}
+              </span>
               {runningCount > 0 && (
                 <span className="ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-rose-500 px-1 text-[10px] font-semibold tabular-nums text-white">
                   {runningCount}
                 </span>
               )}
             </Button>
-             <CrawlDialog
-              open={crawlDialogOpen}
-              onOpenChange={(v) => { setCrawlDialogOpen(v); if (!v) bumpCrawl() }}
-              defaultChannels={DEFAULT_CRAWL_CHANNELS}
-              jobs={jobs}
-              pools={pools}
-              leadsTotal={totalHits}
-            />
-            <SeedDialog
-              open={seedDialogOpen}
-              onOpenChange={(v) => { setSeedDialogOpen(v); if (!v) refreshPools() }}
-            />
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="outline" size="icon" aria-label="切换主题" className="size-9">
-                  {theme === 'dark' ? <Moon className="size-3.5" /> : <Sun className="size-3.5" />}
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                {([
-                  ['light', '浅色'],
-                  ['dark', '深色'],
-                  ['system', '跟随系统'],
-                ] as [Theme, string][]).map(([value, label]) => (
-                  <DropdownMenuItem key={value} onClick={() => setTheme(value)}>
-                    <Check className={cn('size-4', theme !== value && 'opacity-0')} />
-                    {label}
-                  </DropdownMenuItem>
-                ))}
-              </DropdownMenuContent>
-            </DropdownMenu>
           </div>
         </div>
       </header>
 
-      <main id="main" className="mx-auto max-w-7xl space-y-8 px-5 py-6 md:px-8 md:py-10">
+      <main id="main" className="mx-auto max-w-7xl space-y-8 px-5 pt-4 pb-6 md:px-8 md:pt-5 md:pb-10">
 
-        {/* HIGH-1 修复：跑批状态从"全量列表"瘦身成"短条"，详细列表仅在跑批 Tab 展示。
-           防止进入数据 Tab 第一屏就被 9 条历史记录挡住大半视野。*/}
-        <div className="flex justify-end">
-          <CrawlStatusBar jobs={jobs} onJump={() => setTab('crawl')} />
-        </div>
+        {/* 智能爬取反馈条：一键结果 + 运行指示（黑盒——无配置、无日志入口）；无内容时不渲染，避免顶栏下留白 */}
+        {(smartMsg || runningCount > 0) && (
+          <div className="flex flex-col items-end gap-2">
+            <CrawlStatusBar jobs={jobs} />
+            {smartMsg && (
+              <Alert variant={smartMsg.kind === 'error' ? 'destructive' : 'default'}
+                     className="w-full max-w-md py-2">
+                <AlertCircle className="size-4" />
+                <AlertDescription>{smartMsg.text}</AlertDescription>
+              </Alert>
+            )}
+          </div>
+        )}
+
+        {/* Q7/Q13 分级冒头：某渠道连续 3 次补种失败才亮（一次成功即消）——
+            黑盒≠静默空转，销售需要知道「为什么点了不涨」 */}
+        {Object.keys(health).length > 0 && (
+          <Alert variant="destructive">
+            <AlertCircle className="size-4" />
+            <AlertDescription>
+              {Object.entries(health).map(([ch, n]) => `${ch} 补种连续失败 ${n} 次`).join('；')}
+              ——网络或数据源异常，已自动重试；仍失败请联系管理员。
+            </AlertDescription>
+          </Alert>
+        )}
 
         {/* Tab 导航 */}
         <Tabs value={tab} onValueChange={(v) => setTab(v as typeof tab)}>
           <TabsList>
-            {/* 2026-09-30 销售 UX 重构：Tab 重命名——把"今天"放最前（销售每天打开就看到），
-               把"跑批"隐藏在"种子"内（销售不触发爬取）。 */}
-            <TabsTrigger value="today" className="gap-1.5">
-              <Zap className="size-3.5" /> 今天
-              {todayCount > 0 && (
-                <span className="ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1.5 text-[10px] font-bold tabular-nums text-primary-foreground">
-                  {todayCount}
-                </span>
-              )}
-            </TabsTrigger>
             <TabsTrigger value="data" className="gap-1.5">
               <Globe className="size-3.5" /> 所有线索
-            </TabsTrigger>
-            <TabsTrigger value="progress" className="gap-1.5">
-              <TrendingUp className="size-3.5" /> 我的进度
             </TabsTrigger>
             <TabsTrigger value="export" className="gap-1.5">
               <Download className="size-3.5" /> 导出
@@ -2050,72 +1162,22 @@ export default function App() {
               onRetry={refresh}
               channel={channel}
               marketGroup={marketGroup}
-              p0Only={p0Only}
               channelFilter={channel} setChannelFilter={setChannel}
               marketGroupFilter={marketGroup} setMarketGroupFilter={setMarketGroup}
-               setP0Only={setP0Only}
                search={search} setSearch={setSearch}
                stats={stats}
              />
            </TabsContent>
 
-           {/* ===== Tab 1：「今天」——销售每天打开的第一站 ===== */}
-           <TabsContent value="today" className="space-y-6">
-             <TodayHero onContacted={todayRefreshKey} />
-             <TodayQueue onContacted={todayRefreshKey} />
-           </TabsContent>
-
-           {/* ===== Tab 3：我的进度 ===== */}
-           <TabsContent value="progress" className="space-y-6">
-             <ProgressHero />
-             <ProgressDetail />
-           </TabsContent>
-
-           {/* ===== Tab 2：跑批（保留旧逻辑但不再默认显示） ===== */}
-           <TabsContent value="crawl" className="space-y-8">
-            <section className="rounded-xl border border-border/70 bg-card p-5">
-              <div className="flex items-start gap-4">
-                <div className="rounded-lg bg-primary/10 p-2.5">
-                  <Play className="size-5 text-primary" />
-                </div>
-                <div className="flex-1">
-                  <h3 className="text-sm font-semibold">手动触发爬取</h3>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    从顶栏"触发爬取"按钮或下方入口打开模态框。三步选择：模式 → 渠道 → 数量。
-                  </p>
-                  <Button onClick={() => setCrawlDialogOpen(true)} className="mt-3 h-9 gap-1.5">
-                    <Play className="size-4" /> 打开爬取对话框
-                  </Button>
-                </div>
-              </div>
-            </section>
-
-            <section className="space-y-3">
-              <h3 className="text-sm font-medium text-muted-foreground">
-                跑批历史
-              </h3>
-              {jobs.length === 0 ? (
-                <div className="rounded-xl border border-dashed p-8 text-center text-sm text-muted-foreground">
-                  <Settings2 className="mx-auto size-7 text-muted-foreground/30" />
-                  <p className="mt-2">暂无跑批记录</p>
-                  <p className="mt-1 text-xs">点击上方"打开爬取对话框"启动第一次跑批</p>
-                </div>
-              ) : (
-                <CrawlJobsList jobs={jobs} onRefresh={bumpCrawl} />
-              )}
-            </section>
-          </TabsContent>
-
           {/* ===== Tab 3：导出 ===== */}
           <TabsContent value="export">
             <ExportPanel
               stats={stats}
+              leads={leads}
               channelFilter={channel}
               marketGroupFilter={marketGroup}
-              p0Only={p0Only}
               setChannelFilter={setChannel}
               setMarketGroupFilter={setMarketGroup}
-              setP0Only={setP0Only}
             />
           </TabsContent>
         </Tabs>

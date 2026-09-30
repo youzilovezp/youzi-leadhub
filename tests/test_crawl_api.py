@@ -82,7 +82,7 @@ def test_incremental_limit_is_full_seed_file(monkeypatch, tmp_path):
     monkeypatch.setattr(crawl_api, "_CWD", tmp_path)
     calls = {}
     monkeypatch.setattr(crawl_api, "_spawn",
-                        lambda ch, s, limit, mp, db, mode:
+                        lambda ch, s, limit, mp, db, mode, **kw:
                             calls.update(channel=ch, limit=limit, mode=mode)
                             or _fake_job(ch))
 
@@ -311,20 +311,29 @@ def test_post_crawl_incremental_uses_all_candidate_seeds(monkeypatch, tmp_path):
     monkeypatch.setattr(crawl_api, "_seed_candidates", lambda ch: [seed1, seed2])
     monkeypatch.setattr(crawl_api, "_spawn", mock_spawn)
 
-    # incremental 模式：limit = 392 + 111 = 503；seed_file = 最大的 play.txt
+    # incremental 模式：limit = 392 + 111 = 503；seed 走 L1 排序临时文件（含全部候选 URL）
+    #（2026-09-30 修复 {channel} NameError 后排序路径真正生效——旧断言"选最大文件"
+    #  实为排序崩溃回退的 bug 行为）
     crawl_api.post_crawl(crawl_api.CrawlRequest(channels=["play"], mode="incremental"))
     check("incremental limit = 503（汇总所有候选）",
           captured["limit"] == 503, f"got {captured['limit']}")
-    check("seed_file 选最大 play.txt", captured["seed_file"].endswith("seeds-play.txt"),
-          f"got {captured['seed_file']}")
+    seed_file = Path(captured["seed_file"])
+    urls = seed_file.read_text().split()
+    check("incremental seed 走排序文件（固定名不堆积）",
+          seed_file.name == ".seed-ranked-play.txt", f"got {seed_file.name}")
+    check("排序文件含两候选全部 503 URL",
+          len(urls) == 503 and {"https://a0.com/", "https://b0.com/"} <= set(urls),
+          f"got {len(urls)}")
 
-    # full 模式：limit 用 req.limit，seed 仍选最大
+    # full 模式：limit 用 req.limit，排序文件只取前 N
     captured.clear()
     crawl_api.post_crawl(crawl_api.CrawlRequest(channels=["play"], mode="full", limit=100))
     check("full mode limit = req.limit=100",
           captured["limit"] == 100, f"got {captured['limit']}")
-    check("full mode seed_file 选最大 play.txt",
-          captured["seed_file"].endswith("seeds-play.txt"))
+    seed_file = Path(captured["seed_file"])
+    check("full mode seed 走排序文件且截断到 100",
+          seed_file.name == ".seed-ranked-play.txt"
+          and len(seed_file.read_text().split()) == 100)
 
 
 def test_channel_busy_distinguishes_kill_vs_crash(monkeypatch):
@@ -360,25 +369,117 @@ def test_channel_busy_distinguishes_kill_vs_crash(monkeypatch):
     check("rc=42 (程序崩溃) → failed", classify(p_fail.returncode) == "failed")
 
 
-def test_get_crawl_status_safe_iteration(monkeypatch):
-    """2026-09-30 修复：`/api/crawl/status` TTL cleanup 必须用 `list(_JOBS_RUNNING.items())`
-    快照——否则并发 pop 触发 RuntimeError 导致 API 500。
-    """
-    # 插入若干 stale job + active job
-    now = 99999.0
-    stale1 = crawl_api._Job(job_id="stale1", channel="play", pid=1,
-                            started_at=now - 7200, proc=None, status="exited")  # type: ignore[arg-type]
-    stale2 = crawl_api._Job(job_id="stale2", channel="play", pid=2,
-                            started_at=now - 7200, proc=None, status="failed")  # type: ignore[arg-type]
-    active = crawl_api._Job(job_id="active", channel="osm", pid=3,
-                            started_at=now, proc=None, status="running")  # type: ignore[arg-type]
-    crawl_api._JOBS_RUNNING.update({"stale1": stale1, "stale2": stale2, "active": active})
+def test_get_crawl_status_reads_db(monkeypatch, tmp_path):
+    """2026-09-30 加固：status 走 job 表单一事实源（API 重启不丢）+ health 冒头。"""
+    from app import db as _dbm
+    (tmp_path / "data").mkdir(exist_ok=True)
+    db_path = tmp_path / "data" / "leads.db"
+    conn = _dbm.connect(db_path)
     try:
-        import time as _t
-        with patch.object(_t, "time", lambda: now):
-            jobs = crawl_api.get_crawl_status()
-        remaining = list(crawl_api._JOBS_RUNNING.keys())
-        assert "active" in remaining
-        assert "stale1" not in remaining and "stale2" not in remaining
+        _dbm.insert_job(conn, job_id="inc-osm", kind="crawl", channel="osm",
+                        pid=11, started_at=100.0)
+        for i in range(3):   # osm 连续 3 次补种失败 → health 冒头
+            jid = f"seed-osm-{i}"
+            _dbm.insert_job(conn, job_id=jid, kind="seed", channel="osm",
+                            pid=20 + i, started_at=200.0 + i)
+            _dbm.finish_job(conn, jid, "failed", 1)
     finally:
-        crawl_api._JOBS_RUNNING.clear()
+        conn.close()
+    monkeypatch.setattr(crawl_api, "_CWD", tmp_path)
+    out = crawl_api.get_crawl_status()
+    ids = {j["job_id"] for j in out["jobs"]}
+    assert {"inc-osm", "seed-osm-2"} <= ids
+    assert all(j["log"] is None or isinstance(j["log"], str) for j in out["jobs"])
+    assert out["health"].get("osm") == 3
+
+
+def test_reap_pass_and_auto_chain(monkeypatch, tmp_path):
+    """收割线程主链路：seed job exit 0 → 自动接续该渠道增量爬（chained 标记）。"""
+    from app import db as _dbm
+    from app.crawl_api import _Job
+    (tmp_path / "data").mkdir(exist_ok=True)
+    db_path = tmp_path / "data" / "leads.db"
+    conn = _dbm.connect(db_path)
+    try:
+        _dbm.insert_job(conn, job_id="seed-osm-x", kind="seed", channel="osm",
+                        pid=42, started_at=1.0)
+    finally:
+        conn.close()
+    monkeypatch.setattr(crawl_api, "_CWD", tmp_path)
+
+    class _FakeProc:
+        def poll(self): return 0
+    job = _Job(job_id="seed-osm-x", channel="osm", pid=42, started_at=1.0,
+               proc=_FakeProc(), status="running")  # type: ignore[arg-type]
+    crawl_api._JOBS_RUNNING["seed-osm-x"] = job
+
+    spawned = []
+    def fake_spawn(channel, seed_file, limit, max_pages, db_path, mode="incremental",
+                   throttle=None, chained=False):
+        spawned.append((channel, mode, chained))
+        return _Job(job_id=f"chain-{channel}", channel=channel, pid=7,
+                    started_at=2.0, proc=None, status="running")  # type: ignore[arg-type]
+    monkeypatch.setattr(crawl_api, "_spawn", fake_spawn)
+    (tmp_path / "data").mkdir(exist_ok=True)
+    (tmp_path / "data" / "seeds-osm.txt").write_text("https://a.com/\n")
+
+    done = crawl_api._reap_pass()
+    assert done == {"osm"}
+    assert job.status == "exited"           # 内存收割
+    crawl_api._auto_chain("osm")
+    assert spawned and spawned[0][0] == "osm" and spawned[0][1] == "incremental"
+    assert spawned[0][2] is True            # chained=1
+
+    # DB 侧：seed job 行已被收割为 exited
+    conn = _dbm.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT status FROM job WHERE job_id='seed-osm-x' AND finished_at IS NOT NULL"
+        ).fetchone()
+        assert row is not None
+    finally:
+        conn.close()
+
+
+# ============================================================
+# 智能爬取黑盒（2026-09-30）：_smart_expand_scene 场景轮换
+# ============================================================
+def _fake_seed_job(channel="play", status="running"):
+    return crawl_api._Job(job_id=f"seed-{channel}-20260930", channel=channel,
+                          pid=123, started_at=0.0, proc=None, status=status)
+
+
+def test_smart_expand_scene_rotates(tmp_path, monkeypatch):
+    """每次调用轮换到下一个场景；轮换指针落在 data/ 内可随库迁移。"""
+    calls = []
+    monkeypatch.setattr(crawl_api, "_SMART_ROTATION", tmp_path / ".smart-rotation")
+    monkeypatch.setattr(crawl_api, "_spawn_seed",
+                        lambda ch, c, cat, lim, out: calls.append(ch)
+                        or _fake_seed_job(ch))
+    from app.seeds_scenes import SCENES
+    seen = []
+    for _ in range(len(SCENES) + 1):
+        got = crawl_api._smart_expand_scene()
+        seen.append([j.channel for j in got])
+    # 轮换一周回到首场景（渠道组合应重复出现），且指针文件可解析
+    assert seen[0] == seen[-1]
+    assert (tmp_path / ".smart-rotation").read_text().isdigit()
+
+
+def test_smart_expand_scene_skips_when_seed_running(tmp_path, monkeypatch):
+    """已有 seed job 在跑 → 跳过本轮（防重复打 Google Play/Overpass）。"""
+    monkeypatch.setattr(crawl_api, "_SMART_ROTATION", tmp_path / ".smart-rotation")
+    boom = lambda *a, **k: pytest.fail("不应再 spawn")
+    monkeypatch.setattr(crawl_api, "_spawn_seed", boom)
+    crawl_api._JOBS_RUNNING["seed-osm-x"] = _fake_seed_job("osm")
+    assert crawl_api._smart_expand_scene() == []
+
+
+def test_post_crawl_smart_all_busy_idempotent_200(monkeypatch):
+    """Q14 幂等合并：smart 全忙 → 200 + hint（点正在跑的批次不是错误）。"""
+    crawl_api._JOBS_RUNNING["inc-play"] = _fake_job("play")
+    crawl_api._JOBS_RUNNING["inc-osm"] = _fake_job("osm")
+    crawl_api._JOBS_RUNNING["inc-myshopify"] = _fake_job("myshopify")
+    out = crawl_api.post_crawl(crawl_api.CrawlRequest(mode="smart"))
+    assert out["total"] == 0 and out["spawned"] == []
+    assert len(out["skipped"]) == 3 and "进行中" in out["hint"]

@@ -1,182 +1,299 @@
-# youzi-LeadHub — WhatsApp BSP 线索获取管道
+<div align="center">
 
-**youzi-LeadHub · 线索面板**——WhatsApp BSP（Business Solution Provider）销售线索中心：发现全球用 WhatsApp 承接客户的海外企业线索、P0 分层打分、合规留痕。
+<img src=".github/assets/logo.svg" alt="youzi LeadHub" width="360"/>
 
-依据 [`docs/whatsapp-bsp-leadgen-可行性分析.md`](docs/whatsapp-bsp-leadgen-可行性分析.md)（**v7 实测校准版**）实施。
-获取"在用 WhatsApp 承接客户的海外企业"线索：**不限中国出海（P0 优先层），全量入库分层打分**。
+**把散落在全球企业官网上的 WhatsApp 号码，挖成一份能直接交给销售的线索库。**
 
-> ⚠️ **合规红线（报告第七节）**：本工具只做**线索发现与准备**，不包含任何外联/发送能力。
-> 绝不对爬到的号码做 WhatsApp 群发/自动化营销；不引入反爬绕过层，被挑战即弃站。
+<img src="https://img.shields.io/badge/python-3.13-3776ab?logo=python&logoColor=white" alt="python 3.13"/>
+<img src="https://img.shields.io/badge/scrapy-2.11-60a839?logo=scrapy&logoColor=white" alt="scrapy 2.11"/>
+<img src="https://img.shields.io/badge/fastapi-0.115-009488?logo=fastapi&logoColor=white" alt="fastapi 0.115"/>
+<img src="https://img.shields.io/badge/react-19-61dafb?logo=react&logoColor=white" alt="react 19"/>
+<img src="https://img.shields.io/github/actions/workflow/status/youzilovezp/youzi-leadhub/ci.yml?branch=main&label=CI" alt="CI"/>
+<img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT"/>
 
-## v7 实测校准基线（不要再用 v5/v6 的旧数字）
+[快速开始](#快速开始) · [用法](#两种用法) · [打分与检测](#打分与检测) · [部署](#跨机器部署)
 
-| 渠道 | v7 实测命中率 | 状态 |
-|------|--------------|------|
-| **App 渠道（Play）** | **12.5%**（6038 站 / 1122 号码） | **主力** |
-| Shopify 生态（CDX） | 0.7%（55% 死站） | 淘汰（CDX 档期种子大量过期试用店） |
-| Tranco top-N | 1.0%（1255 站） | 淘汰（头部大站走表单/SaaS 客服，WA 长尾不在头部） |
-| iTunes RSS / 本地目录 | 未测 | 暂缓（play 单渠道已超验收线） |
-| Common Crawl WAT | $25–50/次 + 头部偏置 | **回填**（最后走，D6+ 触发） |
+</div>
 
-> 验收线：单渠道 ≥500 条带号码线索 → play 渠道实测 771 域达成（154%）；
-> 链接层 precision ≥98% + ≥100 条中国出海 P0 → ⏳待 `docs/golden-set-sample.csv` 人工标注复核。
+---
 
-## 技术选型（GitHub 视角全新评估，不重复造轮子）
+> **合规红线**
+> 本工具只做线索发现与准备，**不含任何外联 / 发送能力**。
+> 不对爬到的号码做 WhatsApp 群发或自动化营销；不引入反爬绕过层，被站点挑战即弃站。
+> 部署在海外 VPS（CN 出口会被部分站点降级 / 拒绝）；欧盟线索触发 GDPR，删除响应是必选项。
 
-| 层 | 选型 | 理由 |
-|----|------|------|
-| 爬取调度 | **Scrapy** | robots 遵守 / 自动限速 / 重试（含 Retry-After）/ 去重（剥 utm）/ JOBDIR / 2MB 截断 / 8s 超时 全内置 |
-| HTML 解析 | **parsel**（Scrapy 自带） | 链接提取用成熟解析器 |
-| 号码归一 | **phonenumbers** | Google libphonenumber 官方移植，E164 + 区域码 |
-| 域名归一 | **tldextract**（PSL 私有段） | `myshopify.com` 等平台后缀回退 host 粒度 |
-| 种子下载 | **httpx** | Tranco zip / Common Crawl CDX REST |
-| App 种子 | **google-play-scraper**（JS 版） | 按国家×类目分榜；输出 `URL<TAB>developer` 作为 P0 第 1 强信号 |
-| API | **FastAPI + uvicorn** | 只读 `/api/stats`、`/api/leads`（支持 market_group 过滤） |
-| 前端 | React 19 + Vite + Tailwind v4 | 用户指定 UI 库 |
-| 测试 | **pytest**（**73 项**） | 涵盖 detect / normalize / pipeline / spider / middleware / osm / dupefilter |
+<details>
+<summary>目录</summary>
 
-> **从 ai-radar 切换到 Scrapy 的偏离**：Spec 原计划复用 ai-radar 引擎（剥离绕过层）。
-> 实测后改 Scrapy——本场景 6 项工程节流 Scrapy 全内置对应（C1 标），Clawl4AI 默认浏览器渲染
-> 违反 no-browser 红线，httpx + 自研调度性价比低。**判定：可接受，无需替换**。
+- [为什么是 WhatsApp 号码](#为什么是-whatsapp-号码)
+- [特性](#特性)
+- [界面一览](#界面一览)
+- [环境要求](#环境要求)
+- [快速开始](#快速开始)
+- [工作原理](#工作原理)
+- [两种用法](#两种用法)
+- [智能调度](#智能调度)
+- [打分与检测](#打分与检测)
+- [实测基线（Play 渠道）](#实测基线play-渠道)
+- [数据模型](#数据模型)
+- [配置](#配置)
+- [跨机器部署](#跨机器部署)
+- [技术选型](#技术选型)
+- [排障](#排障)
+- [边界与待办](#边界与待办)
+- [贡献](#贡献)
+- [许可证](#许可证)
+
+</details>
+
+---
+
+## 为什么是 WhatsApp 号码
+
+在东南亚、拉美、中东，WhatsApp 就是做生意的默认通道——印尼小店用它接外卖订单，圣保罗的电商用它催付款，迪拜的贸易商用它谈柜子。一家企业肯把号码挂上官网，等于把「接生意」三个字写在了门口：公开、免费、可验证。
+
+LeadHub 把这个信号做成流水线：全量收集 → 验证归一 → 打分分组 → 交付销售。
+
+- **P0** — 中国出海企业，同类客户，销售最先敲的一批门
+- **P1+** — 海外本土企业，按 SEA / LATAM / MENA / EU 分组，语言和市场策略跟着组走
+
+## 特性
+
+- **两层检测** — `wa.me` 直链、9 种 widget 指纹、文本层关键词邻域 + libphonenumber 校验
+- **P0 出海判定** — 开发者主体 / ICP 备案 / 中国 TLD / 语言信号五条规则，中国出海企业一眼可辨
+- **一键智能爬取** — 渠道 / 国家 / 类目全由后端按 ROI 自动决策，销售只点一个按钮
+- **智能调度** — 渠道按 ROI 评分排序，出错自动冷却，种子见底自动扩
+- **今日商机 API** — 每日待跟进清单，按市场组配开场白草稿和 wa.me 深链（人工发，不代发）
+- **断点续爬 · 快照迁移** — JOBDIR 状态随备份走，换机器不重爬
+- **合规内建** — robots / 限速 / 每站页数上限全默认开，GDPR 删除一条命令
+
+## 界面一览
+
+**所有线索** —— 渠道命中率卡片点击即筛选，每条线索带 wa.me 深链、复制电话：
+
+<img src=".github/assets/leads.png" alt="所有线索面板：渠道命中率 + 线索列表" width="860"/>
+
+**导出** —— 按当前筛选导出 CSV（UTF-8 BOM，Excel 中文兼容）：
+
+<img src=".github/assets/export.png" alt="导出面板：范围选择 + CSV 导出" width="860"/>
+
+## 环境要求
+
+- **Python 3.13+**（CI 以 3.13 跑全量测试）
+- **Node ≥ 20.19 / pnpm 9+** —— 仅改前端时需要
+- **可选依赖**：`.venv/bin/pip install google-play-scraper`——不装则 Play 渠道不可用，OSM / Tranco / 手动清单不受影响
+- 海外网络环境；CN 出口需配代理（见 [配置](#配置) 与 [排障](#排障)）
 
 ## 快速开始
 
 ```bash
-cd youzi-bsp
+git clone https://github.com/youzilovezp/youzi-leadhub.git && cd youzi-leadhub
+
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-.venv/bin/python -m pytest tests/        # 73 项全绿
+.venv/bin/python -m pytest tests/ -q
+
+# 后端 API :8788（从仓库根目录起）
+.venv/bin/uvicorn app.api:app --host 0.0.0.0 --port 8788
+
+# 前端开发模式 :5173（生产模式 pnpm build 后由 8788 直接托管）
+cd frontend && pnpm i && pnpm dev
 ```
 
-## 跨机器部署与数据迁移（2026-09-30）
+---
 
-**语义：代码走 git，数据走快照。** 工程不含任何本机绑定——play 渠道代理自动解析
-（`BSP_PROXY` 显式指定 > 本机 7890 探测 > 直连，海外 VPS 直连即可）。
+## 工作原理
 
-```bash
-# 旧机器：打包（SQLite 一致性快照，API 运行中执行也安全）
-python -m app backup
-# → data/backup-<时间戳>.tar.gz（线索库 + 种子池 + JOBDIR 增量进度 + 金标准标注）
-
-# 新机器：复活全部状态
-git clone <repo> && cd youzi-leadhub
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-python -m app restore --from backup-<时间戳>.tar.gz   # 先停 API/爬取进程
-.venv/bin/uvicorn app.api:app --host 0.0.0.0 --port 8788   # 必须从仓库根目录启动
+```
+种子        tranco / play / myshopify / osm / 手动清单
+  │
+  ▼
+爬取        Scrapy：robots · 自动限速 · 每站 ≤5 页 · 2MB 截断 · 8s 超时 · JOBDIR 断点续爬
+  │
+  ▼
+检测        链接层 wa.me 直链与 widget 指纹；文本层关键词邻域 + libphonenumber 校验
+  │
+  ▼
+归一打分    E164 · eTLD+1 · P0 判定 · 市场分组
+  │
+  ▼
+入库        SQLite：domain / phone / sighting，全 upsert 幂等
+  │
+  ▼
+交付        今日商机 · 线索面板 · CSV 导出 · GDPR 删除
 ```
 
-恢复后增量爬取语义连续（JOBDIR 的 requests.seen 一起迁移，不会全量重爬）。
-前端：`cd frontend && pnpm i && pnpm build`（8788 托管 dist）或 `pnpm dev`（5173 开发态）。
+---
 
-⚠ 注意：恢复是覆盖式；`docs/` 在 .gitignore 里（金标准 CSV 只活在快照与备份中）。
+## 两种用法
 
-## 端到端管道（D1–3 完成 / D6+ 待触发）
+### 界面（给销售）
+
+一个按钮，一个列表。销售不需要知道什么是渠道、代理或 ISO 国家码：
+
+- **智能爬取** —— 顶栏唯一按钮，点了就走：后端自动挑当前 ROI 最优的渠道增量采集，同时按业务场景（东南亚小店、拉美电商、中东企业……）在后台扩新人群，多路并行。跑完列表自动刷新。
+- **所有线索** —— 渠道命中率卡片、搜索、市场 / 渠道过滤；每条线索带 wa.me 深链、一键复制电话。
+- **导出** —— 按当前筛选导出 CSV。
+
+今日商机清单与开场白草稿走 API（`GET /api/today`），按市场组自动配语言——草稿是复制出来人工发的，工具不代发，红线。
+
+### 命令行（给自己）
 
 ```bash
-# 1) 生成种子
-.venv/bin/python -m app seed tranco --top 2000
-.venv/bin/python -m app seed myshopify --limit 2000
-.venv/bin/python -m app seed play --country id --category BUSINESS --limit 200   # 输出带 developer_name
-.venv/bin/python -m app seed osm --country MY,TH,PH,ID --limit 500
-.venv/bin/python -m app seed sample --file your-list.txt
+# 种子
+.venv/bin/python -m app seed tranco    --top 2000
+.venv/bin/python -m app seed play      --country id --category BUSINESS --limit 200
+.venv/bin/python -m app seed osm       --country MY,TH,PH,ID --limit 500
+.venv/bin/python -m app seed sample    --file your-list.txt
 
-# 2) 分渠道爬取（礼貌：robots / 自动限速 / 每站 ≤5 页 / 2MB 截断 / 8s 超时）
+# 爬取
 .venv/bin/python -m app crawl --seed-file data/seeds-play.txt --channel play --limit 6038
-# 断点续跑：--jobdir 缺省时落到 data/.job/<channel>-<yyyymmdd-HHMMSS>/
 
-# 3) 命中率统计 + CSV 导出（market_group / developer_name / widget / email 都进 CSV）
+# 统计 + 导出
 .venv/bin/python -m app stats
 .venv/bin/python -m app export --out data/leads.csv
 
-# 4) GDPR 删除响应（合规 §7.4 必选）
+# GDPR 删除响应
 .venv/bin/python -m app forget --entity example.com
 ```
 
-## 数据模型（SQLite，PG 兼容三表 + 迁移列）
+---
+
+## 智能调度
+
+渠道选择不靠拍脑袋。每个渠道维护一个滚动窗口（最近 200 次尝试）的命中率与错误率：
 
 ```
-domain(entity_key, channel, seed_host, developer_name,
-       status, widget, p0, market, market_group, lang, score,
-       first_seen, last_crawled)
-phone(e164, valid, country)
-sighting(entity_key, e164, url, layer, first_seen, last_seen)   -- 多对多 + 合规留痕
+score = hit_rate / (1 + error_rate × 10)
 ```
 
-**幂等**：全部 upsert（ON CONFLICT），widget/email OR-merge 用 SQLite 原子 SQL
-（`json_each + GROUP_CONCAT`，多进程并发安全）。
+分数高的先爬；连续 5 次出错进 5 分钟冷却，不在快死的渠道上烧预算；种子池见底自动扩。当前策略面板可见（`/api/crawler/strategy`），冷却可手动解除。
 
-## 核心能力
+---
 
-### WhatsApp 检测（两层扫描）
+## 打分与检测
 
-- **链接层**：`wa.me/(\+?\d…)`（含 `%2B` 编码）+ `api/web/wp.whatsapp.com/send/?phone=` + `whatsapp://send` + 9 种 widget 指纹
-- **文本层**：关键词"whatsapp" ±100 字符邻域，国际格式（`+`/`00` 开头），libphonenumber 校验
-- **widget 指纹**：ht-ctc / joinchat / getbutton / chaty / elfsight / tidio / wp-chat / click-to-chat / whatsapp-chat
-- **SaaS widget 静态不可见**（Elfsight/Tidio）只记指纹，不进 candidates
+**两层检测**
 
-### 三层归一
+- 链接层：`wa.me/(\+?\d…)` 直链（含 `%2B` 编码）、`api.whatsapp.com/send`，外加 9 种主流聊天 widget 指纹（joinchat / getbutton / chaty / click-to-chat …）
+- 文本层：「whatsapp」关键词 ±100 字符邻域内找国际格式号码（`+` / `00` 开头），libphonenumber 严格校验
+- SaaS 悬浮件（Elfsight / Tidio）静态抓不到内容 → 只记指纹，不进候选
 
-- **URL**：小写 host / 去 fragment / 剥 UTM/fbclid/gclid/mc_/ref / 统一尾斜杠
-- **号码**：URL-decode + 宽松进 + libphonenumber 严格出 + E164
-- **实体**：eTLD+1 + 平台后缀（myshopify.com / blogspot.com）回退 host + punycode/IDN
+**P0 判定**（任一命中且非 gray 即 P0）
 
-### P0 判定（spec §3.5 + v7 增强）
-
-强信号（任一满足且非 gray 即 P0）：
-1. **App 开发者主体含中国公司名**（P0 第 1 强信号；play 渠道独有）
-2. ICP 备案号
+1. Play 开发者主体是中国公司（渠道内第 1 强信号）
+2. 官网有 ICP 备案号
 3. 中国 TLD（.cn / .中国 / .xn--fiqs8s）
-4. lang=zh 且号码市场=CN
-5. hreflang=zh 且号码市场 ∈ {CN, HK, MO, TW}（双轨升格，避免跨国站过杀）
+4. `lang=zh` 且号码市场 = CN
+5. `hreflang=zh` 且号码市场 ∈ {CN, HK, MO, TW}
 
-弱加分（已不再是强信号，避免 github/google/stripe 过杀）：
-- hreflang=zh 单独
-- lang=zh 单独
-- title 中文
+「页面里有点中文」这类弱信号只加分、不定性——不然 github.com 也会被误伤成出海企业。
 
-### 市场分组（v7 新增）
+**市场分组**：SEA / LATAM / MENA / EU / OTHER，60+ 国家映射，写入 `domain.market_group`，`/api/leads?market_group=SEA` 直查。
 
-`{SEA, LATAM, MENA, EU, OTHER}` 标签——spec §3.5 要求。之前只返单一 ISO 国家码，
-销售无法按市场分批消化。现已加 `_MARKET_GROUP` 映射（覆盖 60+ 国家），写入 `domain.market_group`，
-`/api/leads?market_group=SEA` 可直接按市场过滤。
+---
 
-## D6+ 待办（不在当前实现）
+## 实测基线（Play 渠道）
 
-- [ ] Common Crawl WAT 全量回填（$25–50/次）
-- [ ] 分级重访调度（周级 P0 / 月级长尾，触发条件：高分池 ≥5000）
-- [ ] 特征 diff（号码集合变化 = 新挂线索流）
-- [ ] 开场白草稿按语言按需生成
+14 国 × 5 类目 × 6038 站。验收线：单渠道 ≥500 条带号码线索 → 达成 154%（771 域 / 1122 号码）。
 
-## 检测能力边界（v6.1）
+| 渠道 | 命中率 | 结论 |
+|------|------|------|
+| App 渠道（Play） | 12.5%（6038 站 / 1122 号码） | 主力 |
+| Shopify 生态（CDX） | 0.7%（55% 死站） | 淘汰，CDX 档期种子大量过期试用店 |
+| Tranco top-N | 1.0%（1255 站） | 淘汰，头部走表单 / SaaS 客服，WA 长尾不在头部 |
+| iTunes RSS / 本地目录 | 未测 | 暂缓 |
+| Common Crawl WAT | $25–50/次 + 头部偏置 | 回填，触发后走 |
 
-- 两层扫描 + 文本层仅国际格式（误报控制，spec §9.2）
-- **SaaS widget 静态不可见**（Elfsight/Tidio）只记指纹；真实覆盖率靠金标准集人工标注复核
-- app-only 无官网商家不可达（范围边界，非漏检）
-- **建议跑在海外 VPS**：CN 出口会被部分站点降级/拒绝
+---
 
-## 数据状态（v7→v8 迁移）
+## 数据模型
 
-⚠️ v7 文档声明的 771 域/1122 号码（play 渠道实测基线）来自一次历史跑批，**当前
-`data/leads.db` 是后续 OSM 单渠道重跑后的状态**（691 域 / 605 号码 / 1 P0）。
+SQLite（PG 兼容写法，将来平迁不换 SQL）：
 
-要复现 v7 baseline，重跑：
-```bash
-.venv/bin/python -m app seed play --country id,br,mx,ph,th,vn \
-     --category BUSINESS,SHOPPING,COMMUNICATION --limit 150 --out data/seeds-play.txt
-.venv/bin/python -m app crawl --seed-file data/seeds-play.txt \
-     --channel play --limit 6038
-.venv/bin/python -m app stats
+```sql
+domain(entity_key, channel, developer_name, status, widget,
+       p0, market, market_group, lang, score, first_seen, last_crawled)
+phone(e164, valid, country)
+sighting(entity_key, e164, url, layer, first_seen, last_seen)   -- 多对多，也是合规留痕
 ```
 
-## 文档与代码一致性
+写入全部 upsert（ON CONFLICT），widget / email OR-merge 用 SQLite 原子 SQL，多进程并发安全。
 
-- 文档版本：v7（实测校准版），引用基线已替换为实测数字
-- README 当前版本对齐 v7；后续 v8 迭代应同步更新 README（不再引用 v6.1 / v5.1 的旧数字）
+---
 
-## v7 验收线追踪
+## 配置
 
-| 验收线 | 状态 | 证据 |
-|--------|------|------|
-| 单渠道 ≥500 条带号码线索 | ✅ | play 渠道历史实测 771 域 / 1122 号码（见上方"数据状态"重跑指南） |
-| 链接层 precision ≥98% | ⏳ | 待 `docs/golden-set-sample.csv` 100 条人工标注 |
-| 市场分层字段可用 | ✅ | `domain.market_group` 字段已就位，14 国分布合理 |
-| ≥100 条中国出海 P0 | ⏳ | 依赖金标准集标注；代码已实现 P0 第 1 强信号（developer_name）作为补充判定 |
+零配置可跑；环境变量完整示例见 [.env.example](.env.example)。
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `BSP_DB` | `data/leads.db` | SQLite 数据库路径 |
+| `BSP_PROXY` | 自动探测 | 出海代理：显式指定 URL；设为空串强制直连；不设则探测本机 `127.0.0.1:7890`，再退直连 |
+| `YOUZI_DOWNLOAD_DELAY` | 任务注入 | Scrapy 下载间隔（秒），排障时手动覆盖 |
+| `YOUZI_AUTOTHROTTLE_TARGET_CONCURRENCY` | 任务注入 | AutoThrottle 目标并发，排障时手动覆盖 |
+
+---
+
+## 跨机器部署
+
+代码走 git，工程不做本机绑定；数据不迁移——新机器从零冷启动重新爬取（`data/` 在 `.gitignore` 里）。Play 代理自动探测（`BSP_PROXY` > 本机 7890 > 直连）。
+
+```bash
+git clone https://github.com/youzilovezp/youzi-leadhub.git && cd youzi-leadhub
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/bin/uvicorn app.api:app --host 0.0.0.0 --port 8788
+```
+
+跨源（局域网 IP / 域名）访问前端时设置 `BSP_CORS_ORIGINS`（逗号分隔 origin 列表）。新机器首次爬取为全量——JOBDIR 的 `requests.seen` 去重进度是本机状态，不跨机迁移。
+
+---
+
+## 技术选型
+
+| 层 | 选型 | 为什么 |
+|----|------|------|
+| 爬取调度 | Scrapy | robots / 自动限速 / Retry-After / 去重 / 断点续爬全内置，自己写就是重造轮子 |
+| HTML 解析 | parsel | Scrapy 自带 |
+| 号码归一 | phonenumbers | libphonenumber 官方移植，E164 出口 |
+| 域名归一 | tldextract | PSL 私有段，`myshopify.com` 这类平台域回退 host |
+| App 种子 | google-play-scraper | 国家 × 类目分榜；开发者字段是 P0 第 1 强信号 |
+| API | FastAPI + uvicorn | 只读查询 + 爬取任务编排 |
+| 前端 | React 19 + Vite + Tailwind v4 | 轻快，面板够用 |
+| 测试 | pytest | 检测 / 归一 / 管道 / 调度 / 中间件 / 金标准，CI 门禁 |
+
+> 历史注脚：从自研 ai-radar 切到 Scrapy——本场景要的六项工程节流它全内置；Crawl4AI 默认开浏览器渲染，踩 no-browser 红线。
+
+---
+
+## 排障
+
+- **Play 渠道报 `ModuleNotFoundError: google_play_scraper`** —— 可选依赖没装：`.venv/bin/pip install google-play-scraper`
+- **CN 网络下载种子超时** —— 设 `BSP_PROXY=http://127.0.0.1:7890`（或任何本地代理地址）；空串 = 强制直连
+- **某渠道长时间不出线索** —— 可能进了错误冷却。看策略：`GET /api/crawler/strategy`；手动解除：`POST /api/crawler/clear-backoff/<channel>`
+- **8788 被占用** —— `--port` 换口即可（8787 常被本机 Docker 占）
+- **换机恢复后怕重爬** —— `requests.seen` 随快照迁移，Scrapy 日志里的 filtered 计数就是增量语义生效的证据
+
+---
+
+## 边界与待办
+
+**能力边界**
+
+- 两层扫描，文本层只认国际格式——宁可漏，不可误
+- SaaS widget 静态不可见 → 只记指纹；真实覆盖率靠金标准集人工标注复核
+- App-only、没有官网的商家够不着（范围边界，非漏检）
+
+**待办**
+
+- [ ] Common Crawl WAT 全量回填（触发后走）
+- [ ] 分级重访调度：P0 周级 / 长尾月级（高分池 ≥5000 时启动）
+- [ ] 号码集合变化 = 新挂线索流（特征 diff）
+- [ ] 付费富化填实：Hunter / Snov / Apollo / BuiltWith / Clearbit 五个 Adapter 已留位，接入时零业务代码改动
+
+## 贡献
+
+见 [CONTRIBUTING.md](CONTRIBUTING.md)。两条评审红线：**不加反爬绕过，不加外发能力。**
+
+## 许可证
+
+[MIT](LICENSE) © youzilovezp
