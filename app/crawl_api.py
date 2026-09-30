@@ -40,10 +40,13 @@ _JOBS.mkdir(parents=True, exist_ok=True)
 
 # 2026-09-30 清理：tranco top-1M 是安全域名排序，命中率 0.2%——不是销售线索源
 # 保留 cli.py 的 `seed tranco` 命令供手工调试，但 UI/自动流程不再暴露 tranco
-ALL_CHANNELS = ("myshopify", "play", "osm", "sample")
+# 2026-10-01 移除 myshopify 自动：CDX `*.myshopify.com/*` 数据源天花板 0.6% 命中
+# （84% 是 Shopify 默认 hash 子域 → test/abandoned 店），远低于 play 12% 和 osm 52%。
+# 智能爬取不再自动 spawn myshopify；手工仍可 `python -m app seed myshopify`
+# 单独跑（CLI 兜底），但不在一键列表里。
+ALL_CHANNELS = ("play", "osm", "sample")
 # 渠道 → 默认种子文件映射；sample 渠道需用户传 --file 故不在一键列表
 SEEDS_DEFAULT: dict[str, str] = {
-    "myshopify": "data/seeds-myshopify.txt",
     "play":      "data/seeds-play.txt",         # 兜底；如有 seeds-play-new.txt 自动优先
     "osm":       "data/seeds-osm.txt",
 }
@@ -703,7 +706,7 @@ def post_crawl(req: CrawlRequest):
                             for c in channels],
                 "hint": "本批进行中——完成后自动补种接续，无需重复点击",
             }
-        starved = {c for c in free if _unseen_estimate(c) < 10000}
+        starved = {c for c in free if _unseen_estimate(c) < 500}
         crawlable = [c for c in free if c not in starved]
         seeded = _smart_expand_scene(seed_channels=starved)
         if crawlable:
