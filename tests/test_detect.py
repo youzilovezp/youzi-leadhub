@@ -1,7 +1,7 @@
 """两层检测器测试（金标准 fixtures，报告 9.1）。"""
 from pathlib import Path
 
-from youzi_bsp.detect import detect
+from app.detect import detect
 
 FIX = Path(__file__).parent / "fixtures"
 

@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 
-from youzi_bsp import crawl_api
-from youzi_bsp.crawl_api import _safe_db_path, _tail
+from app import crawl_api
+from app.crawl_api import _safe_db_path, _tail
 
 
 @pytest.fixture(autouse=True)
@@ -101,7 +101,7 @@ def test_tail_reads_only_tail(tmp_path):
 
 def test_append_merge_dedups_by_url(tmp_path):
     """按 URL 去重追加：旧行（含 developerName）保留，仅新 URL 进池。"""
-    from youzi_bsp.seeds import append_merge
+    from app.seeds import append_merge
 
     target = tmp_path / "seeds-play.txt"
     target.write_text("https://old.com/\t老开发者\nhttps://dup.com/\n", encoding="utf-8")

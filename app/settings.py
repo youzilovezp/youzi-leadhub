@@ -11,9 +11,9 @@
   移除，是 dead code；规范做法是覆盖 request_fingerprint 方法）
 无绕过层：不引入 cloudscraper/stealth，被挑战即弃站（报告 7.3）。
 """
-BOT_NAME = "youzi_bsp"
-SPIDER_MODULES = ["youzi_bsp"]
-NEWSPIDER_MODULE = "youzi_bsp"
+BOT_NAME = "app"
+SPIDER_MODULES = ["app"]
+NEWSPIDER_MODULE = "app"
 
 USER_AGENT = "youzi-bsp-leadgen/0.1 (BSP prospecting; polite crawler; youzi99013@gmail.com)"
 
@@ -38,17 +38,17 @@ AUTOTHROTTLE_MAX_DELAY = 10
 AUTOTHROTTLE_TARGET_CONCURRENCY = 1.5
 
 BSP_DB = "data/leads.db"
-ITEM_PIPELINES = {"youzi_bsp.pipelines.WaStorePipeline": 300}
+ITEM_PIPELINES = {"app.pipelines.WaStorePipeline": 300}
 # HIGH #6（2026-09-28 重写）：RetryAfterMiddleware 子类化内置重试器并取代之——
 # 内置置 None，我们的类顶替 550 槽位，保证 429/503 先抬 slot delay 再重试
 # （旧"优先级 500 先于内置"的注释是错的：process_response 链按优先级降序执行）
 DOWNLOADER_MIDDLEWARES = {
-    "youzi_bsp.middlewares.PrivateNetMiddleware": 10,
+    "app.middlewares.PrivateNetMiddleware": 10,
     "scrapy.downloadermiddlewares.retry.RetryMiddleware": None,
-    "youzi_bsp.middlewares.RetryAfterMiddleware": 550,
+    "app.middlewares.RetryAfterMiddleware": 550,
 }
 # CRIT #3：自定义 fingerprinter——同 URL 不同 utm_* 视为同一请求
-REQUEST_FINGERPRINTER_CLASS = "youzi_bsp.dupefilter.YouziUrlFingerprinter"
+REQUEST_FINGERPRINTER_CLASS = "app.dupefilter.YouziUrlFingerprinter"
 
 # HIGH #8：Accept-Language 兜底——海外 CDN（Cloudflare/Akamai）按此路由 edge 页面
 # 语言，缺省时按客户端 IP 推断（CN IP 爬 = 中文版 → 市场分层字段错配）。

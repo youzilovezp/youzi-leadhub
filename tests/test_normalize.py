@@ -1,5 +1,5 @@
 """三层归一测试（报告 3.4）。"""
-from youzi_bsp.normalize import entity_key, normalize_phone, normalize_url
+from app.normalize import entity_key, normalize_phone, normalize_url
 
 
 def test_normalize_url():
@@ -28,6 +28,15 @@ def test_phone_invalid():
     assert normalize_phone("hello") is None
 
 
+def test_phone_plus_zero_zero_prefix():
+    """B2 修复（2026-09-30）：+00... 前缀应被接受（与 00... 同义）——libphonenumber 兜底 E164。
+    旧实现只拦无 + 的 00...；+00... 走 libphonenumber 直接被拒 → None。
+    """
+    assert normalize_phone("+0086 138 0013 8000") == ("+8613800138000", "CN")
+    assert normalize_phone("0086 138 0013 8000") == ("+8613800138000", "CN")
+    assert normalize_phone("+00 86 138 0013 8000") == ("+8613800138000", "CN")
+
+
 def test_entity_key():
     assert entity_key("www.example.com") == "example.com"
     assert entity_key("example.co.uk") == "example.co.uk"
@@ -40,13 +49,13 @@ def test_settings_dedupefilter_class_wired():
     """CRIT #3 修复：Scrapy dupefilter 必须能剥 utm_/fbclid/gclid（spec 3.4 URL 级
     归一要求；旧 REQUEST_FINGERPRINTER_IMPLEMENTATION='2.7' 是 Scrapy 2.19 dead code，
     实际无效——改用自定义 REQUEST_FINGERPRINTER_CLASS 走同构 normalize_url 链路）。"""
-    from youzi_bsp.settings import REQUEST_FINGERPRINTER_CLASS
+    from app.settings import REQUEST_FINGERPRINTER_CLASS
     assert REQUEST_FINGERPRINTER_CLASS.endswith("YouziUrlFingerprinter"), \
         f"REQUEST_FINGERPRINTER_CLASS 必须显式指向自定义 fingerprinter：{REQUEST_FINGERPRINTER_CLASS!r}"
 
 
 def test_youzi_dupefilter_strips_utm():
-    from youzi_bsp.dupefilter import YouziUrlFingerprinter
+    from app.dupefilter import YouziUrlFingerprinter
     from scrapy.http import Request
 
     fp = YouziUrlFingerprinter()
@@ -56,7 +65,7 @@ def test_youzi_dupefilter_strips_utm():
 
 
 def test_youzi_dupefilter_keeps_distinct():
-    from youzi_bsp.dupefilter import YouziUrlFingerprinter
+    from app.dupefilter import YouziUrlFingerprinter
     from scrapy.http import Request
 
     fp = YouziUrlFingerprinter()

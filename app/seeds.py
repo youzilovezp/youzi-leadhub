@@ -128,7 +128,7 @@ def play(country: str, category: str, limit: int, out: Path) -> Path:
 
 def sample(src: str, out: Path) -> Path:
     """手工清单（域名或 URL 混合）→ 规范化种子文件。"""
-    from youzi_bsp.normalize import normalize_url
+    from app.normalize import normalize_url
 
     urls = []
     for line in Path(src).read_text(encoding="utf-8").splitlines():

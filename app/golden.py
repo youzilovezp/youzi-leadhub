@@ -15,8 +15,8 @@ from pathlib import Path
 
 import httpx
 
-from youzi_bsp.detect import detect
-from youzi_bsp.normalize import normalize_phone
+from app.detect import detect
+from app.normalize import normalize_phone
 
 _LABELS = ("TP", "FP")
 _UA = "youzi-bsp-leadgen/0.1 (BSP golden-set calibration; youzi99013@gmail.com)"

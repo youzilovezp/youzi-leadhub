@@ -2,10 +2,10 @@
 import sqlite3
 from pathlib import Path
 
-from youzi_bsp import db
-from youzi_bsp.pipelines import WaStorePipeline
-from youzi_bsp.score import page_flags
-from youzi_bsp.stats import channel_stats
+from app import db
+from app.pipelines import WaStorePipeline
+from app.score import page_flags
+from app.stats import channel_stats
 
 FIX = Path(__file__).parent / "fixtures"
 
@@ -62,7 +62,7 @@ def test_page_flags():
 
 def test_forget_deletes_entity_and_orphan_phones(tmp_path):
     """GDPR 删除（报告 7.4）：实体及证据删除；仅清无引用孤儿号码，一号多挂不误删。"""
-    from youzi_bsp import db as dbm
+    from app import db as dbm
 
     conn = dbm.connect(tmp_path / "t.db")
     for ent in ("a.com", "b.com"):
@@ -81,7 +81,7 @@ def test_forget_deletes_entity_and_orphan_phones(tmp_path):
 
 
 def test_detect_emails():
-    from youzi_bsp.detect import detect
+    from app.detect import detect
 
     res = detect('<a href="mailto:Sales@Example.com?subject=hi">m</a>'
                  '<a href="mailto:bad addr@x.com">bad</a>')
@@ -89,13 +89,20 @@ def test_detect_emails():
 
 
 def test_p0_strong_signals_only():
-    from youzi_bsp.score import score_domain
+    from app.score import score_domain
 
     # D1-3 实测教训：hreflang zh / 中文标题在跨国站误报（github/google/stripe）
     weak = {"lang": "en", "icp": False, "hreflang_zh": True, "title_zh": False}
     assert score_domain(weak, ["US"], "wikipedia.org")["p0"] == 0
-    # 强信号：中国 TLD
-    assert score_domain(weak, [], "vstarcam.cn")["p0"] == 1
+    # 强信号：中国 TLD + 海外市场（C5 修复：境内 .cn 不算 P0）
+    assert score_domain(weak, ["ID"], "vstarcam.cn")["p0"] == 1
+    # .cn + 境内市场不算 P0（C5：spec 中国出海企业才有意义）—— 弱信号全无时
+    no_signal = {"lang": "en", "icp": False, "hreflang_zh": False, "title_zh": False}
+    assert score_domain(no_signal, ["CN"], "vstarcam.cn")["p0"] == 0
+    # .cn + 无号码 → 保守不 P0（C5：未知市场不假设出海）
+    assert score_domain(no_signal, [], "vstarcam.cn")["p0"] == 0
+    # .cn + 境内 + hreflang_zh 仍 P0=1（spec 双轨升格保留——BSP 触达中文母语客户）
+    assert score_domain(weak, ["CN"], "vstarcam.cn")["p0"] == 1
     # 强信号：ICP 备案（域名避开 example.*——B3 后会被 demo 规则归零）
     assert score_domain({"lang": "en", "icp": True, "hreflang_zh": False, "title_zh": False},
                         ["US"], "icp-holder.com")["p0"] == 1
@@ -105,7 +112,7 @@ def test_p0_strong_signals_only():
 
 
 def test_gambling_downscored():
-    from youzi_bsp.score import score_domain
+    from app.score import score_domain
 
     # 页面博彩词命中
     assert page_flags("<html lang='en'><title>shop</title>"
@@ -227,7 +234,7 @@ def test_error_item_never_degrades_crawled_or_scored(tmp_path):
 
 def test_private_signal_scoring():
     """M2-3：wa_group/wa_business 私域信号各 +2（比挂号码更重的使用深度）。"""
-    from youzi_bsp.score import score_domain
+    from app.score import score_domain
 
     base = {"lang": "en", "icp": False, "hreflang_zh": False, "title_zh": False,
             "gambling": False}
@@ -245,7 +252,7 @@ def test_private_signal_scoring():
 
 def test_market_group_mapping():
     """CRIT #2 修复：score_domain 返回 market_group 标签 {SEA, LATAM, MENA, EU, OTHER}。"""
-    from youzi_bsp.score import score_domain
+    from app.score import score_domain
 
     assert score_domain({"lang": "en", "icp": False, "hreflang_zh": False,
                          "title_zh": False}, ["ID"], "x.com")["market_group"] == "SEA"
@@ -264,7 +271,7 @@ def test_market_group_mapping():
 def test_developer_name_chinese_company_p0():
     """CRIT #1 修复：play 渠道 developerName 含中国城市/行业词 + 简/繁不限 → P0=1。
     这条信号是 P0 第 1 强信号，spec 3.5 明文列出，play 渠道是主力种子源。"""
-    from youzi_bsp.score import score_domain
+    from app.score import score_domain
 
     flags = {"lang": "en", "icp": False, "hreflang_zh": False, "title_zh": False}
     dev_names = ["深圳市某某科技有限公司", "Shenzhen Tech Co., Ltd",
@@ -277,7 +284,7 @@ def test_developer_name_chinese_company_p0():
 
 def test_developer_name_non_chinese_no_p0():
     """非中国公司主体名不应误判 P0。"""
-    from youzi_bsp.score import score_domain
+    from app.score import score_domain
 
     flags = {"lang": "en", "icp": False, "hreflang_zh": False, "title_zh": False}
     assert score_domain(flags, ["US"], "brand.io",
@@ -291,7 +298,7 @@ def test_gambling_domain_word_boundary():
     验证方式：合法域名 score 保持 +3（countries 命中但 WA_HEAVY 外），博彩域
     score 被 -8 扣到 0。
     """
-    from youzi_bsp.score import score_domain
+    from app.score import score_domain
 
     flags = {"lang": "en", "icp": False, "hreflang_zh": False, "title_zh": False}
     # 描述型合法商家：keyword 两侧是 hyphen → 不命中博彩 → score 保留 +3
@@ -307,7 +314,7 @@ def test_gambling_domain_word_boundary():
 def test_p0_hreflang_zh_dual_track_strong():
     """MED 修复：hreflang zh + 目标市场含 CN/HK/TW → 双轨升格为 P0 强信号
     （spec 第 3 强信号，此前 v6.1 过杀被降为弱项；现双轨保留弱项 + 复合升格）。"""
-    from youzi_bsp.score import score_domain
+    from app.score import score_domain
 
     base = {"lang": "en", "icp": False, "title_zh": False, "gambling": False}
     # 强信号：hreflang zh + 号码市场 = CN
@@ -414,6 +421,159 @@ def test_widget_email_rejects_control_chars(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM sighting").fetchone()[0] == 1
 
 
+def test_atomic_merge_begin_immediate_actually_used(tmp_path):
+    """B1 修复（2026-09-30）：v8 review 声称 _atomic_merge_csv 已包 BEGIN IMMEDIATE
+    但代码无 —— 本测试用 threading 模拟双连接并发（SQLite 串行化写），验证 widget 全部
+    保留且连接无 "transaction within transaction" 错误。
+    单进程下原 SQL 单语句 UPDATE 已原子；本测试验证 BEGIN IMMEDIATE 真起作用。
+    """
+    from threading import Thread
+    from app.pipelines import _atomic_merge_csv
+
+    dbp = str(tmp_path / "leads.db")
+    # 预置 domain 行
+    conn = db.connect(dbp)
+    conn.execute("INSERT INTO domain(entity_key, channel, first_seen) VALUES(?,?,?)",
+                 ("race.com", "test", db.now()))
+    conn.commit()
+    conn.close()
+
+    errors: list[Exception] = []
+
+    def worker(token: str):
+        try:
+            c = db.connect(dbp)
+            for _ in range(20):
+                _atomic_merge_csv(c, "domain", "race.com", {token}, "widget")
+            c.close()
+        except Exception as e:
+            errors.append(e)
+
+    # 2 线程并发，每个贡献 1 个不同 widget → 应全部保留
+    t1 = Thread(target=worker, args=("widgetA",))
+    t2 = Thread(target=worker, args=("widgetB",))
+    t1.start(); t2.start(); t1.join(); t2.join()
+
+    assert not errors, f"并发合并抛异常: {errors}"
+
+    conn = db.connect(dbp)
+    widgets = set((conn.execute(
+        "SELECT widget FROM domain WHERE entity_key='race.com'").fetchone()["widget"] or "").split(","))
+    assert widgets == {"widgetA", "widgetB"}, \
+        f"并发合并丢更新: got {widgets}"
+
+
+# ============================================================================
+# 2026-09-30 修复回归：C1 平票偏 CN + C5 .cn TLD 方向
+# ============================================================================
+
+def test_p0_cn_tld_domestic_market_not_p0():
+    """C5 修复：境内 .cn（market=CN）**不应** P0——spec "中国出海企业"才有意义。
+    旧实现：sina.com.cn / google.cn / 360.cn 全部 P0=1（误判方向）。
+    """
+    from app.score import score_domain
+    flags = {"lang": "en", "icp": False, "hreflang_zh": False, "title_zh": False,
+             "gambling": False}
+    # 境内大站：market=CN + .cn TLD → P0=0
+    for dom in ("sina.com.cn", "google.cn", "360.cn", "baidu.cn"):
+        res = score_domain(flags, ["CN"], dom)
+        assert res["p0"] == 0, f"{dom} (market=CN) 不应 P0: got {res['p0']}"
+
+
+def test_p0_cn_tld_overseas_market_p0():
+    """C5 修复：.cn + 海外市场 → P0=1（中国出海企业真信号）。
+    vstarcam.cn + ID 号码 → P0=1（保留 v7 行为）。
+    """
+    from app.score import score_domain
+    flags = {"lang": "zh", "icp": False, "hreflang_zh": False, "title_zh": False,
+             "gambling": False}
+    assert score_domain(flags, ["ID"], "vstarcam.cn")["p0"] == 1
+    assert score_domain(flags, ["HK"], "brand.cn")["p0"] == 1
+    assert score_domain(flags, ["MY"], "shop.cn")["p0"] == 1
+
+
+def test_p0_cn_tld_no_phone_not_p0():
+    """C5 修复：.cn + 无号码 → P0=0（保守：未知市场不假设出海）。
+    旧实现：无号码也 .cn → P0=1（无意义）。
+    """
+    from app.score import score_domain
+    flags = {"lang": "zh", "icp": False, "hreflang_zh": False, "title_zh": False,
+             "gambling": False}
+    assert score_domain(flags, [], "jd.cn")["p0"] == 0
+
+
+def test_market_pick_tie_prefers_overseas():
+    """C1 修复：平票 market 时**真海外市场**（非 CN/HK/MO/TW）优先（中国出海方向）。
+    旧 `max(sorted, key=count)` 字母序尾者赢——['CN','BR'] 取 'CN'（与销售意图背离）。
+    修后：
+    - 平票含真海外（['CN','ID']）→ 海外胜（'ID'）
+    - 平票全中文市场（['CN','HK']）→ 字母序首（'CN'）——保留 v7 行为
+    - 单众数直取
+    """
+    from app.score import _pick_market
+    # 真海外优先
+    assert _pick_market(["CN", "BR"]) == "BR"
+    assert _pick_market(["CN", "ID"]) == "ID"
+    # 多海外平票：取第一个海外（顺序由 dict 插入序保证，可断言 IN 集合）
+    assert _pick_market(["CN", "MY", "ID", "BR"]) in {"MY", "ID", "BR"}
+    # 全中文市场 → 字母序首（保留 v7）
+    assert _pick_market(["CN", "HK"]) == "CN"
+    assert _pick_market(["HK", "MO", "TW"]) == "HK"
+    # 单众数直取
+    assert _pick_market(["CN", "CN", "BR"]) == "CN"
+    # 空
+    assert _pick_market([]) is None
+
+
+def test_db_5_new_columns_present():
+    """2026-09-30 付费扩展预留：5 个新 ALTER 列必须迁移成功。
+    重连老库也不会丢——_migrate 在 db.connect() 入口跑一遍。
+    """
+    import tempfile
+    # 用 v7 时期的老 schema（缺 5 个新列）模拟生产环境老库
+    old_schema = """
+    CREATE TABLE domain (
+      entity_key TEXT PRIMARY KEY,
+      channel TEXT NOT NULL,
+      seed_host TEXT,
+      developer_name TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      widget TEXT,
+      p0 INTEGER NOT NULL DEFAULT 0,
+      market TEXT,
+      market_group TEXT,
+      lang TEXT,
+      score INTEGER NOT NULL DEFAULT 0,
+      first_seen TEXT NOT NULL,
+      last_crawled TEXT,
+      icp INTEGER NOT NULL DEFAULT 0,
+      hreflang_zh INTEGER NOT NULL DEFAULT 0,
+      title_zh INTEGER NOT NULL DEFAULT 0,
+      gambling INTEGER NOT NULL DEFAULT 0,
+      email TEXT
+    );
+    CREATE TABLE phone (e164 TEXT PRIMARY KEY, valid INTEGER NOT NULL DEFAULT 1, country TEXT);
+    CREATE TABLE sighting (
+      entity_key TEXT NOT NULL, e164 TEXT NOT NULL, url TEXT NOT NULL,
+      layer TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL,
+      PRIMARY KEY (entity_key, e164, url));
+    """
+    with tempfile.TemporaryDirectory() as td:
+        dbp = str(Path(td) / "t.db")
+        # 创建老库（无 5 个新列）
+        conn = sqlite3.connect(dbp)
+        conn.executescript(old_schema)
+        conn.commit()
+        conn.close()
+        # 触发迁移（CREATE TABLE IF NOT EXISTS 跳过，ALTER TABLE ADD COLUMN 补 5 列）
+        db.connect(dbp)
+        conn = sqlite3.connect(dbp)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(domain)")}
+        for c in ("enrichment_status", "enriched_at", "contact_email",
+                  "tech_signals", "outreach_message"):
+            assert c in cols, f"缺迁移列: {c}"
+
+
 def test_developer_name_persists_and_drives_p0(tmp_path):
     """CRIT #1 端到端：play 渠道带 developerName 的种子 → domain.developer_name
     入表 → close_spider 打分时 read 回 score_domain → 中国公司名命中 P0。
@@ -440,7 +600,7 @@ def test_developer_name_persists_and_drives_p0(tmp_path):
 
 def test_demo_domain_filtered():
     """B3（2026-09-28）：demo/模板/widget 厂商域名级假阳性过滤（spec 3.5）。"""
-    from youzi_bsp.score import score_domain
+    from app.score import score_domain
 
     flags = {"lang": "en", "icp": False, "hreflang_zh": False, "title_zh": False}
     for dom in ("demo.com", "demosite.com", "elfsight.com", "tidio.co",
@@ -454,7 +614,7 @@ def test_demo_domain_filtered():
 def test_market_group_lang_fallback():
     """B3（2026-09-28）：无号码证据时 market_group 按页面 lang 兜底（spec 3.5
     市场分组第二信号）；market 字段保持 None——不用 lang 编造国家码。"""
-    from youzi_bsp.score import score_domain
+    from app.score import score_domain
 
     flags = {"lang": "id", "icp": False, "hreflang_zh": False, "title_zh": False}
     res = score_domain(flags, [], "warung-makan.com")
@@ -472,7 +632,7 @@ def test_market_group_lang_fallback():
 
 def test_cli_max_pages_min_one():
     """MED 修复：--max-pages 0/-1 等非法值必须报错而非静默退化为无效。"""
-    from youzi_bsp.cli import main
+    from app.cli import main
     import pytest as _pt
 
     for bad in ("0", "-1"):
@@ -482,11 +642,11 @@ def test_cli_max_pages_min_one():
 
 def test_cli_crawl_default_jobdir(tmp_path, monkeypatch):
     """MED 修复：--jobdir 缺省时给个 data/.job/<channel>-<yyyymmdd>/ 默认值。"""
-    from youzi_bsp.cli import main
+    from app.cli import main
     import os
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("sys.argv", ["youzi_bsp", "crawl", "--seed-file", "x",
+    monkeypatch.setattr("sys.argv", ["app", "crawl", "--seed-file", "x",
                                      "--channel", "play"])
     # 不真正跑 Scrapy：检查 main() 解析时设置的 JOBDIR 默认值
     # （crawl 子命令会启动 CrawlerProcess 主循环，patch 掉让它直接返回）

@@ -1,4 +1,4 @@
-from youzi_bsp.cli import main
+from app.cli import main
 
 if __name__ == "__main__":
     main()

@@ -1,7 +1,7 @@
 """备份/恢复 roundtrip + play 代理解析（跨机器部署，2026-09-30）。"""
 import sqlite3
 
-from youzi_bsp import backup
+from app import backup
 
 
 def _seed_root(tmp_path):
@@ -58,7 +58,7 @@ def test_restore_rejects_path_traversal(tmp_path):
 
 def test_play_proxy_resolution(monkeypatch):
     """BSP_PROXY 显式（含空串强制直连）> 7890 探测 > 直连——跨机不绑本机。"""
-    from youzi_bsp import crawl_api
+    from app import crawl_api
 
     # 1) 显式代理
     monkeypatch.setenv("BSP_PROXY", "http://10.0.0.9:1080")

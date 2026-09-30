@@ -64,8 +64,11 @@ def normalize_phone(raw: str, imply_plus: bool = False) -> tuple[str, str | None
     import phonenumbers
 
     s = unquote(raw).strip()
+    # 兼容 00... / +00... 两种国际格式（前者无 + 前缀，后者带 + 但冗余）
     if s.startswith("00"):
         s = "+" + s[2:]
+    elif s.startswith("+00"):
+        s = "+" + s[3:]
     if not s.startswith("+") and imply_plus:
         s = "+" + s
     s = _SEPARATORS.sub("", s)

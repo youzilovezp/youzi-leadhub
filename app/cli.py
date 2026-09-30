@@ -1,10 +1,10 @@
-"""CLI：python -m youzi_bsp seed|crawl|stats|export。"""
+"""CLI：python -m app seed|crawl|stats|export。"""
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
 
-from youzi_bsp import db, seeds, stats
+from app import db, seeds, stats
 
 
 def _max_pages(value: str) -> int:
@@ -16,7 +16,7 @@ def _max_pages(value: str) -> int:
 
 
 def main(argv=None) -> None:
-    p = argparse.ArgumentParser(prog="youzi_bsp",
+    p = argparse.ArgumentParser(prog="app",
                                 description="WhatsApp BSP 线索获取管道（只发现不外联）")
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -123,7 +123,7 @@ def main(argv=None) -> None:
         import os
         from datetime import datetime
 
-        os.environ.setdefault("SCRAPY_SETTINGS_MODULE", "youzi_bsp.settings")
+        os.environ.setdefault("SCRAPY_SETTINGS_MODULE", "app.settings")
         from scrapy.crawler import CrawlerProcess
         from scrapy.utils.project import get_project_settings
 
@@ -164,29 +164,29 @@ def main(argv=None) -> None:
         print(f"已删除 {n} 个实体及其证据" if n else f"未找到实体: {a.entity}")
 
     elif a.cmd == "import-osm":
-        from youzi_bsp.osm_direct import import_osm
+        from app.osm_direct import import_osm
         n = import_osm(a.country, a.limit, a.db)
         print(f"OSM 直标签导入: {n} 条线索（幂等，可重复执行）")
 
     elif a.cmd == "golden-prelabel":
-        from youzi_bsp import golden
+        from app import golden
         st = golden.prelabel(Path(a.csv), Path(a.cache))
         print(f"预标注完成: 抓到 {st['fetched']} / 失败 {st['missed']} / "
               f"重放复现 {st['reproduced']}——label 列已预填建议值，"
               f"人工只需纠错改 FP")
 
     elif a.cmd == "golden-eval":
-        from youzi_bsp import golden
+        from app import golden
         print(golden.report(golden.evaluate(Path(a.csv))))
 
     elif a.cmd == "backup":
-        from youzi_bsp import backup
+        from app import backup
         out = backup.create_backup(Path(a.out) if a.out else None)
-        print(f"快照已生成: {out}\n迁移：拷到新机器 → python -m youzi_bsp "
+        print(f"快照已生成: {out}\n迁移：拷到新机器 → python -m app "
               f"restore --from {out.name}")
 
     elif a.cmd == "restore":
-        from youzi_bsp import backup
+        from app import backup
         n = backup.restore_backup(Path(a.from_archive))
         print(f"已恢复 {n} 个条目（线索库/种子池/增量进度）。"
               f"重启 API 后即可继续增量爬取。")

@@ -126,7 +126,7 @@ def _spawn(channel: str, seed_file: str, limit: int, max_pages: int,
 
     log_handle = open(log_file, "a", encoding="utf-8")
     cmd = [
-        sys.executable, "-m", "youzi_bsp", "crawl",
+        sys.executable, "-m", "app", "crawl",
         "--seed-file", seed_file,
         "--channel", channel,
         "--limit", str(limit),
@@ -218,7 +218,7 @@ def _spawn_seed(channel: str, countries: str, categories: str,
     stamp = time.strftime("%Y%m%d-%H%M%S")
     log_file = _LOGS / f"seed-{channel}-{stamp}.log"
     job_id = f"seed-{channel}-{stamp}"
-    cmd = [sys.executable, "-m", "youzi_bsp", "seed", channel,
+    cmd = [sys.executable, "-m", "app", "seed", channel,
            "--limit", str(limit), "--out", out_file, "--append"]
     if countries:
         cmd += ["--country", countries]
@@ -338,7 +338,7 @@ def _tail(path: Path | None, n: int = 30, max_bytes: int = 4096) -> str | None:
         text = raw.decode("utf-8", errors="replace")
         # 绝对路径 → 相对路径，避免内部信息泄露
         import re as _re
-        text = _re.sub(r"/[\w/.-]+/youzi_bsp/", "youzi_bsp/", text)
+        text = _re.sub(r"/[\w/.-]+/app/", "app/", text)
         text = _re.sub(r"/Users/\w+/", "~/", text)
         return text
     except OSError:

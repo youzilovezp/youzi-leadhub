@@ -11,13 +11,13 @@ import pytest
 from scrapy.exceptions import IgnoreRequest
 from scrapy.http import Request
 
-from youzi_bsp import db as dbm
-from youzi_bsp.detect import detect
-from youzi_bsp.middlewares import PrivateNetMiddleware, RetryAfterMiddleware
-from youzi_bsp.normalize import entity_key, normalize_phone, normalize_url
-from youzi_bsp.pipelines import WaStorePipeline
-from youzi_bsp.score import page_flags, score_domain
-from youzi_bsp.spider import WaSpider
+from app import db as dbm
+from app.detect import detect
+from app.middlewares import PrivateNetMiddleware, RetryAfterMiddleware
+from app.normalize import entity_key, normalize_phone, normalize_url
+from app.pipelines import WaStorePipeline
+from app.score import page_flags, score_domain
+from app.spider import WaSpider
 
 
 # =========================================================================
@@ -627,7 +627,7 @@ class TestCrawlApiBoundary:
         # 注：当前实现：job 完成后不会从 dict 移除（status='exited' 后保留）
         # 这是已知设计：便于历史查询
         # 但 spawn 1000 次 → dict 1000 项 → 内存持续增长
-        from youzi_bsp import crawl_api
+        from app import crawl_api
         before = len(crawl_api._JOBS_RUNNING)
         crawl_api._JOBS_RUNNING["test-fake"] = "fake"
         after = len(crawl_api._JOBS_RUNNING)
@@ -647,13 +647,13 @@ class TestCliBoundary:
 
     def test_cli_import_osm_command_exists(self):
         """cli import-osm 子命令是否真连了 osm_direct？"""
-        # 看 cli.py: from youzi_bsp.osm_direct import import_osm
+        # 看 cli.py: from app.osm_direct import import_osm
         # 若 osm_direct.py 有 bug → cli 也炸
-        from youzi_bsp.cli import main
+        from app.cli import main
         # 仅检查 import 不报错
-        import youzi_bsp.cli
-        import youzi_bsp.osm_direct
-        assert callable(youzi_bsp.osm_direct.import_osm)
+        import app.cli
+        import app.osm_direct
+        assert callable(app.osm_direct.import_osm)
 
 
 class TestSeedsBoundary:
@@ -662,7 +662,7 @@ class TestSeedsBoundary:
         """seeds.tranco 无重试 —— 网络抖动就死"""
         # 当前：httpx.get(...).raise_for_status() → 网络错就抛
         # 测试：仅检查函数 import + 调用签名（不实际跑网络）
-        from youzi_bsp.seeds import tranco
+        from app.seeds import tranco
         assert callable(tranco)
 
     def test_seeds_play_no_timeout_on_subprocess(self):
@@ -674,7 +674,7 @@ class TestSeedsBoundary:
     def test_seeds_osm_id_bbox_coverage(self):
         """印尼 ID 4 个 bbox 是否覆盖全印尼"""
         # 看 seeds.py _ID_BBOXES
-        from youzi_bsp.seeds import _ID_BBOXES
+        from app.seeds import _ID_BBOXES
         # 经度范围 95-141，纬度范围 -11 到 6
         # 印尼东部（如巴布亚）经度 ~141 也在范围内
         # 验证：4 个 bbox 是否无重叠且覆盖印尼群岛

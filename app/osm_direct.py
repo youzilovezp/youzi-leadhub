@@ -9,10 +9,10 @@ from __future__ import annotations
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from youzi_bsp import db
-from youzi_bsp.normalize import entity_key, normalize_phone
-from youzi_bsp.pipelines import score_pending
-from youzi_bsp.seeds import overpass_post
+from app import db
+from app.normalize import entity_key, normalize_phone
+from app.pipelines import score_pending
+from app.seeds import overpass_post
 
 # 电话来源标签优先级：contact:whatsapp 语义最强（明确是 WA 号）
 _PHONE_TAGS = ("contact:whatsapp", "contact:mobile", "phone", "contact:phone")

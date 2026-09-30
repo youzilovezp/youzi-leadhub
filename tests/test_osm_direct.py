@@ -1,7 +1,7 @@
 """OSM 直标签导入纯变换测试（无网络）。"""
 from pathlib import Path
 
-from youzi_bsp.osm_direct import elements_to_rows
+from app.osm_direct import elements_to_rows
 
 
 def test_elements_to_rows_variants():
@@ -32,9 +32,9 @@ def test_import_osm_preserves_crawled_signals(tmp_path, monkeypatch):
     """P1 修复（2026-09-28）：import-osm 不得用空 flags 覆盖已爬取的 p0/分数
     （ICP/developer_name 等持久化信号保留），且补齐 market_group——导入打分改走
     close_spider 同款 DB 派生路径（score_pending）。"""
-    import youzi_bsp.osm_direct as od
-    from youzi_bsp import db as dbm
-    from youzi_bsp.pipelines import WaStorePipeline
+    import app.osm_direct as od
+    from app import db as dbm
+    from app.pipelines import WaStorePipeline
 
     FIX = Path(__file__).parent / "fixtures"
     dbp = str(tmp_path / "leads.db")

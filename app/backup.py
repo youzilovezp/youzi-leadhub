@@ -1,7 +1,7 @@
 """数据快照备份/恢复（跨机器部署，2026-09-30）。
 
 迁移语义：代码走 git，数据走快照——新机器 `git clone` + `pip install` +
-`python -m youzi_bsp restore --from backup.tar.gz` 即完整复活（线索库、
+`python -m app restore --from backup.tar.gz` 即完整复活（线索库、
 种子池、增量进度 JOBDIR、金标准标注全部在包里）。
 
 一致性：SQLite 用 conn.backup() 出快照——WAL 活写（API 服务在跑）下也正确，

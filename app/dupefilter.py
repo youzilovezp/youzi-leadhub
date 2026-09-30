@@ -22,7 +22,7 @@ from __future__ import annotations
 from scrapy.utils.request import RequestFingerprinter
 from scrapy.utils.request import fingerprint as _scrapy_fp
 
-from youzi_bsp.normalize import normalize_url
+from app.normalize import normalize_url
 
 
 class YouziUrlFingerprinter(RequestFingerprinter):

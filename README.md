@@ -54,14 +54,14 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 ```bash
 # 旧机器：打包（SQLite 一致性快照，API 运行中执行也安全）
-python -m youzi_bsp backup
+python -m app backup
 # → data/backup-<时间戳>.tar.gz（线索库 + 种子池 + JOBDIR 增量进度 + 金标准标注）
 
 # 新机器：复活全部状态
 git clone <repo> && cd youzi-leadhub
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-python -m youzi_bsp restore --from backup-<时间戳>.tar.gz   # 先停 API/爬取进程
-.venv/bin/uvicorn youzi_bsp.api:app --host 0.0.0.0 --port 8788   # 必须从仓库根目录启动
+python -m app restore --from backup-<时间戳>.tar.gz   # 先停 API/爬取进程
+.venv/bin/uvicorn app.api:app --host 0.0.0.0 --port 8788   # 必须从仓库根目录启动
 ```
 
 恢复后增量爬取语义连续（JOBDIR 的 requests.seen 一起迁移，不会全量重爬）。
@@ -73,22 +73,22 @@ python -m youzi_bsp restore --from backup-<时间戳>.tar.gz   # 先停 API/爬�
 
 ```bash
 # 1) 生成种子
-.venv/bin/python -m youzi_bsp seed tranco --top 2000
-.venv/bin/python -m youzi_bsp seed myshopify --limit 2000
-.venv/bin/python -m youzi_bsp seed play --country id --category BUSINESS --limit 200   # 输出带 developer_name
-.venv/bin/python -m youzi_bsp seed osm --country MY,TH,PH,ID --limit 500
-.venv/bin/python -m youzi_bsp seed sample --file your-list.txt
+.venv/bin/python -m app seed tranco --top 2000
+.venv/bin/python -m app seed myshopify --limit 2000
+.venv/bin/python -m app seed play --country id --category BUSINESS --limit 200   # 输出带 developer_name
+.venv/bin/python -m app seed osm --country MY,TH,PH,ID --limit 500
+.venv/bin/python -m app seed sample --file your-list.txt
 
 # 2) 分渠道爬取（礼貌：robots / 自动限速 / 每站 ≤5 页 / 2MB 截断 / 8s 超时）
-.venv/bin/python -m youzi_bsp crawl --seed-file data/seeds-play.txt --channel play --limit 6038
+.venv/bin/python -m app crawl --seed-file data/seeds-play.txt --channel play --limit 6038
 # 断点续跑：--jobdir 缺省时落到 data/.job/<channel>-<yyyymmdd-HHMMSS>/
 
 # 3) 命中率统计 + CSV 导出（market_group / developer_name / widget / email 都进 CSV）
-.venv/bin/python -m youzi_bsp stats
-.venv/bin/python -m youzi_bsp export --out data/leads.csv
+.venv/bin/python -m app stats
+.venv/bin/python -m app export --out data/leads.csv
 
 # 4) GDPR 删除响应（合规 §7.4 必选）
-.venv/bin/python -m youzi_bsp forget --entity example.com
+.venv/bin/python -m app forget --entity example.com
 ```
 
 ## 数据模型（SQLite，PG 兼容三表 + 迁移列）
@@ -160,11 +160,11 @@ sighting(entity_key, e164, url, layer, first_seen, last_seen)   -- 多对多 + �
 
 要复现 v7 baseline，重跑：
 ```bash
-.venv/bin/python -m youzi_bsp seed play --country id,br,mx,ph,th,vn \
+.venv/bin/python -m app seed play --country id,br,mx,ph,th,vn \
      --category BUSINESS,SHOPPING,COMMUNICATION --limit 150 --out data/seeds-play.txt
-.venv/bin/python -m youzi_bsp crawl --seed-file data/seeds-play.txt \
+.venv/bin/python -m app crawl --seed-file data/seeds-play.txt \
      --channel play --limit 6038
-.venv/bin/python -m youzi_bsp stats
+.venv/bin/python -m app stats
 ```
 
 ## 文档与代码一致性

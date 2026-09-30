@@ -1,6 +1,6 @@
 """只读 API（FastAPI 轮子）：/api/stats、/api/leads + 静态托管前端产物。
 
-启动：BSP_DB=data/leads.db uvicorn youzi_bsp.api:app --port 8788（8787 常被本机 Docker 占用）
+启动：BSP_DB=data/leads.db uvicorn app.api:app --port 8788（8787 常被本机 Docker 占用）
 """
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from youzi_bsp import db, stats
-from youzi_bsp.crawl_api import router as crawl_router
+from app import db, stats
+from app.crawl_api import router as crawl_router
 
 DB_PATH = os.environ.get("BSP_DB", "data/leads.db")
 

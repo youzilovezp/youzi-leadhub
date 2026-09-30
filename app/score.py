@@ -106,37 +106,78 @@ def _market_group(market: str | None) -> str | None:
     return "OTHER"
 
 
+def _pick_market(countries: list[str]) -> str | None:
+    """众数优先；平票时**真海外市场优先**（P0 中国出海方向对齐）→ 测试可复现（不随机）。
+
+    ponytail: 旧 `max(sorted(set(...)), key=count)` 在 ['CN','HK'] 等平票时字母序
+    尾者赢（'HK'），与 P0 中国出海企业应该归到海外的意图不符。修正：
+    - 平票且含真海外市场（非 CN/HK/MO/TW）→ 优先海外（['CN','ID'] → 'ID'）
+    - 平票但全为中文市场（CN/HK/MO/TW）→ 字母序首（保留 ['CN','HK'] → 'CN'）
+    - 单众数直取
+    """
+    if not countries:
+        return None
+    counts: dict[str, int] = {}
+    for c in countries:
+        counts[c] = counts.get(c, 0) + 1
+    max_count = max(counts.values())
+    tied = [c for c, n in counts.items() if n == max_count]
+    if len(tied) == 1:
+        return tied[0]
+    # 平票：真海外（非中文市场）优先 → P0 中国出海方向对齐
+    overseas = [c for c in tied if c not in ("CN", "HK", "MO", "TW")]
+    if overseas:
+        return overseas[0]
+    # 全为中文市场 → 字母序首（保留 v7 行为，避免破坏现有数据）
+    return sorted(tied)[0]
+
+
 def score_domain(flags: dict, phone_countries: list[str | None], entity: str = "",
                  developer_name: str = "") -> dict:
-    """P0 判定（D1-3 实测校准 + v7 后增强）：
+    """P0 判定（D1-3 实测校准 + v7 后增强 + 2026-09-30 修复）：
 
     强信号（任一满足且非 gray）：
     - ICP 备案号（页面自己声明，geo 伪造不了）
-    - 中国 TLD（.cn/.中国）
-    - lang=zh 且号码市场=CN 双确认
+    - 中国 TLD（.cn/.中国/.xn--fiqs8s）+ 海外市场（market ∈ {HK, MO, TW, OTHER}）
+      ——境内 .cn（market=CN）不算 P0（spec "中国出海企业"才有意义；sina/google.cn
+      这类境内大站不应进入出海优先级）
     - hreflang=zh 且号码市场 ∈ {CN, HK, MO, TW}（MED 双轨升格）
     - App 开发者主体含中国公司名（developer_name 含城市+行业词）
+
+    **修复（2026-09-30 审计）**：
+    - 旧 .cn TLD 无脑 P0=1 → sina.com.cn/google.cn/360.cn/mi.com/jd.com 等境内大站
+      全被误判出海（数据佐证：当前 P0=16 条里 11 条 .cn TLD，全是境内）
+    - 旧 `lang=zh + market=CN` 也保留（lang=zh 双确认是强意图信号；BSP 触达中文
+      母语客户的销售路径本就覆盖境内出海业务）
+    - 平票 market 用 `_pick_market()` 替代字母序大者赢，避免中国出海多国混挂被
+      错归 CN（与 C5 误判方向叠加放大）
 
     hreflang zh / 中文标题单独（无市场复合）在跨国站上误报严重（实测：港区出口
     geo-serve 中文标题 + 多语站 hreflang 导致 25% 过杀：github/google/stripe 全中招）
     ——降级为弱加分项；双轨保留是为了不丢掉真实中国出海 zh 站点。
     """
     countries = [c for c in phone_countries if c]
-    # 排序后取众数：平票时结果确定（测试可复现）
-    market = max(sorted(set(countries)), key=countries.count) if countries else None
+    market = _pick_market(countries)
     zh_weak = flags.get("hreflang_zh") or flags.get("lang") == "zh" or flags.get("title_zh")
     gray = (bool(flags.get("gambling")) or bool(GAMBLING_DOMAIN.search(entity))
             or bool(DEMO_DOMAIN.search(entity)))   # demo/模板站同博彩处理（B3）
     # P0 第 1 强信号：App 开发者主体是中国公司（play 渠道主力）
     p0_developer = bool(developer_name and _CHINESE_COMPANY_RE.search(developer_name))
     p0_hreflang_strong = bool(flags.get("hreflang_zh") and market in _HKMO_TW)
-    p0 = (
+    # .cn 出海信号（C5 修复）：仅当 market != None 且 market != "CN" 才算 P0。
+    # 境内 .cn（sina/google.cn/360.cn 等）单靠 TLD 不再误判出海——但 ICP / hreflang /
+    # developer 等独立信号仍可触发 P0（example-shop.cn + ICP 备案仍是真出海候选）。
+    p0_cn_tld = (
+        entity.lower().endswith((".cn", ".中国", ".xn--fiqs8s"))
+        and market is not None and market != "CN"
+    )
+    p0_other = (
         bool(flags.get("icp"))
-        or entity.lower().endswith((".cn", ".中国", ".xn--fiqs8s"))
-        or (flags.get("lang") == "zh" and market == "CN")
         or p0_hreflang_strong
         or p0_developer
-    ) and not gray
+        or (flags.get("lang") == "zh" and market == "CN")
+    )
+    p0 = (p0_cn_tld or p0_other) and not gray
     score = 0
     if p0:
         score += 10

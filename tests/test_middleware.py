@@ -3,7 +3,7 @@ import pytest
 from scrapy.exceptions import IgnoreRequest
 from scrapy.http import Request
 
-from youzi_bsp.middlewares import PrivateNetMiddleware
+from app.middlewares import PrivateNetMiddleware
 
 # 审计实测的绕过姿势：十进制/十六/八进制 IP 编码、IPv4-mapped IPv6、
 # 链路本地 IPv6、CGNAT（云元数据段），加上经典私网段
@@ -54,7 +54,7 @@ from types import SimpleNamespace
 from scrapy.http import Response
 from scrapy.settings import Settings
 
-from youzi_bsp.middlewares import RetryAfterMiddleware
+from app.middlewares import RetryAfterMiddleware
 
 
 class _Slot:

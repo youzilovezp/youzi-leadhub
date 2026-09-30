@@ -1,7 +1,7 @@
 """WaSpider 页面预算回归：D2 审计 #1——首页联系链接数不得超过每站预算。"""
 from scrapy.http import HtmlResponse, Request
 
-from youzi_bsp.spider import WaSpider
+from app.spider import WaSpider
 
 # 首页 8 个不同联系链接 + 2 个归一化后重复的变体（尾斜杠/UTM）
 _LINKS = [f"https://x.com/contact{i}" for i in range(8)] + [

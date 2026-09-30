@@ -1,7 +1,7 @@
 """金标准集工具测试（B4，2026-09-28）：预标注回填 + 指标裁决，全离线。"""
 import csv
 
-from youzi_bsp import golden
+from app import golden
 
 FIELDS = ["type", "entity", "evidence_url", "phone", "layer", "label", "notes"]
 

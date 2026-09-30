@@ -74,6 +74,19 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "market_group" not in cols:
         conn.execute("ALTER TABLE domain ADD COLUMN market_group TEXT")    # 市场分组标签
 
+    # 2026-09-30 付费扩展性预留：5 列，零业务影响；接入第一个付费 API 时直接读
+    # enrichment_status / contact_email / tech_signals / outreach_message，不动 schema
+    if "enrichment_status" not in cols:
+        conn.execute("ALTER TABLE domain ADD COLUMN enrichment_status TEXT NOT NULL DEFAULT 'none'")
+    if "enriched_at" not in cols:
+        conn.execute("ALTER TABLE domain ADD COLUMN enriched_at TEXT")
+    if "contact_email" not in cols:
+        conn.execute("ALTER TABLE domain ADD COLUMN contact_email TEXT")  # 付费 API 补全企业邮箱（与 email=mailto 语义不同）
+    if "tech_signals" not in cols:
+        conn.execute("ALTER TABLE domain ADD COLUMN tech_signals TEXT")    # JSON：cms/ecommerce/cdn 等（BuiltWith/Wappalyzer 接入）
+    if "outreach_message" not in cols:
+        conn.execute("ALTER TABLE domain ADD COLUMN outreach_message TEXT")  # LLM 开场白草稿（D6+）
+
     # E2 fix: 索引补充（按 v7 spec 高频查询路径）
     # 单条 ALTER 后即时建索引——>10k 行后无索引会让 /api/leads 按 market_group 扫表
     conn.execute("CREATE INDEX IF NOT EXISTS idx_domain_market_group ON domain(market_group)")

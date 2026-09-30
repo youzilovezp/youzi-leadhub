@@ -15,7 +15,7 @@ from scrapy import Request
 from scrapy.linkextractors import LinkExtractor
 from scrapy.spiders import Spider
 
-from youzi_bsp.normalize import entity_key, normalize_url
+from app.normalize import entity_key, normalize_url
 
 # 多语联系语义（报告 3.3）：英文/德/西/印尼/越南/阿语常见"联系"词根
 CONTACT_WORDS = (
