@@ -21,13 +21,13 @@ def main(argv=None) -> None:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("seed", help="生成种子文件到 data/")
-    s.add_argument("channel", choices=["tranco", "myshopify", "play", "osm", "sample"])
+    s.add_argument("channel", choices=["tranco", "myshopify", "play", "itunes", "osm", "sample"])
     s.add_argument("--top", type=int, default=2000, help="tranco: top N")
-    s.add_argument("--limit", type=int, default=2000, help="myshopify/play/osm: 数量上限")
+    s.add_argument("--limit", type=int, default=2000, help="myshopify/play/itunes/osm: 数量上限")
     s.add_argument("--country", default="id",
-                   help="play/osm: 国家码逗号分隔（play: id/br/mx；osm: MY,TH,PH）")
+                   help="play/itunes/osm: 国家码逗号分隔（play: id/br/mx；osm: MY,TH,PH）")
     s.add_argument("--category", default="BUSINESS",
-                   help="play: 类目（BUSINESS/SHOPPING/COMMUNICATION）")
+                   help="play/itunes: 类目（BUSINESS/SHOPPING/COMMUNICATION/FOOD_AND_DRINK）")
     s.add_argument("--crawl-id", default=None, help="myshopify: CC 档期 id，默认最新")
     s.add_argument("--file", default=None, help="sample: URL/域名清单文件")
     s.add_argument("--out", default=None)
@@ -97,6 +97,8 @@ def main(argv=None) -> None:
             seeds.myshopify(a.limit, out, a.crawl_id)
         elif a.channel == "play":
             seeds.play(a.country, a.category, a.limit, out)
+        elif a.channel == "itunes":
+            seeds.itunes(a.country, a.category, a.limit, out)
         elif a.channel == "osm":
             seeds.osm(a.country, a.limit, out)
         else:

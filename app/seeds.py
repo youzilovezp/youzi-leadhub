@@ -179,6 +179,74 @@ def sample(src: str, out: Path) -> Path:
     return _write(out, urls)
 
 
+# App Store 类目 ID（legacy iTunes RSS genre 参数；实测 6000=Business、6024=Shopping）
+# token 与 play 类目同名（场景 plans 复用同一套 token，映射不到的跳过）
+_ITUNES_GENRE = {
+    "BUSINESS": "6000",
+    "SHOPPING": "6024",
+    "FINANCE": "6015",
+    "FOOD_AND_DRINK": "6023",
+    "PRODUCTIVITY": "6007",
+    "COMMUNICATION": "6005",
+    "LIFESTYLE": "6012",
+    "TRAVEL": "6009",
+}
+
+
+def itunes(countries: str, categories: str, limit: int, out: Path) -> Path:
+    """iOS App Store 渠道（2026-10-01 燃料救火主力）：
+
+    legacy iTunes RSS top-free 榜单（国家×类目，官方免费无 key）→ app id →
+    Lookup API sellerUrl（开发者自填官网）+ sellerName（法律主体名，P0 第 1 强
+    信号——与 play 的 developerName 同语义）。种子行与 play 同格式
+    URL<TAB>主体名，spider 无需改动。与 play 互补：独享 iOS 商家池、无 Node
+    依赖（纯 httpx）。sellerUrl 未填的 app 跳过；host 级去重（一开发者多 app
+    只进池一次——实测 GoPay/Tokopedia 同主体多 app 刷榜）。
+    """
+    import time
+    from app.normalize import entity_key
+
+    codes = [c.strip().lower() for c in countries.split(",") if c.strip()]
+    genre_ids = [g for g in (_ITUNES_GENRE.get(t.strip().upper())
+                             for t in categories.split(",")) if g]
+    proxy = _cn_proxy()
+    headers = {"User-Agent": _UA}
+    per = max(min(limit // max(len(codes), 1), 200), 10)
+    lines: list[str] = []
+    seen_hosts: set[str] = set()
+    for cc in codes:
+        ids: list[str] = []
+        for gid in genre_ids or [None]:
+            base = f"https://itunes.apple.com/{cc}/rss/topfreeapplications/limit={per}"
+            url = f"{base}/genre={gid}/json" if gid else f"{base}/json"
+            r = httpx.get(url, timeout=30, headers=headers, proxy=proxy,
+                          follow_redirects=True)
+            r.raise_for_status()
+            entries = r.json().get("feed", {}).get("entry") or []
+            if isinstance(entries, dict):    # 单条结果 Apple 返回对象非数组
+                entries = [entries]
+            ids.extend(e["id"]["attributes"]["im:id"] for e in entries)
+            time.sleep(1)                    # 免费端点礼貌间隔
+        for i in range(0, len(ids), 100):    # Lookup 批量 ≤100 ids/请求
+            r = httpx.get(f"https://itunes.apple.com/lookup?id={','.join(ids[i:i+100])}&country={cc}",
+                          timeout=30, headers=headers, proxy=proxy,
+                          follow_redirects=True)
+            r.raise_for_status()
+            for app in r.json().get("results", []):
+                w = (app.get("sellerUrl") or "").strip()
+                if not w.startswith("http"):
+                    continue
+                host = (urlsplit(w).hostname or "").lower()
+                key = entity_key(host) if host else ""
+                if not key or key in seen_hosts:
+                    continue
+                seen_hosts.add(key)
+                name = (app.get("sellerName") or "").strip()
+                lines.append(f"{w}\t{name}" if name else w)
+            time.sleep(1)
+    return _write(out, lines)
+
+
 # Overpass 公共端点（免费、限速；CN 网络如被拒走 HTTPS_PROXY）
 _OVERPASS = "https://overpass-api.de/api/interpreter"
 

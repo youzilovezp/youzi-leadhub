@@ -137,16 +137,20 @@ def test_post_seeds_spawns_append_job(monkeypatch, tmp_path):
                         lambda cmd, **k: cmds.append(cmd)
                         or type("P", (), {"pid": 42, "poll": lambda self: None})())
     out = crawl_api.post_seeds(crawl_api.SeedsRequest(scene="latam_ecom"))
-    # latam_ecom 含 play + osm 两个 plan → 两条 cmd
-    assert len(cmds) == 2
+    # latam_ecom 含 play + itunes + osm 三个 plan → 三条 cmd
+    assert len(cmds) == 3
     play_cmd = " ".join(next(c for c in cmds if "play" in c))
     osm_cmd = " ".join(next(c for c in cmds if "osm" in c))
+    itunes_cmd = " ".join(next(c for c in cmds if "itunes" in c))
     assert "--append" in play_cmd and "--country" in play_cmd
     assert "br,mx" in play_cmd and "SHOPPING" in play_cmd
     assert "--append" in osm_cmd and "--country" in osm_cmd
+    # itunes 与 play 同为 App 渠道：按类目分榜取种子
+    assert "--append" in itunes_cmd and "--category" in itunes_cmd
+    assert "SHOPPING" in itunes_cmd
     # 返回结构：scene + jobs + targets
     assert out["scene"]["id"] == "latam_ecom"
-    assert len(out["jobs"]) == 2
+    assert len(out["jobs"]) == 3
     assert all(j["status"] == "running" for j in out["jobs"])
     # 清掉 fake job 避免 id_food 因 osm busy 撞 409
     crawl_api._JOBS_RUNNING.clear()
@@ -154,10 +158,11 @@ def test_post_seeds_spawns_append_job(monkeypatch, tmp_path):
     with pytest.raises(HTTPException) as e:
         crawl_api.post_seeds(crawl_api.SeedsRequest(scene="nope"))
     assert e.value.status_code == 400
-    # 单渠道场景（id_food 只含 osm）→ 一条 cmd
+    # id_food 场景（osm + itunes）→ 两条 cmd
     cmds.clear()
     crawl_api.post_seeds(crawl_api.SeedsRequest(scene="id_food"))
-    assert len(cmds) == 1 and "osm" in cmds[0]
+    assert len(cmds) == 2 and any("osm" in c for c in cmds) \
+        and any("itunes" in c for c in cmds)
 
 
 def test_get_scenes_returns_business_scenes():
@@ -168,9 +173,9 @@ def test_get_scenes_returns_business_scenes():
     for s, item in zip(SCENES, out):
         assert item["id"] == s.id
         assert item["label"] == s.label
-        # 每场景含 1-2 渠道
-        assert 1 <= len(item["channels"]) <= 2
-        assert set(item["channels"]).issubset({"play", "osm"})
+        # 每场景含 1-3 渠道（play/itunes/osm）
+        assert 1 <= len(item["channels"]) <= 3
+        assert set(item["channels"]).issubset({"play", "itunes", "osm"})
 
 
 def test_post_seeds_busy_channel_409(monkeypatch, tmp_path):
@@ -233,11 +238,11 @@ def test_post_seeds_play_no_country_multiplier(monkeypatch, tmp_path):
                         lambda cmd, **k: cmds.append(cmd)
                         or type("P", (), {"pid": 42, "poll": lambda self: None})())
     crawl_api._JOBS_RUNNING.clear()
-    # sea_smb: play 5 国, per_country=150
+    # sea_smb: play 5 国, per_country=250（2026-10-01 燃料扩容 150→250）
     crawl_api.post_seeds(crawl_api.SeedsRequest(scene="sea_smb"))
     play_cmd = " ".join(next(c for c in cmds if "play" in c))
-    # 关键断言：--limit 应是 per_country=150，不是 150 × 5 = 750
-    assert "--limit 150" in play_cmd, f"play --limit 错误（应=per_country=150）: {play_cmd}"
+    # 关键断言：--limit 应是 per_country=250，不是 250 × 5 = 1250
+    assert "--limit 250" in play_cmd, f"play --limit 错误（应=per_country=250）: {play_cmd}"
 
 
 def test_post_crawl_toctou_lock(monkeypatch, tmp_path):
@@ -572,9 +577,29 @@ def test_post_crawl_smart_all_busy_idempotent_200(monkeypatch):
     """Q14 幂等合并：smart 全忙 → 200 + hint（点正在跑的批次不是错误）。"""
     crawl_api._JOBS_RUNNING["inc-play"] = _fake_job("play")
     crawl_api._JOBS_RUNNING["inc-osm"] = _fake_job("osm")
+    crawl_api._JOBS_RUNNING["inc-itunes"] = _fake_job("itunes")
     out = crawl_api.post_crawl(crawl_api.CrawlRequest(mode="smart"))
     assert out["total"] == 0 and out["spawned"] == []
-    assert len(out["skipped"]) == 2 and "进行中" in out["hint"]
+    assert len(out["skipped"]) == 3 and "进行中" in out["hint"]
+
+
+def test_smart_expand_scene_covers_itunes(tmp_path, monkeypatch):
+    """2026-10-01 新渠道 itunes 进智能补种：itunes 池尽时场景轮换能选到覆盖
+    它的场景并 spawn（--country/--category 参数与 play 同通道）。"""
+    spawns = []
+    monkeypatch.setattr(crawl_api, "_SMART_ROTATION", tmp_path / ".smart-rotation")
+    monkeypatch.setattr(crawl_api, "_pick_seed", lambda ch: f"data/seeds-{ch}.txt")
+    monkeypatch.setattr(crawl_api._db, "seed_fail_streaks",
+                        lambda conn, window=3: {})
+
+    def fake_seed(channel, countries, categories, limit, out_file):
+        spawns.append((channel, countries, categories))
+        return _fake_seed_job(channel)
+    monkeypatch.setattr(crawl_api, "_spawn_seed", fake_seed)
+    got = crawl_api._smart_expand_scene(seed_channels={"itunes"})
+    assert [j.channel for j in got] == ["itunes"]
+    ch, countries, categories = spawns[0]
+    assert ch == "itunes" and countries and categories, (ch, countries, categories)
 
 
 def test_post_crawl_smart_starved_seeds_crawlable_crawls(monkeypatch, tmp_path):

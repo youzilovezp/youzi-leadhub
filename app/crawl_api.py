@@ -44,11 +44,14 @@ _JOBS.mkdir(parents=True, exist_ok=True)
 # （84% 是 Shopify 默认 hash 子域 → test/abandoned 店），远低于 play 12% 和 osm 52%。
 # 智能爬取不再自动 spawn myshopify；手工仍可 `python -m app seed myshopify`
 # 单独跑（CLI 兜底），但不在一键列表里。
-ALL_CHANNELS = ("play", "osm", "sample")
+# 2026-10-01 新增 itunes：iOS App Store RSS 榜 → Lookup sellerUrl（免费无 key，
+# 无 Node 依赖）——play 图头部静止（13 次补种 0 新 URL）后的第二 App 渠道主力。
+ALL_CHANNELS = ("play", "osm", "itunes", "sample")
 # 渠道 → 默认种子文件映射；sample 渠道需用户传 --file 故不在一键列表
 SEEDS_DEFAULT: dict[str, str] = {
     "play":      "data/seeds-play.txt",         # 兜底；如有 seeds-play-new.txt 自动优先
     "osm":       "data/seeds-osm.txt",
+    "itunes":    "data/seeds-itunes.txt",
 }
 
 # S1 fix: 中国大陆/港澳台落独立 CN 组（之前都落 OTHER，对 P0 销售分组误导）
@@ -114,6 +117,8 @@ def _pick_seed(channel: str) -> str | None:
         candidates = ["data/seeds-myshopify.txt"]
     elif channel == "osm":
         candidates = ["data/seeds-osm.txt"]
+    elif channel == "itunes":
+        candidates = ["data/seeds-itunes.txt"]
     elif channel == "sample":
         # sample = 手工/测试清单：支持 API 触发（QA 离线端到端走这条路）
         candidates = ["data/seeds-sample.txt"]
@@ -289,8 +294,8 @@ def _spawn_seed(channel: str, countries: str, categories: str,
            "--limit", str(limit), "--out", out_file, "--append"]
     if countries:
         cmd += ["--country", countries]
-    if channel == "play":
-        cmd += ["--category", categories]
+    if channel in ("play", "itunes"):
+        cmd += ["--category", categories]   # 两个 App 渠道都按类目分榜取种子
     log_handle = open(log_file, "a", encoding="utf-8")
     # CN 出口直连 Google Play 超时（docs 3.2）：play 的 node 脚本需要
     # NODE_USE_ENV_PROXY=1 + 代理才走 proxy。代理来源 _play_proxy()——
@@ -519,6 +524,8 @@ def _seed_candidates(channel: str) -> list[Path]:
         names = ["data/seeds-myshopify.txt"]
     elif channel == "osm":
         names = ["data/seeds-osm.txt"]
+    elif channel == "itunes":
+        names = ["data/seeds-itunes.txt"]
     elif channel == "sample":
         names = ["data/seeds-sample.txt"]   # 手工/测试清单：QA 离线端到端入口
     else:
@@ -744,6 +751,8 @@ def _smart_expand_scene(seed_channels: set[str]) -> list[JobInfo]:
             countries, categories, limit = "id,th,vn,ph,my", "", 200
         elif ch == "play":
             countries, categories, limit = "id,br,mx", "BUSINESS,SHOPPING", 150
+        elif ch == "itunes":
+            countries, categories, limit = "id,br,mx", "BUSINESS,SHOPPING", 200
         else:
             countries, categories, limit = "", "", 500
         job = _spawn_seed(ch, countries, categories, limit, target)

@@ -691,6 +691,60 @@ class TestCliBoundary:
 
 class TestSeedsBoundary:
 
+    def test_seeds_itunes_rss_to_seller_url_chain(self):
+        """2026-10-01 新渠道 itunes（燃料救火主力）：legacy iTunes RSS 榜单
+        （国家×类目，免费无 key）→ Lookup API sellerUrl（开发者官网）+
+        sellerName（P0 主体名信号）。种子行与 play 同格式 URL<TAB>名字。
+        验证：host 级去重（连锁/多 app 同站）、无 sellerUrl 跳过。
+        """
+        from unittest.mock import MagicMock, patch
+        from app.seeds import itunes
+
+        def fake_get(url, *a, **k):
+            if "/rss/topfreeapplications" in url:
+                payload = {"feed": {"entry": [
+                    {"id": {"attributes": {"im:id": "6446321594"}},
+                     "im:name": {"label": "GoPay"}},
+                    {"id": {"attributes": {"im:id": "111"}},
+                     "im:name": {"label": "NoSite"}},
+                    {"id": {"attributes": {"im:id": "222"}},
+                     "im:name": {"label": "ShopA"}},
+                    {"id": {"attributes": {"im:id": "333"}},
+                     "im:name": {"label": "ShopB"}},
+                ]}}
+            else:  # lookup 批量
+                def app(aid, url=None, name="Dev Inc"):
+                    r = {"trackId": int(aid), "sellerName": name}
+                    if url:
+                        r["sellerUrl"] = url
+                    return r
+                payload = {"results": [
+                    app("6446321594", "http://www.gopay.co.id",
+                        "PT. GOTO GOJEK TOKOPEDIA TBK"),
+                    app("111"),                       # 未填官网 → 跳过
+                    app("222", "https://shop.example.com/", "ShopA Pte Ltd"),
+                    app("333", "https://shop.example.com/app", "ShopB Pte Ltd"),
+                ]}
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = payload
+            resp.raise_for_status.return_value = None
+            return resp
+
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "seeds-itunes.txt"
+            with patch("httpx.get", side_effect=fake_get), \
+                 patch("app.seeds._cn_proxy", lambda: None), \
+                 patch("time.sleep"):
+                itunes("id", "BUSINESS", 100, out)
+            lines = out.read_text(encoding="utf-8").splitlines()
+
+        assert lines == [
+            "http://www.gopay.co.id\tPT. GOTO GOJEK TOKOPEDIA TBK",
+            "https://shop.example.com/\tShopA Pte Ltd",   # 同 host 只留第一条
+        ], lines
+
     def test_seeds_tranco_no_retry_on_failure(self):
         """seeds.tranco 无重试 —— 网络抖动就死"""
         # 当前：httpx.get(...).raise_for_status() → 网络错就抛
