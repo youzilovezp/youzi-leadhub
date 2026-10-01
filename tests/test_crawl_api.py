@@ -490,6 +490,8 @@ def _fake_seed_job(channel="play", status="running"):
 def test_smart_expand_scene_rotates(tmp_path, monkeypatch):
     """定向补种：只 spawn 池尽渠道的计划；轮换指针落在 data/ 内可随库迁移。"""
     calls = []
+    (tmp_path / "data").mkdir(exist_ok=True)   # _CWD 隔离（_channel_busy DB 兜底）
+    monkeypatch.setattr(crawl_api, "_CWD", tmp_path)
     monkeypatch.setattr(crawl_api, "_SMART_ROTATION", tmp_path / ".smart-rotation")
     monkeypatch.setattr(crawl_api, "_spawn_seed",
                         lambda ch, c, cat, lim, out: calls.append(ch)
@@ -511,6 +513,8 @@ def test_smart_expand_scene_rotates(tmp_path, monkeypatch):
 
 def test_smart_expand_scene_skips_when_seed_running(tmp_path, monkeypatch):
     """已有 seed job 在跑 → 跳过本轮（防重复打 Google Play/Overpass）。"""
+    (tmp_path / "data").mkdir(exist_ok=True)   # _CWD 隔离（_channel_busy DB 兜底）
+    monkeypatch.setattr(crawl_api, "_CWD", tmp_path)
     monkeypatch.setattr(crawl_api, "_SMART_ROTATION", tmp_path / ".smart-rotation")
     boom = lambda *a, **k: pytest.fail("不应再 spawn")
     monkeypatch.setattr(crawl_api, "_spawn_seed", boom)
@@ -523,6 +527,8 @@ def test_smart_expand_scene_fallback_covers_myshopify(tmp_path, monkeypatch):
     没人补。智能爬取时若只 myshopify starved → 走兜底 spawn（country=''/category=''
     ——CDX 通配 *.myshopify.com，不需要）。"""
     spawns = []
+    (tmp_path / "data").mkdir(exist_ok=True)   # _CWD 隔离（_channel_busy DB 兜底）
+    monkeypatch.setattr(crawl_api, "_CWD", tmp_path)
     monkeypatch.setattr(crawl_api, "_SMART_ROTATION", tmp_path / ".smart-rotation")
     monkeypatch.setattr(crawl_api, "_pick_seed",
                         lambda ch: f"data/seeds-{ch}.txt")
@@ -613,6 +619,10 @@ def test_smart_expand_scene_covers_itunes(tmp_path, monkeypatch):
     """2026-10-01 新渠道 itunes 进智能补种：itunes 池尽时场景轮换能选到覆盖
     它的场景并 spawn（--country/--category 参数与 play 同通道）。"""
     spawns = []
+    # _CWD 必须隔离：_channel_busy 的 DB 兜底会查 job 表——不隔离时读到真实
+    # 库里正在跑的任务（如线上 itunes seed），渠道被误判 busy → 测试随生产波动
+    (tmp_path / "data").mkdir(exist_ok=True)
+    monkeypatch.setattr(crawl_api, "_CWD", tmp_path)
     monkeypatch.setattr(crawl_api, "_SMART_ROTATION", tmp_path / ".smart-rotation")
     monkeypatch.setattr(crawl_api, "_pick_seed", lambda ch: f"data/seeds-{ch}.txt")
     monkeypatch.setattr(crawl_api._db, "seed_fail_streaks",

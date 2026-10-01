@@ -1000,14 +1000,15 @@ def get_crawl_status():
     """job 状态 + 渠道健康（Q5/Q13：job 表单一事实源，API 重启不丢）。
 
     返回 {jobs: [...], health: {channel: 连续补种失败次数}}。
-    health 只在 streak≥3 时出现该渠道（前端横幅据此冒头，一次成功即消）。
+    health 只报**近 2 小时内**连败 ≥3 的渠道（当前事故语义——旧失败不永久挂
+    横幅；补种每 30 分钟自动重试，恢复即消）。
     """
     _reap_pass()  # 有人看板时顺带收割，降低收割线程 5s 延迟的体感
     try:
         conn = _db.connect(str(_CWD / "data" / "leads.db"))
         try:
             jobs = _db.list_jobs(conn, 100)
-            health = _db.seed_fail_streaks(conn)
+            health = _db.seed_fail_streaks(conn, within_seconds=2 * 3600)
         finally:
             conn.close()
     except Exception:

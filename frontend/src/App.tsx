@@ -987,14 +987,14 @@ export default function App() {
           </div>
         )}
 
-        {/* Q7/Q13 分级冒头：某渠道连续 3 次补种失败才亮（一次成功即消）——
-            黑盒≠静默空转，销售需要知道「为什么点了不涨」 */}
+        {/* Q7/Q13 分级冒头：只在**近 2 小时内**连败 ≥3 才亮（当前事故语义；
+            旧的失败记录不永久挂横幅——每 30 分钟自动重试，恢复即消） */}
         {Object.keys(health).length > 0 && (
-          <Alert variant="destructive">
+          <Alert>
             <AlertCircle className="size-4" />
             <AlertDescription>
-              {Object.entries(health).map(([ch, n]) => `${ch} 补种连续失败 ${n} 次`).join('；')}
-              ——网络或数据源异常，已自动重试；仍失败请联系管理员。
+              {Object.entries(health).map(([ch, n]) => `${ch} 数据源近 2 小时连续失败 ${n} 次`).join('；')}
+              ——正在每 30 分钟自动重试，恢复后此提示自动消失。
             </AlertDescription>
           </Alert>
         )}

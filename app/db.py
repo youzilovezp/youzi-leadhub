@@ -224,11 +224,16 @@ def list_jobs(conn: sqlite3.Connection, limit: int = 100) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def seed_fail_streaks(conn: sqlite3.Connection, window: int = 3) -> dict[str, int]:
+def seed_fail_streaks(conn: sqlite3.Connection, window: int = 3,
+                      within_seconds: float | None = None) -> dict[str, int]:
     """每 channel 最近 seed 任务的连续失败次数（health 冒头依据）。
 
     连续 window 次全失败 → streak≥window（前端横幅）；遇到一次成功 → 截断（更
     早的失败不再纳入 streak）。
+
+    within_seconds（2026-10-01）：只统计该时间窗内**结束**的失败——health 横幅
+    用它报「正在发生的连败」，数小时前的旧失败不再永久挂横幅；补种退避路径
+    用默认全量（配 _seed_backing_off 的 TTL 判最近一次失败时刻）。
 
     2026-10-01 修复：之前实现 `streaks[ch] = 0` 在循环里只重置计数器但不 break——
     实际"按时间倒序遍历"会把更早的成功当成"插在中间的截断"，但更早的失败又
@@ -239,9 +244,14 @@ def seed_fail_streaks(conn: sqlite3.Connection, window: int = 3) -> dict[str, in
     """
     streaks: dict[str, int] = {}
     seen_exit: set[str] = set()      # 该 channel 已经见过成功 → 停止累加更早失败
-    rows = conn.execute(
-        "SELECT channel, status FROM job WHERE kind='seed' "
-        "ORDER BY started_at DESC LIMIT 200").fetchall()
+    sql = "SELECT channel, status FROM job WHERE kind='seed'"
+    params: tuple = ()
+    if within_seconds is not None:
+        import time as _t
+        sql += " AND finished_at >= ?"
+        params = (_t.time() - within_seconds,)
+    sql += " ORDER BY started_at DESC LIMIT 200"
+    rows = conn.execute(sql, params).fetchall()
     for r in rows:
         ch, st = r["channel"], r["status"]
         if st == "running":

@@ -525,6 +525,28 @@ class TestDbBoundary:
             assert streaks.get("osm") == 6, \
                 f"streak 被旧成功重置了: got {streaks.get('osm')}"
 
+    def test_seed_fail_streaks_time_window_for_health(self):
+        """2026-10-01 修复：health 横幅口径加时间窗——旧的连败（数小时/数天前）
+        不再永久挂横幅「请联系管理员」；只有近窗口内的连败才算当前事故。
+        补种退避路径不受影响（默认全量 + _seed_backing_off 的 TTL）。"""
+        import tempfile
+        import time as _t
+        from app import db as _db
+        with tempfile.TemporaryDirectory() as td:
+            conn = _db.connect(Path(td) / "t.db")
+            # 3 次失败发生在 3 小时前（已超出 2h 窗口）
+            for i in range(3):
+                _db.insert_job(conn, job_id=f"old-{i}", kind="seed", channel="osm",
+                               pid=10 + i, started_at=100.0 + i)
+                _db.finish_job(conn, f"old-{i}", "failed", 1)
+            conn.execute("UPDATE job SET finished_at=?", (_t.time() - 3 * 3600,))
+            conn.commit()
+            # 近窗口内无失败 → health 不报
+            assert _db.seed_fail_streaks(conn, within_seconds=2 * 3600) == {}
+            # 默认口径（退避用）不受影响：仍统计
+            got = _db.seed_fail_streaks(conn)
+            assert got.get("osm", 0) >= 3, got
+
 
 class TestSpiderBoundary:
 
