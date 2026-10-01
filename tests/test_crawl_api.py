@@ -487,6 +487,47 @@ def _fake_seed_job(channel="play", status="running"):
                           pid=123, started_at=0.0, proc=None, status=status)
 
 
+def test_status_reap_also_chains_seed(tmp_path, monkeypatch):
+    """2026-10-01 修复：get_crawl_status 的 _reap_pass() 抢先收割内存 seed job 时
+    done_seeds 被丢弃 → _auto_chain 永不触发（前端 2-5s 轮询 status，seed 任务
+    退出后几乎必然被 HTTP 线程先收割——实测 09:05 seed-itunes 退出 9 秒后链断）。
+    修：status 端点收割到成功 seed 也走接续（幂等——reaper 线程再触发时被
+    _channel_busy 挡住）。"""
+    from app import db as _dbm
+    (tmp_path / "data").mkdir(exist_ok=True)
+    db_path = tmp_path / "data" / "leads.db"
+    conn = _dbm.connect(db_path)
+    try:
+        _dbm.insert_job(conn, job_id="seed-itunes-x", kind="seed",
+                        channel="itunes", pid=42, started_at=1.0)
+    finally:
+        conn.close()
+    monkeypatch.setattr(crawl_api, "_CWD", tmp_path)
+    (tmp_path / "data" / "seeds-itunes.txt").write_text("https://a.com/\n")
+
+    class _DoneProc:
+        def poll(self):
+            return 0
+    crawl_api._JOBS_RUNNING["seed-itunes-x"] = crawl_api._Job(
+        job_id="seed-itunes-x", channel="itunes", pid=42, started_at=1.0,
+        proc=_DoneProc(), status="running")  # type: ignore[arg-type]
+
+    chained_calls = []
+
+    def fake_spawn(channel, seed_file, limit, max_pages, db_path, mode="incremental",
+                   throttle=None, chained=False):
+        chained_calls.append((channel, mode, chained))
+        return crawl_api._Job(job_id=f"chain-{channel}", channel=channel, pid=7,
+                              started_at=2.0, proc=None, status="running")  # type: ignore[arg-type]
+    monkeypatch.setattr(crawl_api, "_spawn", fake_spawn)
+
+    crawl_api.get_crawl_status()          # HTTP 线程收割 → 必须同点接续
+    check("status 收割成功 seed → 接续增量爬",
+          chained_calls and chained_calls[0][0] == "itunes"
+          and chained_calls[0][2] is True,
+          f"got {chained_calls}")
+
+
 def test_smart_expand_scene_rotates(tmp_path, monkeypatch):
     """定向补种：只 spawn 池尽渠道的计划；轮换指针落在 data/ 内可随库迁移。"""
     calls = []

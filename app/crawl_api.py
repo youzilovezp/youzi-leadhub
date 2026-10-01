@@ -1003,7 +1003,13 @@ def get_crawl_status():
     health 只报**近 2 小时内**连败 ≥3 的渠道（当前事故语义——旧失败不永久挂
     横幅；补种每 30 分钟自动重试，恢复即消）。
     """
-    _reap_pass()  # 有人看板时顺带收割，降低收割线程 5s 延迟的体感
+    # 有人看板时顺带收割，降低收割线程 5s 延迟的体感——但收割到的成功 seed
+    # 必须同点接续（2026-10-01 实测修复）：前端 2-5s 轮询 status，seed 任务退出
+    # 后几乎必然被 HTTP 线程先收割，丢弃 done_seeds 会让 _auto_chain 永不触发
+    # （reaper 再看时 proc=None 已跳过）。幂等：与 reaper 线程并发触发时被
+    # _channel_busy 挡住。
+    for _ch in _reap_pass():
+        _auto_chain(_ch)
     try:
         conn = _db.connect(str(_CWD / "data" / "leads.db"))
         try:
